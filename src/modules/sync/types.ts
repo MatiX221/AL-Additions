@@ -1,5 +1,7 @@
-export const TYPES = ['ANIME', 'MANGA'] as const;
-export type SyncMediaType = (typeof TYPES)[number];
+import { MEDIA_TYPES, type SyncMediaType, type ManualOverride, type ManualOverrideStore } from '../../types';
+
+export const TYPES = MEDIA_TYPES;
+export type { SyncMediaType, ManualOverride, ManualOverrideStore };
 
 export const typeLabel = (t: string): string => (t === 'ANIME' ? 'Anime' : 'Manga');
 
@@ -65,13 +67,3 @@ export interface FlaggedError extends Error {
   status?: number;
   html?: boolean;
 }
-
-export interface ManualOverride {
-  malId: number;
-  type: SyncMediaType;
-  title: string;
-  cover?: string;
-  updatedAt: number;
-}
-
-export type ManualOverrideStore = Record<string, ManualOverride>;

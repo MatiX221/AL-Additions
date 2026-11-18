@@ -8,6 +8,19 @@ export const ANILIST_SESSION_KEYS = [
   'al_token_auth'
 ] as const;
 
+export const MEDIA_TYPES = ['ANIME', 'MANGA'] as const;
+export type SyncMediaType = (typeof MEDIA_TYPES)[number];
+
+export interface ManualOverride {
+  malId: number;
+  type: SyncMediaType;
+  title: string;
+  cover?: string;
+  updatedAt: number;
+}
+
+export type ManualOverrideStore = Record<string, ManualOverride>;
+
 export type CleanupFn = () => void;
 
 export type SettingType = 'toggle' | 'number' | 'select' | 'list' | 'json';

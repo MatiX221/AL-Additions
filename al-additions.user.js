@@ -51,6 +51,14 @@
 	var _GM_xmlhttpRequest = (() => typeof GM_xmlhttpRequest != "undefined" ? GM_xmlhttpRequest : void 0)();
 	var _unsafeWindow = (() => typeof unsafeWindow != "undefined" ? unsafeWindow : void 0)();
 	var SETTING_PREFIX = "ala_setting_";
+	var ANILIST_SESSION_KEYS = [
+		"al_token",
+		"al_username",
+		"al_user_id",
+		"al_score_format",
+		"al_token_auth"
+	];
+	var MEDIA_TYPES = ["ANIME", "MANGA"];
 	location.hostname;
 	var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 	var clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
@@ -455,6 +463,12 @@
 		migrate
 	};
 	var providers = new Map();
+	function registerAccountProvider(provider) {
+		providers.set(provider.id, provider);
+		return () => {
+			if (providers.get(provider.id) === provider) providers.delete(provider.id);
+		};
+	}
 	function getAccountProvider(id) {
 		return providers.get(id);
 	}
@@ -1853,6 +1867,13 @@
 		listEntry: ".entry",
 		shuffleControl: "[title*=\"Random List Entry\" i], [aria-label*=\"Random List Entry\" i]"
 	};
+	function decodeRouteSegment(s) {
+		try {
+			return decodeURIComponent(s);
+		} catch {
+			return s;
+		}
+	}
 	function mediaRoute$1(pathname = location.pathname) {
 		const m = pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
 		return m ? {
@@ -1867,6 +1888,17 @@
 			kind: m[1],
 			id: m[2]
 		} : null;
+	}
+	function isLoggedOutNav(doc = document) {
+		return !!doc?.querySelector?.(ANILIST_SELECTORS.loginNav);
+	}
+	function hasLoggedInNav(doc = document) {
+		return !!doc?.querySelector?.(ANILIST_SELECTORS.loggedInNav);
+	}
+	function navUserName(doc = document) {
+		const href = doc?.querySelector?.(ANILIST_SELECTORS.userNav)?.getAttribute("href");
+		const m = href && href.match(/^\/user\/([^/?#]+)/);
+		return m ? decodeRouteSegment(m[1]) : "";
 	}
 	function findMediaSidebarSpot(doc = document) {
 		const el = doc.querySelector(ANILIST_SELECTORS.sidebarData);
@@ -3835,8 +3867,9 @@
 		const inflightExact = new Map();
 		const inflightEntities = new Map();
 		const ENTITY_TTL = 18e4;
+		const pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 		function getCsrfToken() {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const win = pageWin();
 			if (typeof win.al_token === "string" && win.al_token) return win.al_token;
 			try {
 				const meta = win.document?.querySelector("meta[name=\"csrf-token\"]");
@@ -3851,15 +3884,42 @@
 			} catch (_) {}
 			return null;
 		}
-		function isBrowserLoggedIn() {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const doc = win.document || document;
-			if (doc?.querySelector?.("nav a[href=\"/login\"], .nav a[href=\"/login\"]")) {
-				clearViewer();
-				return false;
+		const clearViewer = () => {
+			CoreHooks.setSessionClearing(true);
+			try {
+				for (const k of ANILIST_SESSION_KEYS) store$1.del(k);
+				CoreHooks.clearAuth();
+			} finally {
+				CoreHooks.setSessionClearing(false);
 			}
+		};
+		function syncFromPage() {
+			const win = pageWin();
+			const doc = win.document || document;
+			if (isLoggedOutNav(doc)) {
+				clearViewer();
+				return;
+			}
+			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+			if (nuxtUser?.id) {
+				const nuxtId = Number(nuxtUser.id);
+				const storedId = Number(store$1.get("al_user_id", 0));
+				if (storedId && storedId !== nuxtId) clearViewer();
+				return;
+			}
+			const navName = navUserName(doc);
+			if (navName) {
+				const storedName = store$1.get("al_username", null);
+				if (storedName && storedName.toLowerCase() !== navName.toLowerCase()) clearViewer();
+			}
+		}
+		function isBrowserLoggedIn() {
+			const win = pageWin();
+			const doc = win.document || document;
+			syncFromPage();
+			if (isLoggedOutNav(doc)) return false;
 			if ((win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user)?.id) return true;
-			if (doc?.querySelector?.("nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .user-wrap .avatar")) return true;
+			if (hasLoggedInNav(doc)) return true;
 			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
 		}
 		const header = (res, name) => {
@@ -3885,7 +3945,7 @@
 		}
 		async function executeNetworkRequest(q, variables, retries, forceFresh = false) {
 			const csrfToken = getCsrfToken();
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const win = pageWin();
 			const fetchFn = (typeof win.fetch === "function" ? win.fetch : fetch).bind(win);
 			const backoff = () => sleep(1500 * (4 - retries));
 			const endpoint = `${win.location?.origin || "https://anilist.co"}/graphql`;
@@ -4050,13 +4110,14 @@
 			return null;
 		}
 		function tryGetCachedMediaList(target, type, userId, userName) {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const win = pageWin();
+			const bridge = CoreHooks.getCacheBridge();
 			const t = type.toUpperCase();
 			const isId = typeof target === "number" || /^\d+$/.test(String(target));
 			const id = userId || (isId ? Number(target) : void 0);
 			const name = userName || (!isId ? String(target).trim().toLowerCase() : void 0);
-			const userMap = win.__ALFL_USER_MAP__;
-			const idMap = win.__ALFL_ID_MAP__;
+			const userMap = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
+			const idMap = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
 			const resolvedId = id || (name && userMap ? userMap.get(name) : void 0);
 			const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0);
 			const entityKeys = [];
@@ -4069,7 +4130,7 @@
 					return formatMediaListResult(cached.data.MediaListCollection);
 				}
 			}
-			const gqlStore = win.__ALFL_GQL_STORE__;
+			const gqlStore = bridge ? bridge.getGqlStore() : win.__ALFL_GQL_STORE__;
 			if (gqlStore) {
 				const gqlKeys = [];
 				if (resolvedId) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
@@ -4127,7 +4188,7 @@
 					} catch (_) {}
 				}
 			}
-			const rpcCache = win.__ALFL_RPC_CACHE__;
+			const rpcCache = bridge ? bridge.getRpcCache() : win.__ALFL_RPC_CACHE__;
 			if (rpcCache) {
 				const rpcKeys = [];
 				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
@@ -4165,12 +4226,13 @@
 				const cached = tryGetCachedMediaList(target, type, userId, userName);
 				if (cached) return cached;
 			}
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const rpcInflight = win.__ALFL_RPC_INFLIGHT__;
+			const win = pageWin();
+			const bridge = CoreHooks.getCacheBridge();
+			const rpcInflight = bridge ? bridge.getRpcInflight() : win.__ALFL_RPC_INFLIGHT__;
 			if (rpcInflight && !options?.forceFresh) {
 				const t = type.toUpperCase();
-				const userMap = win.__ALFL_USER_MAP__;
-				const idMap = win.__ALFL_ID_MAP__;
+				const userMap = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
+				const idMap = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
 				const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : void 0);
 				const resolvedName = userName ? userName.toLowerCase() : resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0;
 				const rpcKeys = [];
@@ -4246,17 +4308,9 @@
 			return formatMediaListResult(mlc);
 		}
 		async function viewer(forceFresh = false) {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			if ((win.document || document)?.querySelector?.("nav a[href=\"/login\"], .nav a[href=\"/login\"]")) {
-				clearViewer();
-				return null;
-			}
-			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-			if (nuxtUser?.id) {
-				const nuxtId = Number(nuxtUser.id);
-				const storedId = Number(store$1.get("al_user_id", 0));
-				if (storedId && storedId !== nuxtId) clearViewer();
-			}
+			const doc = pageWin().document || document;
+			syncFromPage();
+			if (isLoggedOutNav(doc)) return null;
 			if (!forceFresh) {
 				const name = store$1.get("al_username", null);
 				const fmt = store$1.get("al_score_format", null);
@@ -4284,11 +4338,6 @@
 			}
 			return null;
 		}
-		const clearViewer = () => {
-			store$1.del("al_username");
-			store$1.del("al_user_id");
-			store$1.del("al_score_format");
-		};
 		const invalidate = (entityKeyPrefix) => {
 			if (!entityKeyPrefix) {
 				entityCache.clear();
@@ -4297,7 +4346,9 @@
 				for (const k of entityCache.keys()) if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
 				for (const k of inflightEntities.keys()) if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
 			}
-			(typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window).__ALFL_CLEAR__?.();
+			const bridge = CoreHooks.getCacheBridge();
+			if (bridge) bridge.clear();
+			else pageWin().__ALFL_CLEAR__?.();
 		};
 		const invalidateMediaList = (target, type) => {
 			if (!target) return invalidate("MediaListCollection");
@@ -4315,7 +4366,12 @@
 			invalidate,
 			invalidateMediaList,
 			hasAuth,
-			resumeAt
+			resumeAt,
+			session: {
+				hasAuth,
+				clear: clearViewer,
+				syncFromPage
+			}
 		};
 	})();
 	var MediaData = (() => {
@@ -4355,6 +4411,10 @@
 			save
 		};
 	})();
+	var anilistApiClient = {
+		...AniList,
+		media: MediaData
+	};
 	var STATUSES = [
 		"Completed",
 		"Planning",
@@ -5402,6 +5462,13 @@
 		],
 		setup: () => {}
 	});
+	var builtInRunning = new Set();
+	var markBuiltIn = (id) => {
+		builtInRunning.add(id);
+	};
+	var isBuiltInRunning = (id) => builtInRunning.has(id);
+	var CACHE_MS = 3e4;
+	var cache = new Map();
 	var STANDALONE = {
 		fastLoad: {
 			name: "AniList Fast Load",
@@ -5414,14 +5481,10 @@
 	};
 	var STANDALONE_IDS_LIST = Object.keys(STANDALONE);
 	var PROBE_ATTR$1 = "data-ala-probe";
-	var builtInRunning = new Set();
-	var markBuiltIn = (id) => {
-		builtInRunning.add(id);
-	};
 	var pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 	function detectFastLoad() {
 		const w = pageWin();
-		return !!(w.__ANILIST_FAST_LOAD__ || w.__ANILIST_FAST_LOAD_V4__) && !builtInRunning.has("fastLoad");
+		return !!(w.__ANILIST_FAST_LOAD__ || w.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning("fastLoad");
 	}
 	async function probeTierLabels(timeoutMs = 600) {
 		if (!document.body) return false;
@@ -5443,12 +5506,11 @@
 			probe.remove();
 		}
 	}
-	var CACHE_MS = 3e4;
-	var cache = new Map();
-	function detectStandalone(id) {
+	function detectStandalone(id, probe, cacheMs = CACHE_MS) {
 		const hit = cache.get(id);
-		if (hit && Date.now() - hit.at < CACHE_MS) return hit.result;
-		const result = (id === "fastLoad" ? Promise.resolve(detectFastLoad()) : probeTierLabels()).catch(() => false);
+		if (hit && Date.now() - hit.at < cacheMs) return hit.result;
+		const runner = probe || (id === "fastLoad" ? detectFastLoad : id === "tierLabels" ? probeTierLabels : () => false);
+		const result = Promise.resolve().then(() => runner()).then(Boolean).catch(() => false);
 		cache.set(id, {
 			at: Date.now(),
 			result
@@ -7859,6 +7921,10 @@
 		}
 	});
 	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
+	var MANUAL_OVERRIDES_ENABLED_KEY = "manualOverridesEnabled";
+	function isManualOverridesEnabled() {
+		return parseToggle(store$1.get(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, false));
+	}
 	function getManualOverrides() {
 		let raw = store$1.get(SETTING_PREFIX + OVERRIDES_SETTING_KEY, {});
 		if (typeof raw === "string") try {
@@ -7871,11 +7937,9 @@
 	}
 	function saveManualOverrides(overrides) {
 		store$1.set(SETTING_PREFIX + OVERRIDES_SETTING_KEY, overrides);
-		const hiddenInput = document.querySelector(`#ala-settings-panel input[data-key="${OVERRIDES_SETTING_KEY}"]`);
-		if (hiddenInput) hiddenInput.value = JSON.stringify(overrides);
 	}
 	function getOverride(mediaId) {
-		if (!mediaId) return void 0;
+		if (!mediaId || !isManualOverridesEnabled()) return void 0;
 		return getManualOverrides()[String(mediaId)];
 	}
 	function setOverride(mediaId, data) {
@@ -8031,43 +8095,41 @@
 	var MAL_API = "https://api.myanimelist.net/v2";
 	var MAL_REDIRECT = "https://myanimelist.net/";
 	var MAL_CLIENT_ID = "f8197fe8cb24188073de4c0227307edf";
+	var MAL_SECRET_KEYS = [
+		"mal_code_verifier",
+		"mal_token",
+		"mal_refresh_token",
+		"mal_expires_at"
+	];
 	var hooks = {};
 	var logLines = [];
 	var lastNotice = "";
+	var uiSink = null;
 	function log(msg, level = "info") {
-		const time = new Date().toLocaleTimeString([], {
+		const line = `${new Date().toLocaleTimeString([], {
 			hour: "2-digit",
 			minute: "2-digit",
 			second: "2-digit"
-		});
-		const marker = level === "error" ? "ERROR" : level === "warn" ? "WARN " : level === "success" ? "OK   " : "INFO ";
-		logLines.unshift(`${time}  ${marker} ${String(msg)}`);
+		})}  ${level === "error" ? "ERROR" : level === "warn" ? "WARN " : level === "success" ? "OK   " : "INFO "} ${String(msg)}`;
+		logLines.unshift(line);
 		logLines = logLines.slice(0, 60);
 		console[level === "error" ? "error" : level === "warn" ? "warn" : "log"]("[AL→MAL Sync]", msg);
 		lastNotice = String(msg);
-		const box = document.getElementById("almal-log");
-		const hint = document.getElementById("almal-hint");
-		if (box) box.textContent = logLines.join("\n");
-		if (hint) hint.textContent = lastNotice;
+		uiSink?.onLog?.({
+			line,
+			message: lastNotice,
+			level
+		});
 	}
 	function toast(msg, isError, closeTab) {
-		log(msg);
-		Core.ready(() => {
-			let t = document.getElementById("almal-toast");
-			if (!t) {
-				t = document.createElement("div");
-				t.id = "almal-toast";
-				t.style.cssText = "position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:3px;color:#fff;font-size:1.2rem;z-index:999999;box-shadow:0 4px 16px rgba(0,0,0,.45)";
-				document.body.appendChild(t);
-			}
-			t.textContent = msg;
-			t.style.background = isError ? "#b23b3b" : "#2f8f5b";
-			t.style.display = "block";
-			clearTimeout(t._hide);
-			t._hide = setTimeout(() => {
-				if (t) t.style.display = "none";
-			}, 6e3);
-			if (closeTab) setTimeout(() => safe(() => window.close()), 1800);
+		log(msg, isError ? "error" : "info");
+		if (uiSink?.onToast) {
+			uiSink.onToast(msg, isError, closeTab);
+			return;
+		}
+		showToast(msg, {
+			type: isError ? "error" : "success",
+			closeTab
 		});
 	}
 	var clearMalAuth = () => {
@@ -8151,6 +8213,15 @@
 			}).catch((e) => toast("MAL connection failed: " + e.message, true));
 		}
 	}
+	registerAccountProvider({
+		id: "mal",
+		name: "MyAnimeList",
+		secretKeys: MAL_SECRET_KEYS,
+		isConnected: () => !!store$1.get("mal_token", null),
+		connect: () => malConnect(),
+		disconnect: () => clearMalAuth(),
+		onAuthCallback: () => captureCredentials()
+	});
 	var malLimiter = new RateLimiter({
 		rate: 60,
 		min: 12,
@@ -8359,7 +8430,7 @@
 		}
 		return 0;
 	}
-	var TYPES = ["ANIME", "MANGA"];
+	var TYPES = MEDIA_TYPES;
 	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
 	var SETTLED_TTL_MS = 3888e6;
 	var LOCK_STALE_MS = 45e3;
@@ -12806,22 +12877,11 @@
 		});
 	}
 	configureCoreServices({
-		api: {
-			...AniList,
-			media: MediaData,
-			session: {
-				hasAuth: AniList.hasAuth,
-				clear: AniList.clearViewer
-			}
-		},
-		session: {
-			hasAuth: AniList.hasAuth,
-			clear: AniList.clearViewer
-		}
+		api: anilistApiClient,
+		session: AniList.session
 	});
 	registerShellModule("settings", initSettingsPage);
 	runMigrations();
-	safe(captureCredentials, "credential capture");
 	runAccountAuthCallbacks();
 	startModules(true);
 	Core.ready(() => startModules(false));

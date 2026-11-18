@@ -10,7 +10,7 @@ import {
 } from '../src/modules/sync/targets';
 import { stores, ID_MISS_TTL_MS } from '../src/modules/sync/state';
 import { searchMalId, log } from '../src/api/mal';
-import { getOverride } from '../src/modules/sync/overrides';
+import { getOverride } from '../src/api/malOverrides';
 import type { AniListSyncEntry, SyncCounters } from '../src/modules/sync/types';
 
 vi.mock('../src/api/mal', () => ({
@@ -18,7 +18,7 @@ vi.mock('../src/api/mal', () => ({
   log: vi.fn()
 }));
 
-vi.mock('../src/modules/sync/overrides', () => ({
+vi.mock('../src/api/malOverrides', () => ({
   getOverride: vi.fn()
 }));
 

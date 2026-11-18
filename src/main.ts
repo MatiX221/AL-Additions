@@ -8,23 +8,12 @@ import {
   startModules
 } from './core/registry';
 import { runAccountAuthCallbacks } from './core/accounts';
-import { AniList, MediaData } from './api/anilist';
-import { captureCredentials } from './api/mal';
-import { safe } from './utils/helpers';
+import { AniList, anilistApiClient } from './api/anilist';
+import './api/mal';
 
 configureCoreServices({
-  api: {
-    ...AniList,
-    media: MediaData,
-    session: {
-      hasAuth: AniList.hasAuth,
-      clear: AniList.clearViewer
-    }
-  },
-  session: {
-    hasAuth: AniList.hasAuth,
-    clear: AniList.clearViewer
-  }
+  api: anilistApiClient,
+  session: AniList.session
 });
 
 import.meta.glob('./modules/*/index.ts', { eager: true });
@@ -32,7 +21,6 @@ import.meta.glob('./modules/*/index.ts', { eager: true });
 registerShellModule('settings', initSettingsPage);
 
 runMigrations();
-safe(captureCredentials, 'credential capture');
 void runAccountAuthCallbacks();
 startModules(true);
 Core.ready(() => startModules(false));

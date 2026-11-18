@@ -10,16 +10,15 @@ const KNOWN_VIOLATIONS: string[] = [
   'modules/compareView/index.ts -> core/styles.ts',
   'modules/nyaa/index.ts -> core/observer.ts',
   'modules/nyaa/index.ts -> core/styles.ts',
-  'modules/nyaa/index.ts -> modules/sync/overrides.ts',
   'modules/nyaa/index.ts -> modules/sync/overridesModal.ts',
   'modules/sync/index.ts -> settings/backup.ts',
   'modules/sync/overridesModal.ts -> core/styles.ts',
   'modules/sync/panel.ts -> core/observer.ts',
   'modules/sync/panel.ts -> core/styles.ts',
   'settings/panel.ts -> api/mal.ts',
+  'settings/panel.ts -> api/malOverrides.ts',
   'settings/panel.ts -> modules/anisongs/anisongModal.ts',
   'settings/panel.ts -> modules/sync/engine.ts',
-  'settings/panel.ts -> modules/sync/overrides.ts',
   'settings/panel.ts -> modules/sync/overridesModal.ts',
   'settings/panel.ts -> modules/tierLabels/tierModal.ts'
 ];

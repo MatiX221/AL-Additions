@@ -12,7 +12,7 @@ import { promptPasswordModal } from './passwordModal';
 import type { SettingRow, RegisteredFeature } from '../types';
 import { openTierEditor } from '../modules/tierLabels/tierModal';
 import { openOverridesModal } from '../modules/sync/overridesModal';
-import { OVERRIDES_SETTING_KEY, getManualOverrides } from '../modules/sync/overrides';
+import { OVERRIDES_SETTING_KEY, getManualOverrides } from '../api/malOverrides';
 import { openAniSongsModal } from '../modules/anisongs/anisongModal';
 
 const PINNED_FIRST = ['Sync', 'General'];

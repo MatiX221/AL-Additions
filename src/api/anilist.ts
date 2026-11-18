@@ -1,6 +1,11 @@
-import { RateLimiter } from '../utils/limiter';
-import { store, sleep, authError, logDebug } from '../utils/helpers';
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
+import { CoreHooks } from '../core/bus';
+import { ANILIST_SESSION_KEYS, type AniListClient, type AniListSession } from '../types';
+import { hasLoggedInNav, isLoggedOutNav, navUserName } from '../utils/anilistDom';
+import { authError, logDebug, sleep, store } from '../utils/helpers';
+import { RateLimiter } from '../utils/limiter';
+
+export type { AniListClient, AniListSession };
 
 export interface ViewerInfo {
   id: number;
@@ -192,8 +197,10 @@ export const AniList = (() => {
   const inflightEntities = new Map<string, InflightEntity>();
   const ENTITY_TTL = 3 * 60_000;
 
+  const pageWin = (): any => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+
   function getCsrfToken(): string | null {
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
+    const win = pageWin();
     if (typeof win.al_token === 'string' && win.al_token) return win.al_token;
     try {
       const meta = win.document?.querySelector('meta[name="csrf-token"]');
@@ -209,16 +216,55 @@ export const AniList = (() => {
     return null;
   }
 
-  function isBrowserLoggedIn(): boolean {
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-    const doc = win.document || document;
-    if (doc?.querySelector?.('nav a[href="/login"], .nav a[href="/login"]')) {
+  const clearViewer = (): void => {
+    CoreHooks.setSessionClearing(true);
+    try {
+      for (const k of ANILIST_SESSION_KEYS) {
+        store.del(k);
+      }
+      CoreHooks.clearAuth();
+    } finally {
+      CoreHooks.setSessionClearing(false);
+    }
+  };
+
+  function syncFromPage(): void {
+    const win = pageWin();
+    const doc = (win.document || document) as Document;
+
+    // Pass 1: Explicit logged-out nav or NUXT viewer mismatch
+    if (isLoggedOutNav(doc)) {
       clearViewer();
-      return false;
+      return;
     }
     const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+    if (nuxtUser?.id) {
+      const nuxtId = Number(nuxtUser.id);
+      const storedId = Number(store.get('al_user_id', 0));
+      if (storedId && storedId !== nuxtId) {
+        clearViewer();
+      }
+      return;
+    }
+
+    // Pass 2: Nav profile link user name mismatch fallback
+    const navName = navUserName(doc);
+    if (navName) {
+      const storedName = store.get<string | null>('al_username', null);
+      if (storedName && storedName.toLowerCase() !== navName.toLowerCase()) {
+        clearViewer();
+      }
+    }
+  }
+
+  function isBrowserLoggedIn(): boolean {
+    const win = pageWin();
+    const doc = (win.document || document) as Document;
+    syncFromPage();
+    if (isLoggedOutNav(doc)) return false;
+    const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
     if (nuxtUser?.id) return true;
-    if (doc?.querySelector?.('nav a[href^="/user/"], .nav-wrap a[href^="/user/"], .user-wrap .avatar')) return true;
+    if (hasLoggedInNav(doc)) return true;
     return Boolean(Number(store.get('al_user_id', 0)) > 0 && store.get('al_username', null));
   }
 
@@ -253,7 +299,7 @@ export const AniList = (() => {
     forceFresh = false
   ): Promise<T> {
     const csrfToken = getCsrfToken();
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
+    const win = pageWin();
     const fetchFn = (typeof win.fetch === 'function' ? win.fetch : fetch).bind(win);
     const backoff = () => sleep(1500 * (4 - retries));
 
@@ -489,14 +535,15 @@ export const AniList = (() => {
     userId?: number,
     userName?: string
   ): MediaListResult | null {
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
+    const win = pageWin();
+    const bridge = CoreHooks.getCacheBridge();
     const t = type.toUpperCase();
     const isId = typeof target === 'number' || /^\d+$/.test(String(target));
     const id = userId || (isId ? Number(target) : undefined);
     const name = userName || (!isId ? String(target).trim().toLowerCase() : undefined);
 
-    const userMap: Map<string, number> | undefined = win.__ALFL_USER_MAP__;
-    const idMap: Map<number, string> | undefined = win.__ALFL_ID_MAP__;
+    const userMap: Map<string, number> | undefined = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
+    const idMap: Map<number, string> | undefined = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
 
     const resolvedId = id || (name && userMap ? userMap.get(name) : undefined);
     const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : undefined);
@@ -514,7 +561,9 @@ export const AniList = (() => {
     }
 
     // 2. Check FastLoad GQL Store (Fetch responses intercepted by FastLoad)
-    const gqlStore: Map<string, { time: number; snap: any }> | undefined = win.__ALFL_GQL_STORE__;
+    const gqlStore: Map<string, { time: number; snap: any }> | undefined = bridge
+      ? bridge.getGqlStore()
+      : win.__ALFL_GQL_STORE__;
     if (gqlStore) {
       const gqlKeys: string[] = [];
       if (resolvedId) {
@@ -591,7 +640,9 @@ export const AniList = (() => {
     }
 
     // 3. Check FastLoad RPC Cache (Prefetched by Web Worker)
-    const rpcCache: Map<string, { time: number; msg: any }> | undefined = win.__ALFL_RPC_CACHE__;
+    const rpcCache: Map<string, { time: number; msg: any }> | undefined = bridge
+      ? bridge.getRpcCache()
+      : win.__ALFL_RPC_CACHE__;
     if (rpcCache) {
       const rpcKeys: string[] = [];
       if (resolvedId) {
@@ -647,12 +698,15 @@ export const AniList = (() => {
       }
     }
 
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-    const rpcInflight: Map<string, { promise: Promise<any> }> | undefined = win.__ALFL_RPC_INFLIGHT__;
+    const win = pageWin();
+    const bridge = CoreHooks.getCacheBridge();
+    const rpcInflight: Map<string, { promise: Promise<any> }> | undefined = bridge
+      ? bridge.getRpcInflight()
+      : win.__ALFL_RPC_INFLIGHT__;
     if (rpcInflight && !options?.forceFresh) {
       const t = type.toUpperCase();
-      const userMap: Map<string, number> | undefined = win.__ALFL_USER_MAP__;
-      const idMap: Map<number, string> | undefined = win.__ALFL_ID_MAP__;
+      const userMap: Map<string, number> | undefined = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
+      const idMap: Map<number, string> | undefined = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
       const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : undefined);
       const resolvedName = userName ? userName.toLowerCase() : (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : undefined);
 
@@ -751,19 +805,10 @@ export const AniList = (() => {
   }
 
   async function viewer(forceFresh = false): Promise<ViewerInfo | null> {
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-    const doc = win.document || document;
-    if (doc?.querySelector?.('nav a[href="/login"], .nav a[href="/login"]')) {
-      clearViewer();
+    const doc = (pageWin().document || document) as Document;
+    syncFromPage();
+    if (isLoggedOutNav(doc)) {
       return null;
-    }
-    const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-    if (nuxtUser?.id) {
-      const nuxtId = Number(nuxtUser.id);
-      const storedId = Number(store.get('al_user_id', 0));
-      if (storedId && storedId !== nuxtId) {
-        clearViewer();
-      }
     }
 
     if (!forceFresh) {
@@ -791,12 +836,6 @@ export const AniList = (() => {
     return null;
   }
 
-  const clearViewer = (): void => {
-    store.del('al_username');
-    store.del('al_user_id');
-    store.del('al_score_format');
-  };
-
   const invalidate = (entityKeyPrefix?: string): void => {
     if (!entityKeyPrefix) {
       entityCache.clear();
@@ -810,8 +849,13 @@ export const AniList = (() => {
       }
     }
 
-    const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-    win.__ALFL_CLEAR__?.();
+    const bridge = CoreHooks.getCacheBridge();
+    if (bridge) {
+      bridge.clear();
+    } else {
+      const win = pageWin();
+      win.__ALFL_CLEAR__?.();
+    }
   };
 
   const invalidateMediaList = (target?: number | string, type?: 'ANIME' | 'MANGA'): void => {
@@ -824,6 +868,12 @@ export const AniList = (() => {
   const hasAuth = (): boolean => isBrowserLoggedIn();
   const resumeAt = (): number => limiter.resumeAt;
 
+  const session: AniListSession = {
+    hasAuth,
+    clear: clearViewer,
+    syncFromPage
+  };
+
   return {
     query,
     getMediaList,
@@ -832,7 +882,8 @@ export const AniList = (() => {
     invalidate,
     invalidateMediaList,
     hasAuth,
-    resumeAt
+    resumeAt,
+    session
   };
 })();
 
@@ -885,3 +936,8 @@ export const MediaData = (() => {
 
   return { get, save };
 })();
+
+export const anilistApiClient: AniListClient = {
+  ...AniList,
+  media: MediaData
+};

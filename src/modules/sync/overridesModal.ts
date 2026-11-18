@@ -10,7 +10,7 @@ import {
   refreshStaleOverrides,
   saveManualOverrides,
   importOverrides
-} from './overrides';
+} from '../../api/malOverrides';
 import { SyncMediaType } from './types';
 
 const MODAL_ID = 'ala-overrides-backdrop';

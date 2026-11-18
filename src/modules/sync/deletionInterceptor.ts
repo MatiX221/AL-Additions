@@ -5,7 +5,7 @@ import { log } from '../../api/mal';
 import { logDebug } from '../../utils/helpers';
 import { stores, addPendingDelete, removePendingDelete } from './state';
 import { SyncMediaType, typeLabel } from './types';
-import { getOverride } from './overrides';
+import { getOverride } from '../../api/malOverrides';
 
 let activeCandidate: { mediaId: number; type: SyncMediaType; title: string; malId?: number } | null = null;
 

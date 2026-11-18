@@ -3,7 +3,7 @@ import { searchMalId, log } from '../../api/mal';
 import { stores, markDone, ID_MISS_TTL_MS } from './state';
 import { STATUS_MAP } from './reconcile';
 import { SyncMediaType, AniListSyncEntry, SyncTarget, SyncCounters, typeLabel } from './types';
-import { getOverride } from './overrides';
+import { getOverride } from '../../api/malOverrides';
 
 export function buildTitleIndex(mal: Record<number, any>): Map<string, number> {
   const idx = new Map<string, number>();

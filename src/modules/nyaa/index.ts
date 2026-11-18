@@ -6,7 +6,7 @@ import { addStyle } from '../../core/styles';
 import { icon, mediaRoute } from '../../utils/dom';
 import { openTab, debounce } from '../../utils/helpers';
 import type { MediaRoute } from '../../types';
-import { getEffectiveMalId, isIgnored } from '../sync/overrides';
+import { getEffectiveMalId, isIgnored } from '../../api/malOverrides';
 import { openQuickOverrideModal } from '../sync/overridesModal';
 
 defineFeature(

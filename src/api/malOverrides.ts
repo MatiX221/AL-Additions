@@ -1,12 +1,16 @@
-import { store } from '../../utils/helpers';
-import { AniList } from '../../api/anilist';
-import { PREFIX } from '../../settings/settings';
-import { ManualOverride, ManualOverrideStore, SyncMediaType } from './types';
+import { SETTING_PREFIX, type ManualOverride, type ManualOverrideStore, type SyncMediaType } from '../types';
+import { parseToggle, store } from '../utils/helpers';
+import { AniList } from './anilist';
 
 export const OVERRIDES_SETTING_KEY = 'syncManualOverrides';
+export const MANUAL_OVERRIDES_ENABLED_KEY = 'manualOverridesEnabled';
+
+export function isManualOverridesEnabled(): boolean {
+  return parseToggle(store.get(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, false));
+}
 
 export function getManualOverrides(): ManualOverrideStore {
-  let raw = store.get<any>(PREFIX + OVERRIDES_SETTING_KEY, {});
+  let raw = store.get<any>(SETTING_PREFIX + OVERRIDES_SETTING_KEY, {});
   if (typeof raw === 'string') {
     try {
       raw = JSON.parse(raw);
@@ -19,17 +23,11 @@ export function getManualOverrides(): ManualOverrideStore {
 }
 
 export function saveManualOverrides(overrides: ManualOverrideStore): void {
-  store.set(PREFIX + OVERRIDES_SETTING_KEY, overrides);
-  const hiddenInput = document.querySelector<HTMLInputElement>(
-    `#ala-settings-panel input[data-key="${OVERRIDES_SETTING_KEY}"]`
-  );
-  if (hiddenInput) {
-    hiddenInput.value = JSON.stringify(overrides);
-  }
+  store.set(SETTING_PREFIX + OVERRIDES_SETTING_KEY, overrides);
 }
 
 export function getOverride(mediaId: number): ManualOverride | undefined {
-  if (!mediaId) return undefined;
+  if (!mediaId || !isManualOverridesEnabled()) return undefined;
   return getManualOverrides()[String(mediaId)];
 }
 

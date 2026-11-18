@@ -1,7 +1,8 @@
+import { registerAccountProvider } from '../core/accounts';
+import { showToast } from '../core/toast';
+import { authError, gm, logDebug, memo, openTab, randomString, sleep, store } from '../utils/helpers';
 import { RateLimiter } from '../utils/limiter';
-import { store, gm, sleep, memo, openTab, authError, safe, randomString, logDebug } from '../utils/helpers';
 import { strictTitle } from '../utils/matching';
-import { Core } from '../core/observer';
 
 export const MAL_AUTH_URL = 'https://myanimelist.net/v1/oauth2/authorize';
 export const MAL_TOKEN_URL = 'https://myanimelist.net/v1/oauth2/token';
@@ -9,45 +10,51 @@ export const MAL_API = 'https://api.myanimelist.net/v2';
 export const MAL_REDIRECT = 'https://myanimelist.net/';
 export const MAL_CLIENT_ID = 'f8197fe8cb24188073de4c0227307edf';
 export const MAL_CLIENT_SECRET = '';
+export const MAL_SECRET_KEYS = [
+  'mal_code_verifier',
+  'mal_token',
+  'mal_refresh_token',
+  'mal_expires_at'
+] as const;
+
 export const hooks: { checkCancel?: () => void } = {};
 
 export let logLines: string[] = [];
 export let lastNotice = '';
 
+export interface MalUiSink {
+  onLog?: (entry: { line: string; message: string; level: 'info' | 'warn' | 'error' | 'success' }) => void;
+  onToast?: (msg: string, isError?: boolean, closeTab?: boolean) => void;
+}
+
+let uiSink: MalUiSink | null = null;
+
+export function setMalUiSink(sink: MalUiSink | null): () => void {
+  uiSink = sink;
+  return () => {
+    if (uiSink === sink) uiSink = null;
+  };
+}
+
 export function log(msg: any, level: 'info' | 'warn' | 'error' | 'success' = 'info'): void {
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const marker = level === 'error' ? 'ERROR' : level === 'warn' ? 'WARN ' : level === 'success' ? 'OK   ' : 'INFO ';
-  logLines.unshift(`${time}  ${marker} ${String(msg)}`);
+  const line = `${time}  ${marker} ${String(msg)}`;
+  logLines.unshift(line);
   logLines = logLines.slice(0, 60);
   const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
   console[method]('[AL→MAL Sync]', msg);
   lastNotice = String(msg);
-  const box = document.getElementById('almal-log');
-  const hint = document.getElementById('almal-hint');
-  if (box) box.textContent = logLines.join('\n');
-  if (hint) hint.textContent = lastNotice;
+  uiSink?.onLog?.({ line, message: lastNotice, level });
 }
 
 export function toast(msg: string, isError?: boolean, closeTab?: boolean): void {
-  log(msg);
-  Core.ready(() => {
-    let t = document.getElementById('almal-toast');
-    if (!t) {
-      t = document.createElement('div');
-      t.id = 'almal-toast';
-      t.style.cssText =
-        'position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:3px;color:#fff;font-size:1.2rem;z-index:999999;box-shadow:0 4px 16px rgba(0,0,0,.45)';
-      document.body.appendChild(t);
-    }
-    t.textContent = msg;
-    t.style.background = isError ? '#b23b3b' : '#2f8f5b';
-    t.style.display = 'block';
-    clearTimeout((t as any)._hide);
-    (t as any)._hide = setTimeout(() => {
-      if (t) t.style.display = 'none';
-    }, 6000);
-    if (closeTab) setTimeout(() => safe(() => window.close()), 1800);
-  });
+  log(msg, isError ? 'error' : 'info');
+  if (uiSink?.onToast) {
+    uiSink.onToast(msg, isError, closeTab);
+    return;
+  }
+  showToast(msg, { type: isError ? 'error' : 'success', closeTab });
 }
 
 export const clearMalAuth = (): void => {
@@ -118,8 +125,7 @@ export function malConnect(): void {
 }
 
 export function captureCredentials(): void {
-  const HOST = location.hostname;
-  if (HOST === 'myanimelist.net') {
+  if (location.hostname === 'myanimelist.net') {
     const code = new URLSearchParams(location.search).get('code');
     if (!code || !store.get('mal_code_verifier')) return;
     exchangeMalCode(code)
@@ -133,6 +139,16 @@ export function captureCredentials(): void {
       .catch((e) => toast('MAL connection failed: ' + e.message, true));
   }
 }
+
+registerAccountProvider({
+  id: 'mal',
+  name: 'MyAnimeList',
+  secretKeys: MAL_SECRET_KEYS,
+  isConnected: () => !!store.get('mal_token', null),
+  connect: () => malConnect(),
+  disconnect: () => clearMalAuth(),
+  onAuthCallback: () => captureCredentials()
+});
 
 export const malLimiter = new RateLimiter({
   rate: 60,
