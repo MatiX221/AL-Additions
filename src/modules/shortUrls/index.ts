@@ -1,17 +1,16 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
+import { defineModule } from '../../core/registry';
 
-defineFeature(
-  {
-    id: 'removeTitle',
-    key: 'linkShortenerEnabled',
-    section: 'AniList Enhancements',
-    def: false,
-    legacy: ['linkShortenerEnabled', 'shortAniListUrlsEnabled', 'shortAniListUrls'],
-    title: 'Short AniList URLs',
-    help: 'Remove the title slug from AniList anime, manga, staff, and character URLs.'
-  },
-  () => {
+defineModule({
+  id: 'removeTitle',
+  key: 'linkShortenerEnabled',
+  section: 'AniList Enhancements',
+  layer: 'preload',
+  requiresReload: true,
+  def: false,
+  legacy: ['linkShortenerEnabled', 'shortAniListUrlsEnabled', 'shortAniListUrls'],
+  title: 'Short AniList URLs',
+  help: 'Remove the title slug from AniList anime, manga, staff, and character URLs.',
+  setup(ctx) {
     const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
     // Only strip when the slug is the final path segment, so sub-pages such as
     // /anime/1/slug/characters keep their full path and continue to work.
@@ -26,7 +25,7 @@ defineFeature(
         return;
       const cur = location.pathname + location.search + location.hash;
       const next = strip(cur.replace(/^https:\/\/anilist\.co/, ''));
-      if (cur !== next) Core.silently(() => history.replaceState(history.state, '', next));
+      if (cur !== next) ctx.silently(() => history.replaceState(history.state, '', next));
     }
 
     function fixLinks(nodes: NodeList | Node[] | ArrayLike<Node>): void {
@@ -42,10 +41,10 @@ defineFeature(
     }
 
     fixLocation();
-    Core.onNavigate(fixLocation);
-    Core.onBodyMutation((muts) => {
+    ctx.onNav(fixLocation);
+    ctx.onBodyMutation((muts) => {
       for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
     });
-    Core.ready(() => fixLinks([document.body]));
+    ctx.ready(() => fixLinks([document.body]));
   }
-);
+});

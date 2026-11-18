@@ -1,8 +1,6 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
+import { defineModule } from '../../core/registry';
 import { Settings, PREFIX } from '../../settings/settings';
-import { addStyle } from '../../core/styles';
-import { store, logDebug } from '../../utils/helpers';
+import { store } from '../../utils/helpers';
 import { detectStandalone } from '../../utils/standalone';
 import { PROBE_ATTR, DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from './tiers';
 
@@ -14,62 +12,70 @@ export function getValidTiers(): TierConfig[] {
   return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 }
 
-defineFeature(
-  {
-    id: 'tierLabels',
-    key: 'tierLabelsEnabled',
-    section: 'AniList Enhancements',
-    def: false,
-    legacy: ['tierLabelsEnabled'],
-    title: 'AniList Tier Labels',
-    help: 'Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.',
-    options: [
-      {
-        key: 'tierLabelsColorScore',
-        type: 'toggle',
-        def: true,
-        title: 'Color score value',
-        help: 'Color the score number text to match its tier badge.'
-      },
-      {
-        key: 'tierLabelsAverageScore',
-        type: 'toggle',
-        def: false,
-        title: 'Show on Weighted Score',
-        help: 'Display tier badge next to the Weighted Score on media pages.'
-      },
-      {
-        key: 'tierLabels',
-        type: 'json',
-        def: DEFAULT_TIERS,
-        title: 'Tier Ranges & Colors',
-        help: 'Customize score ranges, badge labels, and colors.',
-        validate: validateTiers
-      }
-    ]
-  },
-  () => {
-    // Migrate settings from standalone AniList Tier Labels userscript if present
-    try {
-      const legacy = localStorage.getItem('anilistTierLabelsSettings');
-      if (legacy) {
-        const parsed = JSON.parse(legacy);
-        if (Array.isArray(parsed.tiers) && parsed.tiers.length && store.get(PREFIX + 'tierLabels', null) === null) {
-          const check = validateTiers(parsed.tiers);
-          if (check.valid && check.tiers) {
-            store.set(PREFIX + 'tierLabels', check.tiers);
-          }
-        }
-        if (
-          typeof parsed.enableRatingTextColor === 'boolean' &&
-          store.get(PREFIX + 'tierLabelsColorScore', null) === null
-        ) {
-          store.set(PREFIX + 'tierLabelsColorScore', parsed.enableRatingTextColor);
+function migrateLegacyTierLabels(): void {
+  try {
+    const legacy = localStorage.getItem('anilistTierLabelsSettings');
+    if (legacy) {
+      const parsed = JSON.parse(legacy);
+      if (Array.isArray(parsed.tiers) && parsed.tiers.length && store.get(PREFIX + 'tierLabels', null) === null) {
+        const check = validateTiers(parsed.tiers);
+        if (check.valid && check.tiers) {
+          store.set(PREFIX + 'tierLabels', check.tiers);
         }
       }
-    } catch (_) {}
+      if (
+        typeof parsed.enableRatingTextColor === 'boolean' &&
+        store.get(PREFIX + 'tierLabelsColorScore', null) === null
+      ) {
+        store.set(PREFIX + 'tierLabelsColorScore', parsed.enableRatingTextColor);
+      }
+    }
+  } catch (_) {}
+}
 
-    addStyle(
+defineModule({
+  id: 'tierLabels',
+  key: 'tierLabelsEnabled',
+  section: 'AniList Enhancements',
+  layer: 'feature',
+  requiresReload: true,
+  def: false,
+  legacy: ['tierLabelsEnabled'],
+  title: 'AniList Tier Labels',
+  help: 'Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.',
+  standalone: {
+    name: 'AniList Tier Labels',
+    probe: () => detectStandalone('tierLabels')
+  },
+  options: [
+    {
+      key: 'tierLabelsColorScore',
+      type: 'toggle',
+      def: true,
+      title: 'Color score value',
+      help: 'Color the score number text to match its tier badge.'
+    },
+    {
+      key: 'tierLabelsAverageScore',
+      type: 'toggle',
+      def: false,
+      title: 'Show on Weighted Score',
+      help: 'Display tier badge next to the Weighted Score on media pages.'
+    },
+    {
+      key: 'tierLabels',
+      type: 'json',
+      def: DEFAULT_TIERS,
+      title: 'Tier Ranges & Colors',
+      help: 'Customize score ranges, badge labels, and colors.',
+      validate: validateTiers
+    }
+  ],
+  migrate: migrateLegacyTierLabels,
+  setup(ctx) {
+    migrateLegacyTierLabels();
+
+    ctx.addStyle(
       'ala-tier-labels-css',
       `
       .ala-tier-badge {
@@ -177,7 +183,7 @@ defineFeature(
       else if (maxScore > 0) detected = 'POINT_10';
 
       compareRoot._colFormats[sideKey] = detected;
-      logDebug('[TIER]', `Detected score system for ${isAuthUser ? 'viewer' : 'other'}:`, detected, { maxScore, hasDecimal, hasStarIcon });
+      ctx.debug.log(`Detected score system for ${isAuthUser ? 'viewer' : 'other'}:`, detected, { maxScore, hasDecimal, hasStarIcon });
       return detected;
     }
 
@@ -229,7 +235,7 @@ defineFeature(
 
       const tier = getTier(normalizedRating, tiers);
       if (!tier) return;
-      logDebug('[TIER]', 'Applied tier badge:', tier.label, 'to raw score:', rawText, 'normalized:', normalizedRating);
+      ctx.debug.log('Applied tier badge:', tier.label, 'to raw score:', rawText, 'normalized:', normalizedRating);
 
       el.dataset.tierModified = 'true';
       el.dataset.tierSource = attr ?? '';
@@ -308,8 +314,8 @@ defineFeature(
 
     function applyTierLabels(): void {
       const tiers: TierConfig[] = getValidTiers();
-      const colorScore: boolean = Settings.get('tierLabelsColorScore');
-      const showAverage: boolean = Settings.get('tierLabelsAverageScore');
+      const colorScore: boolean = !!ctx.get('tierLabelsColorScore');
+      const showAverage: boolean = !!ctx.get('tierLabelsAverageScore');
 
       // 1. List view & Compare view
       document
@@ -346,9 +352,9 @@ defineFeature(
       if (!paused) applyTierLabels();
     };
 
-    Core.ready(() => {
+    ctx.ready(() => {
       runScan();
-      Core.onNavigate(() => {
+      const unsubNav = ctx.onNav(() => {
         // Clear cached compare formats on navigation
         document.querySelectorAll<HTMLElement & { _colFormats?: any }>('.compare').forEach((c) => {
           delete c._colFormats;
@@ -356,10 +362,10 @@ defineFeature(
         runScan();
       });
       let scanQueued = false;
-      Core.onBodyMutation(() => {
+      const unsubBody = ctx.onBodyMutation(() => {
         if (scanQueued) return;
         scanQueued = true;
-        setTimeout(() => {
+        ctx.timeout(() => {
           scanQueued = false;
           runScan();
         }, 100);
@@ -369,13 +375,19 @@ defineFeature(
         store.set(HINT_KEY, found);
         const wasPaused = paused;
         paused = found;
-        if (found && !wasPaused) {
-          console.warn(
-            '[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.'
-          );
+        ctx.setStandalonePaused(found);
+        if (found) {
+          unsubNav();
+          unsubBody();
+          if (!wasPaused) {
+            console.warn(
+              '[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.'
+            );
+          }
+        } else if (wasPaused) {
+          runScan();
         }
-        if (!found && wasPaused) runScan();
       });
     });
   }
-);
+});

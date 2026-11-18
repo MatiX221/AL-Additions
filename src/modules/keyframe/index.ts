@@ -1,37 +1,26 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
-import { addStyle } from '../../core/styles';
+import { defineModule } from '../../core/registry';
+import { ANILIST_SELECTORS, staffOrStudioRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
 import { debounce } from '../../utils/helpers';
 
-interface KeyframeRoute {
-  kind: 'staff' | 'studio';
-  id: string;
-}
-
-defineFeature(
-  {
-    id: 'keyframe',
-    key: 'keyframeEnabled',
-    section: 'External Links, Downloads & Mappings',
-    def: false,
-    legacy: ['keyframeEnabled'],
-    title: 'Keyframe Staff List Links',
-    help: 'Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List.'
-  },
-  () => {
+defineModule({
+  id: 'keyframe',
+  key: 'keyframeEnabled',
+  section: 'External Links, Downloads & Mappings',
+  layer: 'feature',
+  requiresReload: false,
+  def: false,
+  legacy: ['keyframeEnabled'],
+  title: 'Keyframe Staff List Links',
+  help: 'Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List.',
+  setup(ctx) {
     const ID = 'ala-keyframe-link';
     const BASE = 'https://keyframe-staff-list.com';
     const LABEL = 'Keyframe Staff List';
-    const SLOT = '.filters';
+    const SLOT = ANILIST_SELECTORS.filtersSlot;
     const PATHS: Record<string, string> = { staff: 'person', studio: 'studio' };
 
-    const route = (): KeyframeRoute | null => {
-      const m = location.pathname.match(/^\/(staff|studio)\/(\d+)(?:\/|$)/);
-      return m ? { kind: m[1] as 'staff' | 'studio', id: m[2] } : null;
-    };
-
-    addStyle(
+    ctx.addStyle(
       'ala-keyframe-style',
       `
       #${ID}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
@@ -70,7 +59,7 @@ defineFeature(
       a.dataset.kfSkin = '1';
     }
 
-    function build(r: KeyframeRoute): HTMLAnchorElement {
+    function build(r: { kind: 'staff' | 'studio'; id: string }): HTMLAnchorElement {
       const a = document.createElement('a');
       a.id = ID;
       a.className = 'ala-kf-plain';
@@ -89,7 +78,7 @@ defineFeature(
     let placing = false;
 
     async function place(): Promise<void> {
-      const r = route();
+      const r = staffOrStudioRoute();
       const key = r && `${r.kind}:${r.id}`;
       if (key && key === placedKey && document.getElementById(ID)) return;
       document.getElementById(ID)?.remove();
@@ -99,8 +88,8 @@ defineFeature(
       const mine = ++token;
       placing = true;
       try {
-        const row = await Core.waitForSelector(SLOT, 8000);
-        const now = route();
+        const row = await ctx.waitForSelector(SLOT, 8000);
+        const now = staffOrStudioRoute();
         if (row && mine === token && now && now.kind === r.kind && now.id === r.id && !document.getElementById(ID)) {
           const a = build(r);
           row.insertBefore(a, row.firstChild);
@@ -113,18 +102,22 @@ defineFeature(
     }
 
     const repair = debounce(() => {
-      if (!route() || placing) return;
+      if (!staffOrStudioRoute() || placing) return;
       const a = document.getElementById(ID);
       if (!a) {
         placedKey = null;
-        place();
+        void place();
       } else {
         skin(a);
       }
     }, 400);
 
-    place();
-    Core.onNavigate(place);
-    Core.onBodyMutation(repair);
+    void place();
+    ctx.onNav(() => void place());
+    ctx.onBodyMutation(repair);
+    ctx.onCleanup(() => {
+      token++;
+      document.getElementById(ID)?.remove();
+    });
   }
-);
+});

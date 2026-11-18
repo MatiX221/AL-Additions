@@ -200,6 +200,14 @@
 			pattern: /^\[(?:CORE|OBSERVER)/i
 		}]
 	]);
+	function registerDebugChannel(channel, settingKey, def = false, prefixPattern) {
+		const existing = debugChannels.get(channel);
+		debugChannels.set(channel, {
+			settingKey,
+			def,
+			pattern: prefixPattern ?? existing?.pattern
+		});
+	}
 	function isDebug(module) {
 		try {
 			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
@@ -1601,17 +1609,11 @@
 					runCleanupsReverse(rec.id, cleanups);
 					return;
 				}
-				if (rec.standalonePaused) {
-					rec.booted = false;
-					runCleanupsReverse(rec.id, cleanups);
-				}
+				if (rec.standalonePaused) rec.booted = false;
 			}, (err) => {
 				handleFailure(err);
 			});
-			if (rec.standalonePaused) {
-				rec.booted = false;
-				runCleanupsReverse(rec.id, cleanups);
-			}
+			if (rec.standalonePaused) rec.booted = false;
 			return Promise.resolve();
 		} catch (err) {
 			handleFailure(err);
@@ -1630,6 +1632,76 @@
 			layer: rec.layer,
 			dependsOn: rec.dependsOn,
 			after: rec.after
+		});
+	}
+	function defineModule(meta) {
+		if (!ID_RE.test(meta.id)) {
+			console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+			invalidIds.set(meta.id, {
+				active: false,
+				reason: "invalid-id"
+			});
+			emitStatusChange(meta.id, {
+				active: false,
+				reason: "invalid-id"
+			});
+			return;
+		}
+		const existing = recordsById.get(meta.id);
+		if (existing) {
+			console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
+			existing.idCollision = true;
+			emitStatusChange(meta.id, {
+				active: false,
+				reason: "id-collision"
+			});
+			return;
+		}
+		const layer = meta.layer ?? "feature";
+		const hosts = meta.hosts?.length ? meta.hosts.slice() : ["anilist.co"];
+		const dependsOn = (meta.dependsOn || []).slice();
+		const after = (meta.after || []).slice();
+		Settings.register({
+			id: meta.id,
+			key: meta.key,
+			section: meta.section,
+			title: meta.title,
+			help: meta.help,
+			type: "toggle",
+			def: false,
+			legacy: meta.legacy,
+			options: meta.options,
+			hosts,
+			layer,
+			requiresReload: meta.requiresReload,
+			dependsOn,
+			after,
+			accounts: meta.accounts,
+			debug: meta.debug,
+			standalone: meta.standalone,
+			backupTools: meta.backupTools
+		});
+		if (meta.debug) registerDebugChannel(meta.debug.channel || meta.id, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
+		registerRecord({
+			id: meta.id,
+			setting: meta.key,
+			hosts,
+			layer,
+			early: layer === "intercept" || layer === "preload",
+			requiresReload: !!meta.requiresReload,
+			dependsOn,
+			after,
+			debugChannel: meta.debug?.channel || meta.id,
+			standalone: meta.standalone,
+			migrate: meta.migrate,
+			setup: meta.setup,
+			invalidId: false,
+			idCollision: false,
+			standalonePaused: false,
+			booted: false,
+			bootSeq: 0,
+			cleanups: [],
+			abortController: null
 		});
 	}
 	function registerShellModule(name, init, hosts = ["anilist.co"]) {
@@ -1767,1011 +1839,341 @@
 			bootRecord(rec);
 		}
 	}
-	var RateLimiter = class {
-		rate;
-		min;
-		max;
-		burst;
-		adaptive;
-		jitter;
-		persistKey;
-		tokens;
-		last;
-		until;
-		okStreak;
-		queue;
-		constructor({ rate, min = 1, max = rate, burst = 1, adaptive = false, jitter = false, persistKey = null }) {
-			this.min = min;
-			this.max = max;
-			this.burst = burst;
-			this.adaptive = adaptive;
-			this.jitter = jitter;
-			this.persistKey = persistKey;
-			this.rate = Math.min(max, Math.max(min, rate));
-			this.tokens = burst;
-			this.last = Date.now();
-			this.until = 0;
-			this.okStreak = 0;
-			this.queue = Promise.resolve();
-		}
-		get resumeAt() {
-			const stored = this.persistKey ? Number(store$1.get(this.persistKey, 0)) || 0 : 0;
-			const at = Math.max(this.until, stored);
-			return at > Date.now() ? at : 0;
-		}
-		setRate(n) {
-			this.rate = Math.min(this.max, Math.max(this.min, n));
-		}
-		acquire(check) {
-			const run = this.queue.then(() => this._take(check));
-			this.queue = run.catch(() => {});
-			return run;
-		}
-		async _take(check) {
-			for (;;) {
-				check?.();
-				const now = Date.now();
-				const resume = this.resumeAt;
-				if (resume) {
-					this.tokens = 0;
-					this.last = resume;
-					await sleep(Math.min(1e3, resume - now));
-					continue;
-				}
-				this.tokens = Math.min(this.burst, this.tokens + (now - this.last) / 6e4 * this.rate);
-				this.last = now;
-				if (this.tokens >= 1) {
-					this.tokens -= 1;
-					return;
-				}
-				await sleep(Math.max(15, (1 - this.tokens) / this.rate * 6e4));
-			}
-		}
-		success() {
-			if (this.adaptive && ++this.okStreak >= 25 && this.rate < this.max) {
-				this.setRate(this.rate + Math.max(1, Math.round(this.rate * .1)));
-				this.okStreak = 0;
-			}
-		}
-		limit(ms) {
-			this.okStreak = 0;
-			this.tokens = 0;
-			if (this.adaptive) this.setRate(Math.floor(this.rate / 2));
-			if (!(ms > 0)) return;
-			this.until = Math.max(this.until, Date.now() + ms * (this.jitter ? .9 + Math.random() * .3 : 1));
-			if (this.persistKey) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
-		}
+	var ANILIST_SELECTORS = {
+		loginNav: "nav a[href=\"/login\"], .nav a[href=\"/login\"]",
+		userNav: "nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .nav a[href^=\"/user/\"]",
+		loggedInNav: "nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .user-wrap .avatar",
+		mediaTitle: ".page-content .header .content > h1",
+		sidebarData: ".sidebar > .data",
+		overview: ".overview",
+		banner: ".banner",
+		filtersSlot: ".filters",
+		compareRoot: ".compare",
+		listWrap: ".list-wrap",
+		listEntry: ".entry",
+		shuffleControl: "[title*=\"Random List Entry\" i], [aria-label*=\"Random List Entry\" i]"
 	};
-	var KNOWN_LIST_FIELDS = [
-		"mediaId",
-		"id",
-		"score",
-		"status",
-		"progress",
-		"progressVolumes",
-		"notes",
-		"startedAt",
-		"completedAt",
-		"repeat",
-		"priority",
-		"private",
-		"hiddenFromStatusLists",
-		"customLists",
-		"advancedScores",
-		"updatedAt",
-		"media",
-		"title",
-		"coverImage",
-		"format",
-		"episodes",
-		"volumes",
-		"chapters",
-		"averageScore",
-		"popularity",
-		"genres",
-		"tags",
-		"bannerImage"
-	];
-	var KNOWN_MEDIA_FIELDS = [
-		"id",
-		"idMal",
-		"type",
-		"title",
-		"format",
-		"episodes",
-		"chapters",
-		"status",
-		"mediaListEntry",
-		"season",
-		"seasonYear",
-		"nextAiringEpisode",
-		"synonyms",
-		"isAdult",
-		"genres",
-		"tags",
-		"bannerImage",
-		"coverImage",
-		"description"
-	];
-	function parseEntityMeta(query, vars) {
-		const clean = query.replace(/#[^\n\r]*/g, " ").replace(/\s+/g, " ");
-		if (/\bMediaListCollection\b/i.test(clean)) {
-			const type = (vars.type || "ANIME").toUpperCase();
-			const who = vars.userId || (vars.userName ? String(vars.userName).toLowerCase() : "me");
-			const chunkPart = vars.chunk != null ? `:${vars.chunk}` : "";
-			const isSuperset = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length > 12;
-			const requiredFields = new Set();
-			for (const f of KNOWN_LIST_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
-			return {
-				entityKey: `MediaListCollection:${type}:${who}${chunkPart}`,
-				isSuperset,
-				requiredFields
-			};
-		}
-		const mediaMatch = clean.match(/\bMedia\s*\(\s*id\s*:\s*\$([a-zA-Z0-9_]+)/i);
-		if (mediaMatch && vars[mediaMatch[1]]) {
-			const id = vars[mediaMatch[1]];
-			const fieldCount = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length;
-			const requiredFields = new Set();
-			for (const f of KNOWN_MEDIA_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
-			return {
-				entityKey: `Media:${id}`,
-				isSuperset: fieldCount > 10,
-				requiredFields
-			};
-		}
-		if (/\bViewer\b/i.test(clean)) return {
-			entityKey: "Viewer",
-			isSuperset: clean.includes("mediaListOptions"),
-			requiredFields: new Set(["id", "name"])
-		};
-		return null;
-	}
-	function isSubsetOf(subset, superset) {
-		for (const item of subset) if (!superset.has(item)) return false;
-		return true;
-	}
-	var AniList = (() => {
-		const limiter = new RateLimiter({
-			rate: 25,
-			max: 90,
-			burst: 1,
-			persistKey: "ala_anilist_api_resume_at"
-		});
-		const entityCache = new Map();
-		const inflightExact = new Map();
-		const inflightEntities = new Map();
-		const ENTITY_TTL = 18e4;
-		function getCsrfToken() {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			if (typeof win.al_token === "string" && win.al_token) return win.al_token;
-			try {
-				const meta = win.document?.querySelector("meta[name=\"csrf-token\"]");
-				if (meta?.content) return meta.content;
-			} catch (_) {}
-			try {
-				const scripts = win.document?.querySelectorAll("head script") || [];
-				for (const s of scripts) {
-					const m = s.textContent?.match(/window\.al_token\s*=\s*['"]([^'"]+)['"]/);
-					if (m && m[1]) return m[1];
-				}
-			} catch (_) {}
-			return null;
-		}
-		function isBrowserLoggedIn() {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const doc = win.document || document;
-			if (doc?.querySelector?.("nav a[href=\"/login\"], .nav a[href=\"/login\"]")) {
-				clearViewer();
-				return false;
-			}
-			if ((win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user)?.id) return true;
-			if (doc?.querySelector?.("nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .user-wrap .avatar")) return true;
-			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
-		}
-		const header = (res, name) => {
-			try {
-				return res?.headers?.get?.(name) ?? null;
-			} catch (_) {
-				return null;
-			}
-		};
-		function resetDelay(res) {
-			const retry = Number(header(res, "Retry-After"));
-			if (retry > 0) return Math.min(retry * 1e3, 12e4);
-			const reset = Number(header(res, "X-RateLimit-Reset"));
-			if (reset > 0) return Math.min((reset > 0xe8d4a51000 ? reset : reset * 1e3) - Date.now(), 12e4);
-			return 0;
-		}
-		function handle(res) {
-			const advertised = Number(header(res, "X-RateLimit-Limit"));
-			if (advertised > 0) limiter.setRate(Math.floor(advertised * .85));
-			if (res?.status === 429) return limiter.limit(resetDelay(res) || 6e4);
-			const remaining = header(res, "X-RateLimit-Remaining");
-			if (remaining != null && Number(remaining) <= 1) limiter.limit(resetDelay(res));
-		}
-		async function executeNetworkRequest(q, variables, retries, forceFresh = false) {
-			const csrfToken = getCsrfToken();
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const fetchFn = (typeof win.fetch === "function" ? win.fetch : fetch).bind(win);
-			const backoff = () => sleep(1500 * (4 - retries));
-			const endpoint = `${win.location?.origin || "https://anilist.co"}/graphql`;
-			const headers = {
-				"Content-Type": "application/json",
-				Accept: "application/json",
-				...forceFresh ? { "Cache-Control": "no-cache" } : {}
-			};
-			if (csrfToken) headers["X-CSRF-TOKEN"] = csrfToken;
-			let res;
-			try {
-				await limiter.acquire();
-				res = await fetchFn(endpoint, {
-					method: "POST",
-					headers,
-					cache: forceFresh ? "no-store" : void 0,
-					credentials: "include",
-					body: JSON.stringify({
-						query: q,
-						variables
-					})
-				});
-			} catch (e) {
-				if (retries > 0) {
-					await backoff();
-					return executeNetworkRequest(q, variables, retries - 1, forceFresh);
-				}
-				throw new Error(`AniList network error: ${e?.message || e}`);
-			}
-			handle(res);
-			if (!res) throw new Error("AniList network error: empty response");
-			if ((res.status === 429 || res.status >= 500) && retries > 0) {
-				if (res.status >= 500) await backoff();
-				return executeNetworkRequest(q, variables, retries - 1, forceFresh);
-			}
-			let json = null;
-			try {
-				json = await res.json();
-			} catch (_) {}
-			const message = json?.errors?.length ? json.errors.map((e) => e.message).join("; ") : "";
-			if (res.status === 401 || /invalid token|unauthenticated|unauthorized/i.test(message)) {
-				clearViewer();
-				throw authError("AniList", "AniList session unauthenticated — please log in to AniList.");
-			}
-			if (message) throw new Error(message);
-			if (!res.ok || !json) throw new Error(`AniList API HTTP ${res.status}`);
-			return json.data;
-		}
-		async function query(q, variables = {}, optionsOrRetries) {
-			const opts = typeof optionsOrRetries === "number" ? { retries: optionsOrRetries } : optionsOrRetries || {};
-			const retries = opts.retries ?? 3;
-			if (/\bmutation\b/i.test(q)) {
-				invalidate();
-				return executeNetworkRequest(q, variables, retries);
-			}
-			const meta = parseEntityMeta(q, variables);
-			const now = Date.now();
-			const exactKey = `${q}\u0001${JSON.stringify(variables)}`;
-			if (!opts.forceFresh && meta) {
-				const cached = entityCache.get(meta.entityKey);
-				if (cached && now - cached.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, cached.fields)) {
-					logDebug("[ANILIST API] 🎯 Cache HIT via Subset matching:", meta.entityKey);
-					return cached.data;
-				}
-			}
-			if (meta && !opts.forceFresh) {
-				const flyingEntity = inflightEntities.get(meta.entityKey);
-				if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
-					logDebug("[ANILIST API] 🔗 Attached to in-flight Superset request:", meta.entityKey);
-					return flyingEntity.promise;
-				}
-			}
-			const flyingExact = inflightExact.get(exactKey);
-			if (flyingExact && !opts.forceFresh) return flyingExact;
-			const networkPromise = executeNetworkRequest(q, variables, retries, opts.forceFresh).then((data) => {
-				if (meta && data) entityCache.set(meta.entityKey, {
-					time: Date.now(),
-					data,
-					isSuperset: meta.isSuperset,
-					fields: meta.requiredFields
-				});
-				return data;
-			}).finally(() => {
-				inflightExact.delete(exactKey);
-				if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) inflightEntities.delete(meta.entityKey);
-			});
-			inflightExact.set(exactKey, networkPromise);
-			if (meta) {
-				const existing = inflightEntities.get(meta.entityKey);
-				if (!existing || !existing.isSuperset && meta.isSuperset) inflightEntities.set(meta.entityKey, {
-					promise: networkPromise,
-					isSuperset: meta.isSuperset,
-					fields: meta.requiredFields
-				});
-			}
-			return networkPromise;
-		}
-		function formatMediaListResult(mlc) {
-			const mergedCollection = {
-				user: mlc.user,
-				lists: mlc.lists || []
-			};
-			const seenEntryIds = new Set();
-			const allEntries = [];
-			for (const list of mergedCollection.lists) for (const entry of list.entries || []) if (!seenEntryIds.has(entry.id)) {
-				seenEntryIds.add(entry.id);
-				allEntries.push(entry);
-			}
-			return {
-				collection: mergedCollection,
-				lists: mergedCollection.lists,
-				allEntries,
-				user: mergedCollection.user
-			};
-		}
-		function parseRpcMediaList(payload) {
-			if (!payload || typeof payload !== "object") return null;
-			const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
-			if (mlc && Array.isArray(mlc.lists)) return formatMediaListResult(mlc);
-			const entities = payload.entities || payload;
-			const entriesMap = entities?.listEntry || entities?.mediaListEntry;
-			if (entriesMap && typeof entriesMap === "object") {
-				const mediaMap = entities.media || entities.listEntryMedia || {};
-				const allEntries = [];
-				for (const rawEntry of Object.values(entriesMap)) {
-					if (!rawEntry || typeof rawEntry !== "object") continue;
-					const mediaId = rawEntry.mediaId || (typeof rawEntry.media === "number" ? rawEntry.media : rawEntry.media?.id);
-					if (!mediaId) continue;
-					const mediaObj = typeof rawEntry.media === "object" && rawEntry.media !== null ? rawEntry.media : mediaMap[mediaId] || { id: mediaId };
-					allEntries.push({
-						...rawEntry,
-						mediaId,
-						media: mediaObj
-					});
-				}
-				if (allEntries.length === 0) return null;
-				const userObj = entities.user ? Object.values(entities.user)[0] : void 0;
-				const lists = [];
-				if (entities.listSection && typeof entities.listSection === "object") for (const sec of Object.values(entities.listSection)) {
-					if (!sec) continue;
-					lists.push({
-						name: sec.name || "",
-						isCustomList: !!sec.isCustomList,
-						status: sec.status,
-						entries: Array.isArray(sec.entries) ? sec.entries.map((id) => entriesMap[id]).filter(Boolean) : []
-					});
-				}
-				const user = userObj && userObj.id ? {
-					id: Number(userObj.id),
-					name: String(userObj.name || "")
-				} : void 0;
-				return {
-					collection: {
-						lists,
-						user
-					},
-					allEntries,
-					lists,
-					user
-				};
-			}
-			return null;
-		}
-		function tryGetCachedMediaList(target, type, userId, userName) {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const t = type.toUpperCase();
-			const isId = typeof target === "number" || /^\d+$/.test(String(target));
-			const id = userId || (isId ? Number(target) : void 0);
-			const name = userName || (!isId ? String(target).trim().toLowerCase() : void 0);
-			const userMap = win.__ALFL_USER_MAP__;
-			const idMap = win.__ALFL_ID_MAP__;
-			const resolvedId = id || (name && userMap ? userMap.get(name) : void 0);
-			const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0);
-			const entityKeys = [];
-			if (resolvedId) entityKeys.push(`MediaListCollection:${t}:${resolvedId}`);
-			if (resolvedName) entityKeys.push(`MediaListCollection:${t}:${resolvedName}`);
-			for (const k of entityKeys) {
-				const cached = entityCache.get(k);
-				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection) {
-					logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:", k);
-					return formatMediaListResult(cached.data.MediaListCollection);
-				}
-			}
-			const gqlStore = win.__ALFL_GQL_STORE__;
-			if (gqlStore) {
-				const gqlKeys = [];
-				if (resolvedId) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
-				if (resolvedName) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedName}:{}`);
-				for (const k of gqlKeys) {
-					const cached = gqlStore.get(k);
-					if (cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
-						const raw = new TextDecoder().decode(cached.snap.buf);
-						const json = JSON.parse(raw);
-						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-						if (mlc && Array.isArray(mlc.lists)) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
-							const result = formatMediaListResult(mlc);
-							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							return result;
-						}
-					} catch (_) {}
-				}
-				for (const [k, cached] of gqlStore.entries()) {
-					if (!k.startsWith(`gql:MediaListCollection:${t}:`)) continue;
-					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
-						const raw = new TextDecoder().decode(cached.snap.buf);
-						const json = JSON.parse(raw);
-						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-						if (mlc && Array.isArray(mlc.lists)) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):", k);
-							const result = formatMediaListResult(mlc);
-							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							return result;
-						}
-					} catch (_) {}
-				}
-			}
-			const rpcCache = win.__ALFL_RPC_CACHE__;
-			if (rpcCache) {
-				const rpcKeys = [];
-				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
-				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
-				for (const k of rpcKeys) {
-					const cached = rpcCache.get(k);
-					if (cached && Date.now() - cached.time < 3e5 && cached.msg) {
-						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
-						if (result && result.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:", k);
-							return result;
-						}
-					}
-				}
-				for (const [k, cached] of rpcCache.entries()) {
-					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
-					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.msg) {
-						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
-						if (result && result.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):", k);
-							return result;
-						}
-					}
-				}
-			}
-			return null;
-		}
-		async function getMediaList(target, type = "ANIME", options) {
-			const isId = typeof target === "number" || /^\d+$/.test(String(target));
-			const userId = options?.userId || (isId ? Number(target) : void 0);
-			const userName = options?.userName || (!isId ? String(target).trim() : void 0);
-			if (!options?.forceFresh) {
-				const cached = tryGetCachedMediaList(target, type, userId, userName);
-				if (cached) return cached;
-			}
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const rpcInflight = win.__ALFL_RPC_INFLIGHT__;
-			if (rpcInflight && !options?.forceFresh) {
-				const t = type.toUpperCase();
-				const userMap = win.__ALFL_USER_MAP__;
-				const idMap = win.__ALFL_ID_MAP__;
-				const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : void 0);
-				const resolvedName = userName ? userName.toLowerCase() : resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0;
-				const rpcKeys = [];
-				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
-				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
-				const checkInflight = async (k, flight) => {
-					try {
-						logDebug("[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
-						const msg = await Promise.race([flight.promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5e3))]);
-						const parsed = parseRpcMediaList(msg?.result ?? msg);
-						if (parsed && parsed.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
-							return parsed;
-						}
-					} catch (_) {}
-					return null;
-				};
-				for (const k of rpcKeys) {
-					const flight = rpcInflight.get(k);
-					if (flight) {
-						const res = await checkInflight(k, flight);
-						if (res) return res;
-					}
-				}
-				for (const [k, flight] of rpcInflight.entries()) {
-					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
-					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-					if (matchId || matchName) {
-						const res = await checkInflight(k, flight);
-						if (res) return res;
-					}
-				}
-			}
-			const mlc = (await query(`query ($userId: Int, $userName: String, $type: MediaType) {
-      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
-        user { id name }
-        lists {
-          name
-          isCustomList
-          status
-          entries {
-            id
-            mediaId
-            status
-            score
-            progress
-            progressVolumes
-            repeat
-            priority
-            notes
-            customLists
-            startedAt { year month day }
-            completedAt { year month day }
-            media {
-              id
-              idMal
-              format
-              episodes
-              chapters
-              status
-              title { userPreferred english romaji native }
-            }
-          }
-        }
-      }
-    }`, {
-				userId: userId || void 0,
-				userName: userId ? void 0 : userName || void 0,
-				type
-			}, { forceFresh: options?.forceFresh }))?.MediaListCollection;
-			if (!mlc || !Array.isArray(mlc.lists)) throw new Error("Unexpected MediaListCollection response shape");
-			return formatMediaListResult(mlc);
-		}
-		async function viewer(forceFresh = false) {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			if ((win.document || document)?.querySelector?.("nav a[href=\"/login\"], .nav a[href=\"/login\"]")) {
-				clearViewer();
-				return null;
-			}
-			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-			if (nuxtUser?.id) {
-				const nuxtId = Number(nuxtUser.id);
-				const storedId = Number(store$1.get("al_user_id", 0));
-				if (storedId && storedId !== nuxtId) clearViewer();
-			}
-			if (!forceFresh) {
-				const name = store$1.get("al_username", null);
-				const fmt = store$1.get("al_score_format", null);
-				const id = Number(store$1.get("al_user_id", 0));
-				if (name && fmt && id) return {
-					id,
-					name,
-					scoreFormat: fmt
-				};
-			}
-			if (!hasAuth()) return null;
-			const d = await query("query { Viewer { id name mediaListOptions { scoreFormat } } }", {}).catch((e) => {
-				if (e?.auth) throw e;
-				return null;
-			});
-			if (d?.Viewer) {
-				store$1.set("al_user_id", d.Viewer.id);
-				store$1.set("al_username", d.Viewer.name);
-				store$1.set("al_score_format", d.Viewer.mediaListOptions.scoreFormat);
-				return {
-					id: d.Viewer.id,
-					name: d.Viewer.name,
-					scoreFormat: d.Viewer.mediaListOptions.scoreFormat
-				};
-			}
-			return null;
-		}
-		const clearViewer = () => {
-			store$1.del("al_username");
-			store$1.del("al_user_id");
-			store$1.del("al_score_format");
-		};
-		const invalidate = (entityKeyPrefix) => {
-			if (!entityKeyPrefix) {
-				entityCache.clear();
-				inflightEntities.clear();
-			} else {
-				for (const k of entityCache.keys()) if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
-				for (const k of inflightEntities.keys()) if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
-			}
-			(typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window).__ALFL_CLEAR__?.();
-		};
-		const invalidateMediaList = (target, type) => {
-			if (!target) return invalidate("MediaListCollection");
-			const t = type ? type.toUpperCase() : "";
-			const prefix = t ? `MediaListCollection:${t}:${String(target).toLowerCase()}` : `MediaListCollection:`;
-			invalidate(prefix);
-		};
-		const hasAuth = () => isBrowserLoggedIn();
-		const resumeAt = () => limiter.resumeAt;
-		return {
-			query,
-			getMediaList,
-			viewer,
-			clearViewer,
-			invalidate,
-			invalidateMediaList,
-			hasAuth,
-			resumeAt
-		};
-	})();
-	var MediaData = (() => {
-		async function get(id, type, opts) {
-			try {
-				return (await AniList.query(`query($id:Int,$type:MediaType){ Media(id:$id,type:$type){
-          id idMal format title { userPreferred english romaji native }
-          episodes chapters status season seasonYear nextAiringEpisode { episode }
-          mediaListEntry { score progress status completedAt { year month day } }
-        } }`, {
-					id: Number(id),
-					type
-				}))?.Media || null;
-			} catch (e) {
-				if (opts?.throwAuth && e?.auth) throw e;
-				logDebug("[MEDIA DATA] fetch failed:", e?.message || e);
-				return null;
-			}
-		}
-		async function save(id, _type, c) {
-			const entry = (await AniList.query(`mutation($mediaId:Int!,$score:Float,$progress:Int,$status:MediaListStatus,$completedAt:FuzzyDateInput){
-        SaveMediaListEntry(mediaId:$mediaId,score:$score,progress:$progress,status:$status,completedAt:$completedAt){
-          score progress status completedAt { year month day }
-        } }`, {
-				mediaId: Number(id),
-				score: c.score,
-				progress: c.progress,
-				status: c.status,
-				completedAt: c.completedAt
-			}))?.SaveMediaListEntry || null;
-			AniList.invalidate(`Media:${id}`);
-			AniList.invalidateMediaList();
-			return entry;
-		}
-		return {
-			get,
-			save
-		};
-	})();
-	defineFeature({
-		id: "behindDots",
-		key: "behindDotsEnabled",
-		section: "AniList Enhancements",
-		def: false,
-		legacy: ["behindDotsEnabled", "airingProgressIndicatorEnabled"],
-		title: "Airing Progress Indicator",
-		help: "Show an orange indicator when your watched episode count is behind the number of aired episodes."
-	}, () => {
-		const CLASS = "daiya-behind-dot";
-		const ORANGE = "rgb(255, 152, 0)";
-		const NO_AIRING_TTL = 216e5;
-		const AIRING_GRACE = 3e4;
-		const ERROR_RETRY = 3e5;
-		const PRUNE_AGE = 2592e6;
-		const BATCH = 25;
-		const CONCURRENCY = 4;
-		const OPTIMISTIC_TTL = 2500;
-		const QUERY = "query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }";
-		addStyle("daiya-behind-dot-css", `
-      .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
-      .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`);
-		const cacheStore = persistent("daiya-anilist-airing-cache-v5", (d) => {
-			for (const id of Object.keys(d)) if (!(Date.now() - Number(d[id]?.updated) < PRUNE_AGE)) delete d[id];
-		});
-		const cache = cacheStore.data;
-		const pending = new Set();
-		const active = new Set();
-		const timers = new Map();
-		const optimistic = new Map();
-		let running = 0;
-		const onListPage = () => location.pathname.includes("/animelist");
-		const idOf = (entry) => entry.querySelector("a[href*=\"/anime/\"]")?.getAttribute("href")?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] || null;
-		const needsFetch = (id) => {
-			const d = cache[id];
-			return !d || !Number.isFinite(d.nextCheck) || Date.now() >= d.nextCheck;
-		};
-		const sectionIsWatching = (wrap) => clean(wrap?.querySelector(".section-name")?.textContent) === "Watching";
-		function watchingEntries() {
-			const out = [];
-			for (const wrap of document.querySelectorAll(".list-wrap")) if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll(".list-entries .entry")));
-			return out;
-		}
-		function progressOf(entry) {
-			const m = entry.querySelector(".progress")?.textContent?.match(/^\s*(\d+)/) || entry.textContent?.match(/(?:^|\s)(\d+)\s*\/\s*(?:\d+|\?)(?:\s|$)/);
-			return m ? Number(m[1]) : null;
-		}
-		function releasingDot(entry) {
-			const fast = entry.querySelector(".release-status.RELEASING");
-			if (fast) return fast;
-			for (const el of entry.querySelectorAll(".release-status, [class*='release-status']")) {
-				if (/\bRELEASING\b/i.test(typeof el.className === "string" ? el.className : "")) return el;
-				if (/^releasing$/i.test((el.getAttribute("aria-label") || el.getAttribute("title") || "").trim())) return el;
-			}
-			return null;
-		}
-		function updateEntry(entry) {
-			if (!entry || !entry.isConnected) return null;
-			const dot = releasingDot(entry);
-			if (!dot || !sectionIsWatching(entry.closest(".list-wrap"))) return null;
-			const id = idOf(entry);
-			if (!id) return null;
-			const watched = progressOf(entry);
-			if (!Number.isFinite(watched)) {
-				dot.classList.remove(CLASS);
-				return id;
-			}
-			const opt = optimistic.get(id);
-			if (opt) {
-				if (Date.now() >= opt.expiresAt || watched !== null && watched >= opt.target) optimistic.delete(id);
-				else {
-					dot.classList.remove(CLASS);
-					return id;
-				}
-			}
-			const data = cache[id];
-			const behind = !!data && Number.isFinite(data.aired) && watched !== null && watched < data.aired;
-			if (dot.classList.contains(CLASS) !== behind) dot.classList.toggle(CLASS, behind);
-			return id;
-		}
-		function scanAll() {
-			if (!onListPage()) return;
-			const stale = new Set();
-			for (const entry of watchingEntries()) {
-				const id = updateEntry(entry);
-				if (id && needsFetch(id)) stale.add(id);
-			}
-			queueIDs(stale);
-		}
-		function repaint(ids) {
-			for (const entry of watchingEntries()) {
-				const id = idOf(entry);
-				if (id && ids.has(id)) updateEntry(entry);
-			}
-		}
-		function makeEntry(media) {
-			const next = media.nextAiringEpisode;
-			const now = Date.now();
-			const base = {
-				status: media.status || null,
-				updated: now
-			};
-			if (!next || !Number.isFinite(Number(next.episode))) return {
-				...base,
-				aired: null,
-				nextEpisode: null,
-				nextCheck: now + NO_AIRING_TTL
-			};
-			const timeUntil = Number(next.timeUntilAiring);
-			const airingAt = Number(next.airingAt);
-			const nextCheck = Number.isFinite(timeUntil) ? now + Math.max(0, timeUntil) * 1e3 + AIRING_GRACE : Number.isFinite(airingAt) ? airingAt * 1e3 + AIRING_GRACE : now + NO_AIRING_TTL;
-			return {
-				...base,
-				aired: Math.max(0, Math.floor(Number(next.episode)) - 1),
-				nextEpisode: Number(next.episode),
-				nextCheck
-			};
-		}
-		function scheduleRefresh(id, at) {
-			const existing = timers.get(id);
-			if (existing) clearTimeout(existing);
-			timers.delete(id);
-			if (!Number.isFinite(at)) return;
-			const t = setTimeout(() => {
-				timers.delete(id);
-				queueIDs([id]);
-				repaint(new Set([id]));
-			}, Math.min(Math.max(0, at - Date.now()), 2147483647));
-			timers.set(id, t);
-		}
-		async function updateBatch(ids) {
-			const returned = new Set();
-			try {
-				const data = await AniList.query(QUERY, { ids: ids.map(Number) });
-				for (const m of data?.Page?.media || []) {
-					const id = String(m.id);
-					returned.add(id);
-					cache[id] = makeEntry(m);
-					scheduleRefresh(id, cache[id].nextCheck);
-				}
-			} catch (_) {}
-			const retryAt = Date.now() + ERROR_RETRY;
-			for (const id of ids) {
-				if (returned.has(id)) continue;
-				const ex = cache[id];
-				if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
-				else cache[id] = {
-					aired: null,
-					nextEpisode: null,
-					status: null,
-					nextCheck: retryAt,
-					updated: Date.now()
-				};
-				scheduleRefresh(id, retryAt);
-			}
-			cacheStore.save();
-			if (returned.size) repaint(returned);
-		}
-		function queueIDs(ids) {
-			for (const raw of ids) {
-				const id = String(raw);
-				if (!active.has(id)) pending.add(id);
-			}
-			while (running < CONCURRENCY && pending.size) {
-				const batch = [];
-				for (const id of pending) {
-					pending.delete(id);
-					active.add(id);
-					batch.push(id);
-					if (batch.length >= BATCH) break;
-				}
-				running++;
-				updateBatch(batch).catch((e) => console.error("[AL-Additions] airing batch", e)).finally(() => {
-					batch.forEach((id) => active.delete(id));
-					running--;
-					queueIDs([]);
-				});
-			}
-		}
-		const dirty = new Set();
-		let fullScan = false;
-		let raf = 0;
-		function flush() {
-			raf = 0;
-			if (!onListPage()) {
-				dirty.clear();
-				fullScan = false;
-				return;
-			}
-			if (fullScan) {
-				fullScan = false;
-				dirty.clear();
-				scanAll();
-				return;
-			}
-			const stale = new Set();
-			for (const entry of dirty) {
-				const id = updateEntry(entry);
-				if (id && needsFetch(id)) stale.add(id);
-			}
-			dirty.clear();
-			queueIDs(stale);
-		}
-		const mark = () => {
-			if (!raf) raf = requestAnimationFrame(flush);
-		};
-		const refresh = debounce(scanAll, 100);
-		Core.onBodyMutation((muts) => {
-			if (!onListPage()) return;
-			for (const m of muts) {
-				const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
-				if (own) {
-					dirty.add(own);
-					mark();
-				}
-				for (const n of Array.from(m.addedNodes)) {
-					if (n.nodeType !== 1) continue;
-					const el = n;
-					if (el.matches(".entry")) dirty.add(el);
-					else {
-						el.querySelectorAll(".entry").forEach((e) => dirty.add(e));
-						if (el.matches(".list-wrap, .section-name") || el.querySelector(".section-name")) fullScan = true;
-					}
-					mark();
-				}
-			}
-		});
-		Core.onNavigate(() => {
-			if (onListPage()) {
-				fullScan = true;
-				mark();
-				refresh();
-			}
-		});
-		const isIncrease = (el) => {
-			for (let n = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
-				const label = `${n.getAttribute?.("aria-label") || ""} ${n.getAttribute?.("title") || ""}`.trim().toLowerCase();
-				if (/increase|increment|add episode|add chapter|next episode|next chapter/.test(label)) return true;
-				const text = (n.textContent || "").trim();
-				if (text === "+" || text === "+1") return true;
-			}
-			return false;
-		};
-		document.addEventListener("pointerdown", (e) => {
-			if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
-			const entry = e.target.closest(".entry");
-			const dot = entry && releasingDot(entry);
-			if (!dot || !dot.classList.contains(CLASS)) return;
-			const id = idOf(entry);
-			const data = id && cache[id];
-			const watched = progressOf(entry);
-			if (data && Number.isFinite(data.aired) && Number.isFinite(watched) && watched !== null && watched + 1 >= data.aired) {
-				optimistic.set(id, {
-					target: watched + 1,
-					expiresAt: Date.now() + OPTIMISTIC_TTL
-				});
-				dot.classList.remove(CLASS);
-			}
-		}, true);
-		for (const type of [
-			"click",
-			"input",
-			"change"
-		]) document.addEventListener(type, (e) => {
-			if (e.target instanceof Element && e.target.closest(".entry")) refresh();
-		}, true);
-		window.addEventListener("focus", refresh);
-		document.addEventListener("visibilitychange", () => {
-			if (!document.hidden) refresh();
-		});
-		setInterval(scanAll, 6e4);
-		Core.ready(() => {
-			if (onListPage()) {
-				scanAll();
-				setTimeout(scanAll, 500);
-				setTimeout(scanAll, 1500);
-			}
-		});
-	});
-	var ICONS = {
-		download: "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><polyline points=\"7 10 12 15 17 10\"/><line x1=\"12\" y1=\"15\" x2=\"12\" y2=\"3\"/>",
-		check: "<polyline points=\"20 6 9 17 4 12\"/>",
-		resync: "<polyline points=\"1 4 1 10 7 10\"/><path d=\"M3.51 15a9 9 0 1 0 2.13-9.36L1 10\"/>",
-		stop: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"currentColor\"/>",
-		list: "<line x1=\"8\" y1=\"6\" x2=\"21\" y2=\"6\"/><line x1=\"8\" y1=\"12\" x2=\"21\" y2=\"12\"/><line x1=\"8\" y1=\"18\" x2=\"21\" y2=\"18\"/><line x1=\"3\" y1=\"6\" x2=\"3.01\" y2=\"6\"/><line x1=\"3\" y1=\"12\" x2=\"3.01\" y2=\"12\"/><line x1=\"3\" y1=\"18\" x2=\"3.01\" y2=\"18\"/>",
-		sliders: "<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/><line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/><line x1=\"1\" y1=\"14\" x2=\"7\" y2=\"14\"/><line x1=\"9\" y1=\"8\" x2=\"15\" y2=\"8\"/><line x1=\"17\" y1=\"16\" x2=\"23\" y2=\"16\"/>",
-		close: "<line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/>",
-		edit: "<path d=\"M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z\"/>",
-		external: "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/><polyline points=\"15 3 21 3 21 9\"/><line x1=\"10\" y1=\"14\" x2=\"21\" y2=\"3\"/>",
-		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
-	};
-	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
-	var mediaRoute = () => {
-		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
+	function mediaRoute$1(pathname = location.pathname) {
+		const m = pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
 		return m ? {
 			kind: m[1],
 			type: m[1].toUpperCase(),
 			id: Number(m[2])
 		} : null;
-	};
-	function findExactText(text) {
-		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-		for (let t; t = walker.nextNode();) {
-			if (t.nodeValue?.trim() !== text || !t.parentElement) continue;
-			let el = t.parentElement;
-			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent?.trim() === text) el = el.parentElement;
-			return el;
-		}
-		return null;
 	}
+	function staffOrStudioRoute(pathname = location.pathname) {
+		const m = pathname.match(/^\/(staff|studio)\/(\d+)(?:\/|$)/);
+		return m ? {
+			kind: m[1],
+			id: m[2]
+		} : null;
+	}
+	function findMediaSidebarSpot(doc = document) {
+		const el = doc.querySelector(ANILIST_SELECTORS.sidebarData);
+		return el?.parentElement && el.parentElement !== doc.body ? {
+			parent: el.parentElement,
+			before: el
+		} : null;
+	}
+	function findOverviewContainer(doc = document) {
+		return doc.querySelector(ANILIST_SELECTORS.overview);
+	}
+	function findBannerElement(doc = document) {
+		return doc.querySelector(ANILIST_SELECTORS.banner);
+	}
+	defineModule({
+		id: "behindDots",
+		key: "behindDotsEnabled",
+		section: "AniList Enhancements",
+		layer: "feature",
+		requiresReload: false,
+		def: false,
+		legacy: ["behindDotsEnabled", "airingProgressIndicatorEnabled"],
+		title: "Airing Progress Indicator",
+		help: "Show an orange indicator when your watched episode count is behind the number of aired episodes.",
+		setup(ctx) {
+			const CLASS = "daiya-behind-dot";
+			const ORANGE = "rgb(255, 152, 0)";
+			const NO_AIRING_TTL = 216e5;
+			const AIRING_GRACE = 3e4;
+			const ERROR_RETRY = 3e5;
+			const PRUNE_AGE = 2592e6;
+			const BATCH = 25;
+			const CONCURRENCY = 4;
+			const OPTIMISTIC_TTL = 2500;
+			const QUERY = "query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }";
+			ctx.addStyle("daiya-behind-dot-css", `
+      .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
+      .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`);
+			const cacheStore = ctx.persistent("daiya-anilist-airing-cache-v5", (d) => {
+				for (const id of Object.keys(d)) if (!(Date.now() - Number(d[id]?.updated) < PRUNE_AGE)) delete d[id];
+			});
+			const cache = cacheStore.data;
+			const pending = new Set();
+			const active = new Set();
+			const timers = new Map();
+			const optimistic = new Map();
+			let running = 0;
+			const onListPage = () => location.pathname.includes("/animelist");
+			const idOf = (entry) => entry.querySelector("a[href*=\"/anime/\"]")?.getAttribute("href")?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] || null;
+			const needsFetch = (id) => {
+				const d = cache[id];
+				return !d || !Number.isFinite(d.nextCheck) || Date.now() >= d.nextCheck;
+			};
+			const sectionIsWatching = (wrap) => clean(wrap?.querySelector(".section-name")?.textContent) === "Watching";
+			function watchingEntries() {
+				const out = [];
+				for (const wrap of document.querySelectorAll(ANILIST_SELECTORS.listWrap)) if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll(".list-entries .entry")));
+				return out;
+			}
+			function progressOf(entry) {
+				const m = entry.querySelector(".progress")?.textContent?.match(/^\s*(\d+)/) || entry.textContent?.match(/(?:^|\s)(\d+)\s*\/\s*(?:\d+|\?)(?:\s|$)/);
+				return m ? Number(m[1]) : null;
+			}
+			function releasingDot(entry) {
+				const fast = entry.querySelector(".release-status.RELEASING");
+				if (fast) return fast;
+				for (const el of entry.querySelectorAll(".release-status, [class*='release-status']")) {
+					if (/\bRELEASING\b/i.test(typeof el.className === "string" ? el.className : "")) return el;
+					if (/^releasing$/i.test((el.getAttribute("aria-label") || el.getAttribute("title") || "").trim())) return el;
+				}
+				return null;
+			}
+			function updateEntry(entry) {
+				if (!entry || !entry.isConnected) return null;
+				const dot = releasingDot(entry);
+				if (!dot || !sectionIsWatching(entry.closest(".list-wrap"))) return null;
+				const id = idOf(entry);
+				if (!id) return null;
+				const watched = progressOf(entry);
+				if (!Number.isFinite(watched)) {
+					dot.classList.remove(CLASS);
+					return id;
+				}
+				const opt = optimistic.get(id);
+				if (opt) {
+					if (Date.now() >= opt.expiresAt || watched !== null && watched >= opt.target) optimistic.delete(id);
+					else {
+						dot.classList.remove(CLASS);
+						return id;
+					}
+				}
+				const data = cache[id];
+				const behind = !!data && Number.isFinite(data.aired) && watched !== null && watched < data.aired;
+				if (dot.classList.contains(CLASS) !== behind) dot.classList.toggle(CLASS, behind);
+				return id;
+			}
+			function scanAll() {
+				if (!onListPage()) return;
+				const stale = new Set();
+				for (const entry of watchingEntries()) {
+					const id = updateEntry(entry);
+					if (id && needsFetch(id)) stale.add(id);
+				}
+				queueIDs(stale);
+			}
+			function repaint(ids) {
+				for (const entry of watchingEntries()) {
+					const id = idOf(entry);
+					if (id && ids.has(id)) updateEntry(entry);
+				}
+			}
+			function makeEntry(media) {
+				const next = media.nextAiringEpisode;
+				const now = Date.now();
+				const base = {
+					status: media.status || null,
+					updated: now
+				};
+				if (!next || !Number.isFinite(Number(next.episode))) return {
+					...base,
+					aired: null,
+					nextEpisode: null,
+					nextCheck: now + NO_AIRING_TTL
+				};
+				const timeUntil = Number(next.timeUntilAiring);
+				const airingAt = Number(next.airingAt);
+				const nextCheck = Number.isFinite(timeUntil) ? now + Math.max(0, timeUntil) * 1e3 + AIRING_GRACE : Number.isFinite(airingAt) ? airingAt * 1e3 + AIRING_GRACE : now + NO_AIRING_TTL;
+				return {
+					...base,
+					aired: Math.max(0, Math.floor(Number(next.episode)) - 1),
+					nextEpisode: Number(next.episode),
+					nextCheck
+				};
+			}
+			function scheduleRefresh(id, at) {
+				const existing = timers.get(id);
+				if (existing) clearTimeout(existing);
+				timers.delete(id);
+				if (!Number.isFinite(at)) return;
+				const t = setTimeout(() => {
+					timers.delete(id);
+					queueIDs([id]);
+					repaint(new Set([id]));
+				}, Math.min(Math.max(0, at - Date.now()), 2147483647));
+				timers.set(id, t);
+			}
+			async function updateBatch(ids) {
+				const returned = new Set();
+				try {
+					const data = await ctx.api.query(QUERY, { ids: ids.map(Number) });
+					for (const m of data?.Page?.media || []) {
+						const id = String(m.id);
+						returned.add(id);
+						cache[id] = makeEntry(m);
+						scheduleRefresh(id, cache[id].nextCheck);
+					}
+				} catch (_) {}
+				const retryAt = Date.now() + ERROR_RETRY;
+				for (const id of ids) {
+					if (returned.has(id)) continue;
+					const ex = cache[id];
+					if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
+					else cache[id] = {
+						aired: null,
+						nextEpisode: null,
+						status: null,
+						nextCheck: retryAt,
+						updated: Date.now()
+					};
+					scheduleRefresh(id, retryAt);
+				}
+				cacheStore.save();
+				if (returned.size) repaint(returned);
+			}
+			function queueIDs(ids) {
+				for (const raw of ids) {
+					const id = String(raw);
+					if (!active.has(id)) pending.add(id);
+				}
+				while (running < CONCURRENCY && pending.size) {
+					const batch = [];
+					for (const id of pending) {
+						pending.delete(id);
+						active.add(id);
+						batch.push(id);
+						if (batch.length >= BATCH) break;
+					}
+					running++;
+					updateBatch(batch).catch((e) => console.error("[AL-Additions] airing batch", e)).finally(() => {
+						batch.forEach((id) => active.delete(id));
+						running--;
+						queueIDs([]);
+					});
+				}
+			}
+			const dirty = new Set();
+			let fullScan = false;
+			let raf = 0;
+			function flush() {
+				raf = 0;
+				if (!onListPage()) {
+					dirty.clear();
+					fullScan = false;
+					return;
+				}
+				if (fullScan) {
+					fullScan = false;
+					dirty.clear();
+					scanAll();
+					return;
+				}
+				const stale = new Set();
+				for (const entry of dirty) {
+					const id = updateEntry(entry);
+					if (id && needsFetch(id)) stale.add(id);
+				}
+				dirty.clear();
+				queueIDs(stale);
+			}
+			const mark = () => {
+				if (!raf) raf = requestAnimationFrame(flush);
+			};
+			const refresh = debounce(scanAll, 100);
+			ctx.onBodyMutation((muts) => {
+				if (!onListPage()) return;
+				for (const m of muts) {
+					const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
+					if (own) {
+						dirty.add(own);
+						mark();
+					}
+					for (const n of Array.from(m.addedNodes)) {
+						if (n.nodeType !== 1) continue;
+						const el = n;
+						if (el.matches(".entry")) dirty.add(el);
+						else {
+							el.querySelectorAll(".entry").forEach((e) => dirty.add(e));
+							if (el.matches(".list-wrap, .section-name") || el.querySelector(".section-name")) fullScan = true;
+						}
+						mark();
+					}
+				}
+			});
+			ctx.onNav(() => {
+				if (onListPage()) {
+					fullScan = true;
+					mark();
+					refresh();
+				}
+			});
+			const isIncrease = (el) => {
+				for (let n = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
+					const label = `${n.getAttribute?.("aria-label") || ""} ${n.getAttribute?.("title") || ""}`.trim().toLowerCase();
+					if (/increase|increment|add episode|add chapter|next episode|next chapter/.test(label)) return true;
+					const text = (n.textContent || "").trim();
+					if (text === "+" || text === "+1") return true;
+				}
+				return false;
+			};
+			ctx.listen(document, "pointerdown", (e) => {
+				if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
+				const entry = e.target.closest(".entry");
+				const dot = entry && releasingDot(entry);
+				if (!dot || !dot.classList.contains(CLASS)) return;
+				const id = idOf(entry);
+				const data = id && cache[id];
+				const watched = progressOf(entry);
+				if (data && Number.isFinite(data.aired) && Number.isFinite(watched) && watched !== null && watched + 1 >= data.aired) {
+					optimistic.set(id, {
+						target: watched + 1,
+						expiresAt: Date.now() + OPTIMISTIC_TTL
+					});
+					dot.classList.remove(CLASS);
+				}
+			}, true);
+			for (const type of [
+				"click",
+				"input",
+				"change"
+			]) ctx.listen(document, type, (e) => {
+				if (e.target instanceof Element && e.target.closest(".entry")) refresh();
+			}, true);
+			ctx.listen(window, "focus", refresh);
+			ctx.listen(document, "visibilitychange", () => {
+				if (!document.hidden) refresh();
+			});
+			ctx.interval(scanAll, 6e4);
+			ctx.ready(() => {
+				if (onListPage()) {
+					scanAll();
+					ctx.timeout(scanAll, 500);
+					ctx.timeout(scanAll, 1500);
+				}
+			});
+			ctx.onCleanup(() => {
+				if (raf) cancelAnimationFrame(raf);
+				raf = 0;
+				for (const t of timers.values()) clearTimeout(t);
+				timers.clear();
+				pending.clear();
+				active.clear();
+				optimistic.clear();
+				dirty.clear();
+				document.querySelectorAll(`.${CLASS}`).forEach((el) => el.classList.remove(CLASS));
+			});
+		}
+	});
 	var DEFAULT_ANISONGS_CONFIG = {
 		active: [],
 		presets: [
@@ -2918,7 +2320,7 @@
 		return template.replace(/\{title_romaji\}/gi, format(titleRomaji)).replace(/\{title_jp\}/gi, format(titleJp)).replace(/\{title_native\}/gi, format(titleJp)).replace(/\{title\}/gi, format(title)).replace(/\{artists\}/gi, format(artists)).replace(/\{artist\}/gi, format(artist)).replace(/\{anime_romaji\}/gi, format(animeRomaji)).replace(/\{anime_english\}/gi, format(animeEn)).replace(/\{anime_en\}/gi, format(animeEn)).replace(/\{anime_native\}/gi, format(animeJp)).replace(/\{anime_jp\}/gi, format(animeJp)).replace(/\{anime\}/gi, format(anime)).replace(/\{year\}/gi, format(year)).replace(/\{season\}/gi, format(season)).replace(/\{theme\}/gi, format(theme)).replace(/\{type\}/gi, format(type)).replace(/\{number\}/gi, format(number)).replace(/\{eps\}/gi, format(eps)).replace(/\{query_anime\}/gi, format(queryAnime)).replace(/\{query_jp\}/gi, format(queryJp)).replace(/\{query\}/gi, format(query));
 	}
 	var MODAL_ID$1 = "ala-anisongs-modal-backdrop";
-	addStyle("ala-anisongs-modal-style", `
+	var MODAL_CSS$1 = `
   #${MODAL_ID$1}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
   #${MODAL_ID$1} .ala-as-sheet{display:flex;flex-direction:column;width:min(660px,100%);height:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
   .ala-as-sheet *{box-sizing:border-box}
@@ -2998,8 +2400,9 @@
     .ala-as-json-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center}
     .ala-as-textarea{height:200px}
   }
-  `);
+  `;
 	function openAniSongsModal(inputEl) {
+		addStyle("ala-anisongs-modal-style", MODAL_CSS$1);
 		const existing = document.getElementById(MODAL_ID$1);
 		if (existing) existing.remove();
 		let stateConfig;
@@ -3892,10 +3295,12 @@
 			eps: song.eps
 		};
 	}
-	defineFeature({
+	defineModule({
 		id: "aniSongs",
 		key: "aniSongsEnabled",
 		section: "AniList Enhancements",
+		layer: "feature",
+		requiresReload: false,
 		def: false,
 		legacy: [
 			"aniSongsEnabled",
@@ -3911,13 +3316,14 @@
 			title: "Song Search Providers",
 			help: "Configure search shortcuts (YouTube, Spotify, etc.) and active music services.",
 			validate: validateAniSongsConfig
-		}]
-	}, () => {
-		const API = "https://rs.animethemes.moe/graphql";
-		const ROOT = "daiya-anisongs";
-		const TTL = 6048e5;
-		const EMPTY_TTL = 432e5;
-		addStyle("daiya-anisongs-style", `
+		}],
+		setup(ctx) {
+			const API = "https://rs.animethemes.moe/graphql";
+			const ROOT = "daiya-anisongs";
+			const TTL = 6048e5;
+			const EMPTY_TTL = 432e5;
+			ctx.ownUi(`#${ROOT}`);
+			ctx.addStyle("daiya-anisongs-style", `
       #${ROOT}{width:100%;margin-top:30px}
       #${ROOT} .daiya-anisongs-columns{display:flex;gap:30px;width:100%}
       #${ROOT} .daiya-anisongs-group{flex:1 1 0;min-width:0}
@@ -3951,11 +3357,11 @@
       #${ROOT} .daiya-anisongs-empty{text-align:center;opacity:.7;padding:10px}
       @media (max-width:700px){#${ROOT} .daiya-anisongs-columns{flex-direction:column;gap:10px}}
       @media (prefers-reduced-motion:reduce){#${ROOT} .daiya-anisong-collapsible,#${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title,#${ROOT} .daiya-anisong-link,#${ROOT} .daiya-anisong-version,#${ROOT} .daiya-anisongs-toggle{transition:none!important}}`);
-		const cacheStore = persistent("daiya_anisongs_cache_v8", (d) => {
-			for (const id of Object.keys(d)) if (!(Number(d[id]?.expires) > Date.now())) delete d[id];
-		});
-		const cache = cacheStore.data;
-		const atQuery = `query ($id: [Int!]) {
+			const cacheStore = ctx.persistent("daiya_anisongs_cache_v8", (d) => {
+				for (const id of Object.keys(d)) if (!(Number(d[id]?.expires) > Date.now())) delete d[id];
+			});
+			const cache = cacheStore.data;
+			const atQuery = `query ($id: [Int!]) {
       filterAnimeByExternalSite(site: ANILIST, id: $id) {
         title { romaji native }
         themes {
@@ -3995,127 +3401,165 @@
         }
       }
     }`;
-		const loadThemes = memo(async (id) => {
-			const hit = cache[String(id)];
-			if (hit && hit.expires > Date.now()) return hit.data;
-			const [themesRes, alRes] = await Promise.allSettled([gm.json(API, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"User-Agent": "AL-Additions"
-				},
-				data: JSON.stringify({
-					query: atQuery,
-					variables: { id: [Number(id)] }
-				})
-			}), AniList.query(`query ($id: Int) {
+			const loadThemes = memo(async (id) => {
+				const hit = cache[String(id)];
+				if (hit && hit.expires > Date.now()) return hit.data;
+				const [themesRes, alRes] = await Promise.allSettled([ctx.http.json(API, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"User-Agent": "AL-Additions"
+					},
+					data: JSON.stringify({
+						query: atQuery,
+						variables: { id: [Number(id)] }
+					})
+				}), ctx.api.query(`query ($id: Int) {
         Media(id: $id) {
           title { userPreferred english romaji native }
           seasonYear
           season
         }
       }`, { id: Number(id) })]);
-			const result = themesRes.status === "fulfilled" ? themesRes.value : null;
-			const alMedia = alRes.status === "fulfilled" ? alRes.value?.Media : null;
-			const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite) ? result.data.filterAnimeByExternalSite[0] : null;
-			const animeName = str(alMedia?.title?.userPreferred) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || document.querySelector(".header h1")?.textContent?.trim() || "";
-			const data = groupThemes(rawAnime, {
-				animeName,
-				animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
-				animeEn: str(alMedia?.title?.english) || animeName,
-				animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || "",
-				year: alMedia?.seasonYear || rawAnime?.year || "",
-				season: alMedia?.season || rawAnime?.season || ""
+				const result = themesRes.status === "fulfilled" ? themesRes.value : null;
+				const alMedia = alRes.status === "fulfilled" ? alRes.value?.Media : null;
+				const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite) ? result.data.filterAnimeByExternalSite[0] : null;
+				const animeName = str(alMedia?.title?.userPreferred) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || document.querySelector(".header h1")?.textContent?.trim() || "";
+				const data = groupThemes(rawAnime, {
+					animeName,
+					animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
+					animeEn: str(alMedia?.title?.english) || animeName,
+					animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || "",
+					year: alMedia?.seasonYear || rawAnime?.year || "",
+					season: alMedia?.season || rawAnime?.season || ""
+				});
+				const empty = !data.OP.length && !data.ED.length;
+				cache[String(id)] = {
+					expires: Date.now() + (empty ? EMPTY_TTL : TTL),
+					data
+				};
+				cacheStore.save();
+				return data;
 			});
-			const empty = !data.OP.length && !data.ED.length;
-			cache[String(id)] = {
-				expires: Date.now() + (empty ? EMPTY_TTL : TTL),
-				data
-			};
-			cacheStore.save();
-			return data;
-		});
-		function mount(state, overview) {
-			document.getElementById(ROOT)?.remove();
-			const config = getValidAniSongsConfig();
-			const presetMap = new Map();
-			config.presets.forEach((p) => presetMap.set(p.id, p));
-			const activePresets = config.active.map((id) => presetMap.get(id)).filter(Boolean);
-			const root = document.createElement("section");
-			root.id = ROOT;
-			root.dataset.animeId = state.id;
-			const cols = document.createElement("div");
-			cols.className = "daiya-anisongs-columns";
-			cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP"), createSongGroup("Endings", state.themes.ED, activePresets, "ED"));
-			root.appendChild(cols);
-			overview.appendChild(root);
-		}
-		let cur = null;
-		let backoff = {
-			id: null,
-			until: 0
-		};
-		const animeId = () => {
-			const r = mediaRoute();
-			return r && r.kind === "anime" ? String(r.id) : null;
-		};
-		async function sync() {
-			const id = animeId();
-			if (!id) {
+			function mount(state, overview) {
 				document.getElementById(ROOT)?.remove();
-				cur = null;
-				return;
+				const config = getValidAniSongsConfig();
+				const presetMap = new Map();
+				config.presets.forEach((p) => presetMap.set(p.id, p));
+				const activePresets = config.active.map((id) => presetMap.get(id)).filter(Boolean);
+				const root = document.createElement("section");
+				root.id = ROOT;
+				root.dataset.animeId = state.id;
+				const cols = document.createElement("div");
+				cols.className = "daiya-anisongs-columns";
+				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP"), createSongGroup("Endings", state.themes.ED, activePresets, "ED"));
+				root.appendChild(cols);
+				overview.appendChild(root);
 			}
-			if (cur?.id === id) return;
-			if (backoff.id === id && Date.now() < backoff.until) return;
-			document.getElementById(ROOT)?.remove();
-			const mine = {
-				id,
-				themes: null,
-				busy: true
+			let cur = null;
+			let backoff = {
+				id: null,
+				until: 0
 			};
-			cur = mine;
-			try {
-				const themes = await loadThemes(id, id);
-				if (cur !== mine) return;
-				if (!themes.OP.length && !themes.ED.length) return;
-				mine.themes = themes;
-				const overview = await Core.waitForSelector(".overview", 1e4);
-				if (cur === mine && overview && animeId() === id) mount(mine, overview);
-			} catch (err) {
-				console.error("[AL-Additions] Anisongs sync error:", err);
-				if (cur === mine) {
+			const animeId = () => {
+				const r = mediaRoute$1();
+				return r && r.kind === "anime" ? String(r.id) : null;
+			};
+			async function sync() {
+				const id = animeId();
+				if (!id) {
+					document.getElementById(ROOT)?.remove();
 					cur = null;
-					backoff = {
-						id,
-						until: Date.now() + 3e4
-					};
+					return;
 				}
-			} finally {
-				mine.busy = false;
-			}
-		}
-		function repair() {
-			const id = animeId();
-			if (!id) return;
-			if (cur?.id !== id) return void sync();
-			if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
-				const overview = document.querySelector(".overview");
-				if (overview) try {
-					mount(cur, overview);
+				if (cur?.id === id) return;
+				if (backoff.id === id && Date.now() < backoff.until) return;
+				document.getElementById(ROOT)?.remove();
+				const mine = {
+					id,
+					themes: null,
+					busy: true
+				};
+				cur = mine;
+				try {
+					const themes = await loadThemes(id, id);
+					if (cur !== mine) return;
+					if (!themes.OP.length && !themes.ED.length) return;
+					mine.themes = themes;
+					const overview = await ctx.waitForSelector(".overview", 1e4);
+					if (cur === mine && overview && animeId() === id) mount(mine, overview);
 				} catch (err) {
-					console.error("[AL-Additions] Anisongs repair error:", err);
+					console.error("[AL-Additions] Anisongs sync error:", err);
+					if (cur === mine) {
+						cur = null;
+						backoff = {
+							id,
+							until: Date.now() + 3e4
+						};
+					}
+				} finally {
+					mine.busy = false;
 				}
 			}
+			function repair() {
+				const id = animeId();
+				if (!id) return;
+				if (cur?.id !== id) return void sync();
+				if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
+					const overview = findOverviewContainer();
+					if (overview) try {
+						mount(cur, overview);
+					} catch (err) {
+						console.error("[AL-Additions] Anisongs repair error:", err);
+					}
+				}
+			}
+			ctx.ready(() => void sync());
+			ctx.onNav(() => void sync());
+			ctx.onBodyMutation(debounce(repair, 200));
+			ctx.onCleanup(() => {
+				cur = null;
+				document.getElementById(ROOT)?.remove();
+			});
 		}
-		Core.ready(sync);
-		Core.onNavigate(sync);
-		Core.onBodyMutation(debounce(repair, 200));
 	});
-	defineFeature({
+	var ICONS = {
+		download: "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><polyline points=\"7 10 12 15 17 10\"/><line x1=\"12\" y1=\"15\" x2=\"12\" y2=\"3\"/>",
+		check: "<polyline points=\"20 6 9 17 4 12\"/>",
+		resync: "<polyline points=\"1 4 1 10 7 10\"/><path d=\"M3.51 15a9 9 0 1 0 2.13-9.36L1 10\"/>",
+		stop: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"currentColor\"/>",
+		list: "<line x1=\"8\" y1=\"6\" x2=\"21\" y2=\"6\"/><line x1=\"8\" y1=\"12\" x2=\"21\" y2=\"12\"/><line x1=\"8\" y1=\"18\" x2=\"21\" y2=\"18\"/><line x1=\"3\" y1=\"6\" x2=\"3.01\" y2=\"6\"/><line x1=\"3\" y1=\"12\" x2=\"3.01\" y2=\"12\"/><line x1=\"3\" y1=\"18\" x2=\"3.01\" y2=\"18\"/>",
+		sliders: "<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/><line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/><line x1=\"1\" y1=\"14\" x2=\"7\" y2=\"14\"/><line x1=\"9\" y1=\"8\" x2=\"15\" y2=\"8\"/><line x1=\"17\" y1=\"16\" x2=\"23\" y2=\"16\"/>",
+		close: "<line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/>",
+		edit: "<path d=\"M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z\"/>",
+		external: "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/><polyline points=\"15 3 21 3 21 9\"/><line x1=\"10\" y1=\"14\" x2=\"21\" y2=\"3\"/>",
+		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
+	};
+	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
+	var mediaRoute = () => {
+		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
+		return m ? {
+			kind: m[1],
+			type: m[1].toUpperCase(),
+			id: Number(m[2])
+		} : null;
+	};
+	function findExactText(text) {
+		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+		for (let t; t = walker.nextNode();) {
+			if (t.nodeValue?.trim() !== text || !t.parentElement) continue;
+			let el = t.parentElement;
+			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent?.trim() === text) el = el.parentElement;
+			return el;
+		}
+		return null;
+	}
+	defineModule({
 		id: "banner",
 		key: "bannerEnabled",
 		section: "External Links, Downloads & Mappings",
+		layer: "feature",
+		requiresReload: false,
 		def: false,
 		legacy: [
 			"bannerEnabled",
@@ -4130,9 +3574,9 @@
 			def: false,
 			title: "User Profile Banners",
 			help: "Also show the download button on user profile banners (it is always shown on anime and manga pages)."
-		}]
-	}, () => {
-		addStyle("ala-banner-style", `
+		}],
+		setup(ctx) {
+			ctx.addStyle("ala-banner-style", `
       .banner{position:relative}
       .ala-banner-dl{position:absolute;right:12px;bottom:12px;z-index:5;display:inline-flex;align-items:center;justify-content:center;height:34px;min-width:34px;padding:0 8px;border:0;border-radius:17px;background:transparent;color:rgba(255,255,255,.8);font-family:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;overflow:hidden;-webkit-tap-highlight-color:transparent;transition:background .15s,color .15s}
       .ala-banner-dl[hidden]{display:none}
@@ -4146,72 +3590,771 @@
       @media (hover:hover){.ala-banner-dl:hover .ala-banner-lbl,.ala-banner-dl:focus-visible .ala-banner-lbl{max-width:130px;margin-left:7px}}
       @media (pointer:coarse){.ala-banner-dl{right:8px;bottom:8px;height:40px;min-width:40px;border-radius:20px}}
       @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
-		const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
-		const bannerAllowed = () => !!mediaRoute() || /^\/user\//.test(location.pathname) && Settings.get("bannerProfiles");
-		function download(onSaved) {
-			const banner = document.querySelector(".banner");
-			const url = banner && bannerAllowed() && bannerUrl(banner);
-			if (!url) return;
-			const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
-			const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
-			const fallback = () => {
-				openTab(url);
-				onSaved?.();
-			};
-			if (typeof _GM_download === "function") try {
-				_GM_download({
-					url,
-					name,
-					saveAs: false,
-					onload: () => onSaved?.(),
-					onerror: fallback
-				});
-				return;
-			} catch (_) {}
-			fallback();
-		}
-		function createButton() {
-			const btn = document.createElement("button");
-			btn.type = "button";
-			btn.className = "ala-banner-dl";
-			btn.title = "Download banner image";
-			btn.setAttribute("aria-label", "Download banner image");
-			btn.innerHTML = `<span class="ala-banner-ico">${icon("download", 18)}</span><span class="ala-banner-lbl">Download banner</span>`;
-			const ico = btn.firstElementChild;
-			const lbl = btn.lastElementChild;
-			btn.addEventListener("click", (e) => {
-				e.preventDefault();
-				e.stopPropagation();
-				download(() => {
-					btn.classList.add("is-done");
-					ico.innerHTML = icon("check", 18);
-					lbl.textContent = "Saved";
-					setTimeout(() => {
-						btn.classList.remove("is-done");
-						ico.innerHTML = icon("download", 18);
-						lbl.textContent = "Download banner";
-					}, 1600);
-				});
-			});
-			return btn;
-		}
-		function scan() {
-			const banner = document.querySelector(".banner");
-			if (!banner) return;
-			let btn = banner.querySelector(".ala-banner-dl");
-			const show = bannerAllowed() && !!bannerUrl(banner);
-			if (!btn && !show) return;
-			if (!btn) {
-				btn = createButton();
-				banner.appendChild(btn);
+			const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
+			const bannerAllowed = () => !!mediaRoute$1() || /^\/user\//.test(location.pathname) && !!ctx.get("bannerProfiles");
+			function download(onSaved) {
+				const banner = findBannerElement();
+				const url = banner && bannerAllowed() && bannerUrl(banner);
+				if (!url) return;
+				const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
+				const name = `anilist-banner-${mediaRoute$1()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
+				const fallback = () => {
+					openTab(url);
+					onSaved?.();
+				};
+				if (typeof _GM_download === "function") try {
+					_GM_download({
+						url,
+						name,
+						saveAs: false,
+						onload: () => onSaved?.(),
+						onerror: fallback
+					});
+					return;
+				} catch (_) {}
+				fallback();
 			}
-			btn.hidden = !show;
+			function createButton() {
+				const btn = document.createElement("button");
+				btn.type = "button";
+				btn.className = "ala-banner-dl";
+				btn.title = "Download banner image";
+				btn.setAttribute("aria-label", "Download banner image");
+				btn.innerHTML = `<span class="ala-banner-ico">${icon("download", 18)}</span><span class="ala-banner-lbl">Download banner</span>`;
+				const ico = btn.firstElementChild;
+				const lbl = btn.lastElementChild;
+				btn.addEventListener("click", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					download(() => {
+						btn.classList.add("is-done");
+						ico.innerHTML = icon("check", 18);
+						lbl.textContent = "Saved";
+						ctx.timeout(() => {
+							btn.classList.remove("is-done");
+							ico.innerHTML = icon("download", 18);
+							lbl.textContent = "Download banner";
+						}, 1600);
+					});
+				});
+				return btn;
+			}
+			function scan() {
+				const banner = findBannerElement();
+				if (!banner) return;
+				let btn = banner.querySelector(".ala-banner-dl");
+				const show = bannerAllowed() && !!bannerUrl(banner);
+				if (!btn && !show) return;
+				if (!btn) {
+					btn = createButton();
+					banner.appendChild(btn);
+				}
+				btn.hidden = !show;
+			}
+			const scanSoon = debounce(scan, 150);
+			ctx.ready(scan);
+			ctx.onNav(() => ctx.timeout(scan, 300));
+			ctx.onBodyMutation(scanSoon);
+			ctx.onCleanup(() => {
+				document.querySelectorAll(".ala-banner-dl").forEach((el) => el.remove());
+			});
 		}
-		const scanSoon = debounce(scan, 150);
-		Core.ready(scan);
-		Core.onNavigate(() => setTimeout(scan, 300));
-		Core.onBodyMutation(scanSoon);
 	});
+	var RateLimiter = class {
+		rate;
+		min;
+		max;
+		burst;
+		adaptive;
+		jitter;
+		persistKey;
+		tokens;
+		last;
+		until;
+		okStreak;
+		queue;
+		constructor({ rate, min = 1, max = rate, burst = 1, adaptive = false, jitter = false, persistKey = null }) {
+			this.min = min;
+			this.max = max;
+			this.burst = burst;
+			this.adaptive = adaptive;
+			this.jitter = jitter;
+			this.persistKey = persistKey;
+			this.rate = Math.min(max, Math.max(min, rate));
+			this.tokens = burst;
+			this.last = Date.now();
+			this.until = 0;
+			this.okStreak = 0;
+			this.queue = Promise.resolve();
+		}
+		get resumeAt() {
+			const stored = this.persistKey ? Number(store$1.get(this.persistKey, 0)) || 0 : 0;
+			const at = Math.max(this.until, stored);
+			return at > Date.now() ? at : 0;
+		}
+		setRate(n) {
+			this.rate = Math.min(this.max, Math.max(this.min, n));
+		}
+		acquire(check) {
+			const run = this.queue.then(() => this._take(check));
+			this.queue = run.catch(() => {});
+			return run;
+		}
+		async _take(check) {
+			for (;;) {
+				check?.();
+				const now = Date.now();
+				const resume = this.resumeAt;
+				if (resume) {
+					this.tokens = 0;
+					this.last = resume;
+					await sleep(Math.min(1e3, resume - now));
+					continue;
+				}
+				this.tokens = Math.min(this.burst, this.tokens + (now - this.last) / 6e4 * this.rate);
+				this.last = now;
+				if (this.tokens >= 1) {
+					this.tokens -= 1;
+					return;
+				}
+				await sleep(Math.max(15, (1 - this.tokens) / this.rate * 6e4));
+			}
+		}
+		success() {
+			if (this.adaptive && ++this.okStreak >= 25 && this.rate < this.max) {
+				this.setRate(this.rate + Math.max(1, Math.round(this.rate * .1)));
+				this.okStreak = 0;
+			}
+		}
+		limit(ms) {
+			this.okStreak = 0;
+			this.tokens = 0;
+			if (this.adaptive) this.setRate(Math.floor(this.rate / 2));
+			if (!(ms > 0)) return;
+			this.until = Math.max(this.until, Date.now() + ms * (this.jitter ? .9 + Math.random() * .3 : 1));
+			if (this.persistKey) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
+		}
+	};
+	var KNOWN_LIST_FIELDS = [
+		"mediaId",
+		"id",
+		"score",
+		"status",
+		"progress",
+		"progressVolumes",
+		"notes",
+		"startedAt",
+		"completedAt",
+		"repeat",
+		"priority",
+		"private",
+		"hiddenFromStatusLists",
+		"customLists",
+		"advancedScores",
+		"updatedAt",
+		"media",
+		"title",
+		"coverImage",
+		"format",
+		"episodes",
+		"volumes",
+		"chapters",
+		"averageScore",
+		"popularity",
+		"genres",
+		"tags",
+		"bannerImage"
+	];
+	var KNOWN_MEDIA_FIELDS = [
+		"id",
+		"idMal",
+		"type",
+		"title",
+		"format",
+		"episodes",
+		"chapters",
+		"status",
+		"mediaListEntry",
+		"season",
+		"seasonYear",
+		"nextAiringEpisode",
+		"synonyms",
+		"isAdult",
+		"genres",
+		"tags",
+		"bannerImage",
+		"coverImage",
+		"description"
+	];
+	function parseEntityMeta(query, vars) {
+		const clean = query.replace(/#[^\n\r]*/g, " ").replace(/\s+/g, " ");
+		if (/\bMediaListCollection\b/i.test(clean)) {
+			const type = (vars.type || "ANIME").toUpperCase();
+			const who = vars.userId || (vars.userName ? String(vars.userName).toLowerCase() : "me");
+			const chunkPart = vars.chunk != null ? `:${vars.chunk}` : "";
+			const isSuperset = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length > 12;
+			const requiredFields = new Set();
+			for (const f of KNOWN_LIST_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
+			return {
+				entityKey: `MediaListCollection:${type}:${who}${chunkPart}`,
+				isSuperset,
+				requiredFields
+			};
+		}
+		const mediaMatch = clean.match(/\bMedia\s*\(\s*id\s*:\s*\$([a-zA-Z0-9_]+)/i);
+		if (mediaMatch && vars[mediaMatch[1]]) {
+			const id = vars[mediaMatch[1]];
+			const fieldCount = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length;
+			const requiredFields = new Set();
+			for (const f of KNOWN_MEDIA_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
+			return {
+				entityKey: `Media:${id}`,
+				isSuperset: fieldCount > 10,
+				requiredFields
+			};
+		}
+		if (/\bViewer\b/i.test(clean)) return {
+			entityKey: "Viewer",
+			isSuperset: clean.includes("mediaListOptions"),
+			requiredFields: new Set(["id", "name"])
+		};
+		return null;
+	}
+	function isSubsetOf(subset, superset) {
+		for (const item of subset) if (!superset.has(item)) return false;
+		return true;
+	}
+	var AniList = (() => {
+		const limiter = new RateLimiter({
+			rate: 25,
+			max: 90,
+			burst: 1,
+			persistKey: "ala_anilist_api_resume_at"
+		});
+		const entityCache = new Map();
+		const inflightExact = new Map();
+		const inflightEntities = new Map();
+		const ENTITY_TTL = 18e4;
+		function getCsrfToken() {
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			if (typeof win.al_token === "string" && win.al_token) return win.al_token;
+			try {
+				const meta = win.document?.querySelector("meta[name=\"csrf-token\"]");
+				if (meta?.content) return meta.content;
+			} catch (_) {}
+			try {
+				const scripts = win.document?.querySelectorAll("head script") || [];
+				for (const s of scripts) {
+					const m = s.textContent?.match(/window\.al_token\s*=\s*['"]([^'"]+)['"]/);
+					if (m && m[1]) return m[1];
+				}
+			} catch (_) {}
+			return null;
+		}
+		function isBrowserLoggedIn() {
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const doc = win.document || document;
+			if (doc?.querySelector?.("nav a[href=\"/login\"], .nav a[href=\"/login\"]")) {
+				clearViewer();
+				return false;
+			}
+			if ((win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user)?.id) return true;
+			if (doc?.querySelector?.("nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .user-wrap .avatar")) return true;
+			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
+		}
+		const header = (res, name) => {
+			try {
+				return res?.headers?.get?.(name) ?? null;
+			} catch (_) {
+				return null;
+			}
+		};
+		function resetDelay(res) {
+			const retry = Number(header(res, "Retry-After"));
+			if (retry > 0) return Math.min(retry * 1e3, 12e4);
+			const reset = Number(header(res, "X-RateLimit-Reset"));
+			if (reset > 0) return Math.min((reset > 0xe8d4a51000 ? reset : reset * 1e3) - Date.now(), 12e4);
+			return 0;
+		}
+		function handle(res) {
+			const advertised = Number(header(res, "X-RateLimit-Limit"));
+			if (advertised > 0) limiter.setRate(Math.floor(advertised * .85));
+			if (res?.status === 429) return limiter.limit(resetDelay(res) || 6e4);
+			const remaining = header(res, "X-RateLimit-Remaining");
+			if (remaining != null && Number(remaining) <= 1) limiter.limit(resetDelay(res));
+		}
+		async function executeNetworkRequest(q, variables, retries, forceFresh = false) {
+			const csrfToken = getCsrfToken();
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const fetchFn = (typeof win.fetch === "function" ? win.fetch : fetch).bind(win);
+			const backoff = () => sleep(1500 * (4 - retries));
+			const endpoint = `${win.location?.origin || "https://anilist.co"}/graphql`;
+			const headers = {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+				...forceFresh ? { "Cache-Control": "no-cache" } : {}
+			};
+			if (csrfToken) headers["X-CSRF-TOKEN"] = csrfToken;
+			let res;
+			try {
+				await limiter.acquire();
+				res = await fetchFn(endpoint, {
+					method: "POST",
+					headers,
+					cache: forceFresh ? "no-store" : void 0,
+					credentials: "include",
+					body: JSON.stringify({
+						query: q,
+						variables
+					})
+				});
+			} catch (e) {
+				if (retries > 0) {
+					await backoff();
+					return executeNetworkRequest(q, variables, retries - 1, forceFresh);
+				}
+				throw new Error(`AniList network error: ${e?.message || e}`);
+			}
+			handle(res);
+			if (!res) throw new Error("AniList network error: empty response");
+			if ((res.status === 429 || res.status >= 500) && retries > 0) {
+				if (res.status >= 500) await backoff();
+				return executeNetworkRequest(q, variables, retries - 1, forceFresh);
+			}
+			let json = null;
+			try {
+				json = await res.json();
+			} catch (_) {}
+			const message = json?.errors?.length ? json.errors.map((e) => e.message).join("; ") : "";
+			if (res.status === 401 || /invalid token|unauthenticated|unauthorized/i.test(message)) {
+				clearViewer();
+				throw authError("AniList", "AniList session unauthenticated — please log in to AniList.");
+			}
+			if (message) throw new Error(message);
+			if (!res.ok || !json) throw new Error(`AniList API HTTP ${res.status}`);
+			return json.data;
+		}
+		async function query(q, variables = {}, optionsOrRetries) {
+			const opts = typeof optionsOrRetries === "number" ? { retries: optionsOrRetries } : optionsOrRetries || {};
+			const retries = opts.retries ?? 3;
+			if (/\bmutation\b/i.test(q)) {
+				invalidate();
+				return executeNetworkRequest(q, variables, retries);
+			}
+			const meta = parseEntityMeta(q, variables);
+			const now = Date.now();
+			const exactKey = `${q}\u0001${JSON.stringify(variables)}`;
+			if (!opts.forceFresh && meta) {
+				const cached = entityCache.get(meta.entityKey);
+				if (cached && now - cached.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, cached.fields)) {
+					logDebug("[ANILIST API] 🎯 Cache HIT via Subset matching:", meta.entityKey);
+					return cached.data;
+				}
+			}
+			if (meta && !opts.forceFresh) {
+				const flyingEntity = inflightEntities.get(meta.entityKey);
+				if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
+					logDebug("[ANILIST API] 🔗 Attached to in-flight Superset request:", meta.entityKey);
+					return flyingEntity.promise;
+				}
+			}
+			const flyingExact = inflightExact.get(exactKey);
+			if (flyingExact && !opts.forceFresh) return flyingExact;
+			const networkPromise = executeNetworkRequest(q, variables, retries, opts.forceFresh).then((data) => {
+				if (meta && data) entityCache.set(meta.entityKey, {
+					time: Date.now(),
+					data,
+					isSuperset: meta.isSuperset,
+					fields: meta.requiredFields
+				});
+				return data;
+			}).finally(() => {
+				inflightExact.delete(exactKey);
+				if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) inflightEntities.delete(meta.entityKey);
+			});
+			inflightExact.set(exactKey, networkPromise);
+			if (meta) {
+				const existing = inflightEntities.get(meta.entityKey);
+				if (!existing || !existing.isSuperset && meta.isSuperset) inflightEntities.set(meta.entityKey, {
+					promise: networkPromise,
+					isSuperset: meta.isSuperset,
+					fields: meta.requiredFields
+				});
+			}
+			return networkPromise;
+		}
+		function formatMediaListResult(mlc) {
+			const mergedCollection = {
+				user: mlc.user,
+				lists: mlc.lists || []
+			};
+			const seenEntryIds = new Set();
+			const allEntries = [];
+			for (const list of mergedCollection.lists) for (const entry of list.entries || []) if (!seenEntryIds.has(entry.id)) {
+				seenEntryIds.add(entry.id);
+				allEntries.push(entry);
+			}
+			return {
+				collection: mergedCollection,
+				lists: mergedCollection.lists,
+				allEntries,
+				user: mergedCollection.user
+			};
+		}
+		function parseRpcMediaList(payload) {
+			if (!payload || typeof payload !== "object") return null;
+			const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
+			if (mlc && Array.isArray(mlc.lists)) return formatMediaListResult(mlc);
+			const entities = payload.entities || payload;
+			const entriesMap = entities?.listEntry || entities?.mediaListEntry;
+			if (entriesMap && typeof entriesMap === "object") {
+				const mediaMap = entities.media || entities.listEntryMedia || {};
+				const allEntries = [];
+				for (const rawEntry of Object.values(entriesMap)) {
+					if (!rawEntry || typeof rawEntry !== "object") continue;
+					const mediaId = rawEntry.mediaId || (typeof rawEntry.media === "number" ? rawEntry.media : rawEntry.media?.id);
+					if (!mediaId) continue;
+					const mediaObj = typeof rawEntry.media === "object" && rawEntry.media !== null ? rawEntry.media : mediaMap[mediaId] || { id: mediaId };
+					allEntries.push({
+						...rawEntry,
+						mediaId,
+						media: mediaObj
+					});
+				}
+				if (allEntries.length === 0) return null;
+				const userObj = entities.user ? Object.values(entities.user)[0] : void 0;
+				const lists = [];
+				if (entities.listSection && typeof entities.listSection === "object") for (const sec of Object.values(entities.listSection)) {
+					if (!sec) continue;
+					lists.push({
+						name: sec.name || "",
+						isCustomList: !!sec.isCustomList,
+						status: sec.status,
+						entries: Array.isArray(sec.entries) ? sec.entries.map((id) => entriesMap[id]).filter(Boolean) : []
+					});
+				}
+				const user = userObj && userObj.id ? {
+					id: Number(userObj.id),
+					name: String(userObj.name || "")
+				} : void 0;
+				return {
+					collection: {
+						lists,
+						user
+					},
+					allEntries,
+					lists,
+					user
+				};
+			}
+			return null;
+		}
+		function tryGetCachedMediaList(target, type, userId, userName) {
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const t = type.toUpperCase();
+			const isId = typeof target === "number" || /^\d+$/.test(String(target));
+			const id = userId || (isId ? Number(target) : void 0);
+			const name = userName || (!isId ? String(target).trim().toLowerCase() : void 0);
+			const userMap = win.__ALFL_USER_MAP__;
+			const idMap = win.__ALFL_ID_MAP__;
+			const resolvedId = id || (name && userMap ? userMap.get(name) : void 0);
+			const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0);
+			const entityKeys = [];
+			if (resolvedId) entityKeys.push(`MediaListCollection:${t}:${resolvedId}`);
+			if (resolvedName) entityKeys.push(`MediaListCollection:${t}:${resolvedName}`);
+			for (const k of entityKeys) {
+				const cached = entityCache.get(k);
+				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection) {
+					logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:", k);
+					return formatMediaListResult(cached.data.MediaListCollection);
+				}
+			}
+			const gqlStore = win.__ALFL_GQL_STORE__;
+			if (gqlStore) {
+				const gqlKeys = [];
+				if (resolvedId) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
+				if (resolvedName) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedName}:{}`);
+				for (const k of gqlKeys) {
+					const cached = gqlStore.get(k);
+					if (cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
+						const raw = new TextDecoder().decode(cached.snap.buf);
+						const json = JSON.parse(raw);
+						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
+						if (mlc && Array.isArray(mlc.lists)) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
+							const result = formatMediaListResult(mlc);
+							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							return result;
+						}
+					} catch (_) {}
+				}
+				for (const [k, cached] of gqlStore.entries()) {
+					if (!k.startsWith(`gql:MediaListCollection:${t}:`)) continue;
+					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
+					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
+					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
+						const raw = new TextDecoder().decode(cached.snap.buf);
+						const json = JSON.parse(raw);
+						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
+						if (mlc && Array.isArray(mlc.lists)) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):", k);
+							const result = formatMediaListResult(mlc);
+							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							return result;
+						}
+					} catch (_) {}
+				}
+			}
+			const rpcCache = win.__ALFL_RPC_CACHE__;
+			if (rpcCache) {
+				const rpcKeys = [];
+				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
+				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
+				for (const k of rpcKeys) {
+					const cached = rpcCache.get(k);
+					if (cached && Date.now() - cached.time < 3e5 && cached.msg) {
+						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
+						if (result && result.allEntries.length > 0) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:", k);
+							return result;
+						}
+					}
+				}
+				for (const [k, cached] of rpcCache.entries()) {
+					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
+					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
+					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
+					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.msg) {
+						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
+						if (result && result.allEntries.length > 0) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):", k);
+							return result;
+						}
+					}
+				}
+			}
+			return null;
+		}
+		async function getMediaList(target, type = "ANIME", options) {
+			const isId = typeof target === "number" || /^\d+$/.test(String(target));
+			const userId = options?.userId || (isId ? Number(target) : void 0);
+			const userName = options?.userName || (!isId ? String(target).trim() : void 0);
+			if (!options?.forceFresh) {
+				const cached = tryGetCachedMediaList(target, type, userId, userName);
+				if (cached) return cached;
+			}
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const rpcInflight = win.__ALFL_RPC_INFLIGHT__;
+			if (rpcInflight && !options?.forceFresh) {
+				const t = type.toUpperCase();
+				const userMap = win.__ALFL_USER_MAP__;
+				const idMap = win.__ALFL_ID_MAP__;
+				const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : void 0);
+				const resolvedName = userName ? userName.toLowerCase() : resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0;
+				const rpcKeys = [];
+				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
+				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
+				const checkInflight = async (k, flight) => {
+					try {
+						logDebug("[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
+						const msg = await Promise.race([flight.promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5e3))]);
+						const parsed = parseRpcMediaList(msg?.result ?? msg);
+						if (parsed && parsed.allEntries.length > 0) {
+							logDebug("[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
+							return parsed;
+						}
+					} catch (_) {}
+					return null;
+				};
+				for (const k of rpcKeys) {
+					const flight = rpcInflight.get(k);
+					if (flight) {
+						const res = await checkInflight(k, flight);
+						if (res) return res;
+					}
+				}
+				for (const [k, flight] of rpcInflight.entries()) {
+					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
+					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
+					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
+					if (matchId || matchName) {
+						const res = await checkInflight(k, flight);
+						if (res) return res;
+					}
+				}
+			}
+			const mlc = (await query(`query ($userId: Int, $userName: String, $type: MediaType) {
+      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
+        user { id name }
+        lists {
+          name
+          isCustomList
+          status
+          entries {
+            id
+            mediaId
+            status
+            score
+            progress
+            progressVolumes
+            repeat
+            priority
+            notes
+            customLists
+            startedAt { year month day }
+            completedAt { year month day }
+            media {
+              id
+              idMal
+              format
+              episodes
+              chapters
+              status
+              title { userPreferred english romaji native }
+            }
+          }
+        }
+      }
+    }`, {
+				userId: userId || void 0,
+				userName: userId ? void 0 : userName || void 0,
+				type
+			}, { forceFresh: options?.forceFresh }))?.MediaListCollection;
+			if (!mlc || !Array.isArray(mlc.lists)) throw new Error("Unexpected MediaListCollection response shape");
+			return formatMediaListResult(mlc);
+		}
+		async function viewer(forceFresh = false) {
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			if ((win.document || document)?.querySelector?.("nav a[href=\"/login\"], .nav a[href=\"/login\"]")) {
+				clearViewer();
+				return null;
+			}
+			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+			if (nuxtUser?.id) {
+				const nuxtId = Number(nuxtUser.id);
+				const storedId = Number(store$1.get("al_user_id", 0));
+				if (storedId && storedId !== nuxtId) clearViewer();
+			}
+			if (!forceFresh) {
+				const name = store$1.get("al_username", null);
+				const fmt = store$1.get("al_score_format", null);
+				const id = Number(store$1.get("al_user_id", 0));
+				if (name && fmt && id) return {
+					id,
+					name,
+					scoreFormat: fmt
+				};
+			}
+			if (!hasAuth()) return null;
+			const d = await query("query { Viewer { id name mediaListOptions { scoreFormat } } }", {}).catch((e) => {
+				if (e?.auth) throw e;
+				return null;
+			});
+			if (d?.Viewer) {
+				store$1.set("al_user_id", d.Viewer.id);
+				store$1.set("al_username", d.Viewer.name);
+				store$1.set("al_score_format", d.Viewer.mediaListOptions.scoreFormat);
+				return {
+					id: d.Viewer.id,
+					name: d.Viewer.name,
+					scoreFormat: d.Viewer.mediaListOptions.scoreFormat
+				};
+			}
+			return null;
+		}
+		const clearViewer = () => {
+			store$1.del("al_username");
+			store$1.del("al_user_id");
+			store$1.del("al_score_format");
+		};
+		const invalidate = (entityKeyPrefix) => {
+			if (!entityKeyPrefix) {
+				entityCache.clear();
+				inflightEntities.clear();
+			} else {
+				for (const k of entityCache.keys()) if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
+				for (const k of inflightEntities.keys()) if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
+			}
+			(typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window).__ALFL_CLEAR__?.();
+		};
+		const invalidateMediaList = (target, type) => {
+			if (!target) return invalidate("MediaListCollection");
+			const t = type ? type.toUpperCase() : "";
+			const prefix = t ? `MediaListCollection:${t}:${String(target).toLowerCase()}` : `MediaListCollection:`;
+			invalidate(prefix);
+		};
+		const hasAuth = () => isBrowserLoggedIn();
+		const resumeAt = () => limiter.resumeAt;
+		return {
+			query,
+			getMediaList,
+			viewer,
+			clearViewer,
+			invalidate,
+			invalidateMediaList,
+			hasAuth,
+			resumeAt
+		};
+	})();
+	var MediaData = (() => {
+		async function get(id, type, opts) {
+			try {
+				return (await AniList.query(`query($id:Int,$type:MediaType){ Media(id:$id,type:$type){
+          id idMal format title { userPreferred english romaji native }
+          episodes chapters status season seasonYear nextAiringEpisode { episode }
+          mediaListEntry { score progress status completedAt { year month day } }
+        } }`, {
+					id: Number(id),
+					type
+				}))?.Media || null;
+			} catch (e) {
+				if (opts?.throwAuth && e?.auth) throw e;
+				logDebug("[MEDIA DATA] fetch failed:", e?.message || e);
+				return null;
+			}
+		}
+		async function save(id, _type, c) {
+			const entry = (await AniList.query(`mutation($mediaId:Int!,$score:Float,$progress:Int,$status:MediaListStatus,$completedAt:FuzzyDateInput){
+        SaveMediaListEntry(mediaId:$mediaId,score:$score,progress:$progress,status:$status,completedAt:$completedAt){
+          score progress status completedAt { year month day }
+        } }`, {
+				mediaId: Number(id),
+				score: c.score,
+				progress: c.progress,
+				status: c.status,
+				completedAt: c.completedAt
+			}))?.SaveMediaListEntry || null;
+			AniList.invalidate(`Media:${id}`);
+			AniList.invalidateMediaList();
+			return entry;
+		}
+		return {
+			get,
+			save
+		};
+	})();
 	var STATUSES = [
 		"Completed",
 		"Planning",
@@ -5204,11 +5347,12 @@
 			}
 		});
 	});
-	defineFeature({
+	defineModule({
 		id: "devMode",
 		key: "devModeEnabled",
 		section: "Advanced",
 		layer: "service",
+		requiresReload: false,
 		def: false,
 		title: "Developer Mode",
 		help: "Enable developer diagnostics and verbose module logging in the browser console.",
@@ -5255,8 +5399,9 @@
 				title: "Core & Observer Debug",
 				help: "Log DOM observer mutations, route changes, and general script lifecycle events."
 			}
-		]
-	}, () => {});
+		],
+		setup: () => {}
+	});
 	var STANDALONE = {
 		fastLoad: {
 			name: "AniList Fast Load",
@@ -7083,108 +7228,108 @@
 			installPointerPrefetch(yielded);
 		}
 	});
-	defineFeature({
+	defineModule({
 		id: "keyframe",
 		key: "keyframeEnabled",
 		section: "External Links, Downloads & Mappings",
+		layer: "feature",
+		requiresReload: false,
 		def: false,
 		legacy: ["keyframeEnabled"],
 		title: "Keyframe Staff List Links",
-		help: "Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List."
-	}, () => {
-		const ID = "ala-keyframe-link";
-		const BASE = "https://keyframe-staff-list.com";
-		const LABEL = "Keyframe Staff List";
-		const SLOT = ".filters";
-		const PATHS = {
-			staff: "person",
-			studio: "studio"
-		};
-		const route = () => {
-			const m = location.pathname.match(/^\/(staff|studio)\/(\d+)(?:\/|$)/);
-			return m ? {
-				kind: m[1],
-				id: m[2]
-			} : null;
-		};
-		addStyle("ala-keyframe-style", `
+		help: "Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List.",
+		setup(ctx) {
+			const ID = "ala-keyframe-link";
+			const BASE = "https://keyframe-staff-list.com";
+			const LABEL = "Keyframe Staff List";
+			const SLOT = ANILIST_SELECTORS.filtersSlot;
+			const PATHS = {
+				staff: "person",
+				studio: "studio"
+			};
+			ctx.addStyle("ala-keyframe-style", `
       #${ID}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
       #${ID}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
       #${ID}.ala-kf-plain:hover{background:rgb(var(--color-blue));color:#fff}
       #${ID} .icon{flex:0 0 auto}`);
-		const copyScope = (from, to) => {
-			for (const at of Array.from(from.attributes)) if (at.name.startsWith("data-v-")) to.setAttribute(at.name, at.value);
-		};
-		function skin(a) {
-			if (!a || a.dataset.kfSkin) return;
-			const ref = a.parentElement?.querySelector(".mini-select");
-			if (!ref) return;
-			a.classList.remove("ala-kf-plain");
-			a.classList.add("mini-select");
-			copyScope(ref, a);
-			const refIcon = ref.querySelector("svg");
-			const refLabel = ref.querySelector(".label");
-			const iconEl = a.querySelector("svg");
-			const labelEl = a.querySelector("span");
-			if (iconEl) {
-				iconEl.classList.add("icon");
-				if (refIcon) copyScope(refIcon, iconEl);
-			}
-			if (labelEl) {
-				labelEl.classList.add("label");
-				if (refLabel) copyScope(refLabel, labelEl);
-			}
-			a.dataset.kfSkin = "1";
-		}
-		function build(r) {
-			const a = document.createElement("a");
-			a.id = ID;
-			a.className = "ala-kf-plain";
-			a.href = `${BASE}/${PATHS[r.kind]}/${r.id}`;
-			a.target = "_blank";
-			a.rel = "noopener noreferrer";
-			a.title = `Open on ${LABEL}`;
-			a.setAttribute("aria-label", `Open on ${LABEL}`);
-			a.innerHTML = `${icon("external", 14)}<span>${LABEL}</span>`;
-			a.addEventListener("click", (e) => e.stopPropagation());
-			return a;
-		}
-		let token = 0;
-		let placedKey = null;
-		let placing = false;
-		async function place() {
-			const r = route();
-			const key = r && `${r.kind}:${r.id}`;
-			if (key && key === placedKey && document.getElementById(ID)) return;
-			document.getElementById(ID)?.remove();
-			placedKey = null;
-			if (!r) return;
-			const mine = ++token;
-			placing = true;
-			try {
-				const row = await Core.waitForSelector(SLOT, 8e3);
-				const now = route();
-				if (row && mine === token && now && now.kind === r.kind && now.id === r.id && !document.getElementById(ID)) {
-					const a = build(r);
-					row.insertBefore(a, row.firstChild);
-					skin(a);
-					placedKey = key;
+			const copyScope = (from, to) => {
+				for (const at of Array.from(from.attributes)) if (at.name.startsWith("data-v-")) to.setAttribute(at.name, at.value);
+			};
+			function skin(a) {
+				if (!a || a.dataset.kfSkin) return;
+				const ref = a.parentElement?.querySelector(".mini-select");
+				if (!ref) return;
+				a.classList.remove("ala-kf-plain");
+				a.classList.add("mini-select");
+				copyScope(ref, a);
+				const refIcon = ref.querySelector("svg");
+				const refLabel = ref.querySelector(".label");
+				const iconEl = a.querySelector("svg");
+				const labelEl = a.querySelector("span");
+				if (iconEl) {
+					iconEl.classList.add("icon");
+					if (refIcon) copyScope(refIcon, iconEl);
 				}
-			} finally {
-				if (mine === token) placing = false;
+				if (labelEl) {
+					labelEl.classList.add("label");
+					if (refLabel) copyScope(refLabel, labelEl);
+				}
+				a.dataset.kfSkin = "1";
 			}
-		}
-		const repair = debounce(() => {
-			if (!route() || placing) return;
-			const a = document.getElementById(ID);
-			if (!a) {
+			function build(r) {
+				const a = document.createElement("a");
+				a.id = ID;
+				a.className = "ala-kf-plain";
+				a.href = `${BASE}/${PATHS[r.kind]}/${r.id}`;
+				a.target = "_blank";
+				a.rel = "noopener noreferrer";
+				a.title = `Open on ${LABEL}`;
+				a.setAttribute("aria-label", `Open on ${LABEL}`);
+				a.innerHTML = `${icon("external", 14)}<span>${LABEL}</span>`;
+				a.addEventListener("click", (e) => e.stopPropagation());
+				return a;
+			}
+			let token = 0;
+			let placedKey = null;
+			let placing = false;
+			async function place() {
+				const r = staffOrStudioRoute();
+				const key = r && `${r.kind}:${r.id}`;
+				if (key && key === placedKey && document.getElementById(ID)) return;
+				document.getElementById(ID)?.remove();
 				placedKey = null;
-				place();
-			} else skin(a);
-		}, 400);
-		place();
-		Core.onNavigate(place);
-		Core.onBodyMutation(repair);
+				if (!r) return;
+				const mine = ++token;
+				placing = true;
+				try {
+					const row = await ctx.waitForSelector(SLOT, 8e3);
+					const now = staffOrStudioRoute();
+					if (row && mine === token && now && now.kind === r.kind && now.id === r.id && !document.getElementById(ID)) {
+						const a = build(r);
+						row.insertBefore(a, row.firstChild);
+						skin(a);
+						placedKey = key;
+					}
+				} finally {
+					if (mine === token) placing = false;
+				}
+			}
+			const repair = debounce(() => {
+				if (!staffOrStudioRoute() || placing) return;
+				const a = document.getElementById(ID);
+				if (!a) {
+					placedKey = null;
+					place();
+				} else skin(a);
+			}, 400);
+			place();
+			ctx.onNav(() => void place());
+			ctx.onBodyMutation(repair);
+			ctx.onCleanup(() => {
+				token++;
+				document.getElementById(ID)?.remove();
+			});
+		}
 	});
 	var normTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(the|a|an)\b/g, " ").replace(/\s+/g, " ").trim();
 	var strictTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
@@ -7307,17 +7452,20 @@
 		}
 		return null;
 	}
-	defineFeature({
+	defineModule({
 		id: "mediaInfo",
 		key: "mediaInfoEnabled",
 		section: "AniList Enhancements",
+		layer: "feature",
+		requiresReload: false,
 		def: false,
 		legacy: ["mediaInfoEnabled", "mediaListEditorEnabled"],
 		title: "List Score & Progress Editor",
-		help: "Show your score and episode/chapter progress controls on anime and manga pages."
-	}, () => {
-		const ID = "ala-media-info";
-		addStyle("ala-media-info-style", `
+		help: "Show your score and episode/chapter progress controls on anime and manga pages.",
+		setup(ctx) {
+			const ID = "ala-media-info";
+			ctx.ownUi(`#${ID}`);
+			ctx.addStyle("ala-media-info-style", `
       #${ID}{box-sizing:border-box;width:100%;max-width:100%;margin:0 0 12px;padding:14px 15px 15px;border-radius:3px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:1.3rem;line-height:1.4;overflow:hidden}
       #${ID} *{box-sizing:border-box}
       #${ID} :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
@@ -7349,193 +7497,189 @@
       #${ID} .ala-mi-save.is-saved,#${ID} .ala-mi-save.is-saved:disabled{background:rgb(var(--color-green,76,175,80));color:rgb(var(--color-white,255,255,255));opacity:1;cursor:default}
       @media (pointer:coarse){#${ID} .ala-mi-box{height:42px}#${ID} .ala-mi-step{flex:0 0 34px}#${ID} input{font-size:15px}#${ID} .ala-mi-save{height:40px}}
       @media (prefers-reduced-motion:reduce){#${ID} .ala-mi-aired,#${ID} .ala-mi-done,#${ID} .ala-mi-save{transition:none}}`);
-		const maxOf = (info, type) => {
-			const n = Math.floor(Number(type === "ANIME" ? info?.episodes : info?.chapters));
-			return n > 0 ? n : null;
-		};
-		function airedEpisodes(info) {
-			const next = Number(info?.nextAiringEpisode?.episode);
-			if (Number.isFinite(next) && next > 0) return Math.max(0, Math.floor(next) - 1);
-			if (info?.status === "NOT_YET_RELEASED") return 0;
-			return info?.status === "FINISHED" ? maxOf(info, "ANIME") : null;
-		}
-		function findSpot() {
-			const el = document.querySelector(".sidebar > .data");
-			return el?.parentElement && el.parentElement !== document.body ? {
-				parent: el.parentElement,
-				before: el
-			} : null;
-		}
-		const scoreStep = (f) => f === "POINT_10_DECIMAL" ? "0.1" : "1";
-		const scoreMax = (f) => ({
-			POINT_100: 100,
-			POINT_5: 5,
-			POINT_3: 3
-		})[f || ""] || 10;
-		const formatScore = (raw, f) => {
-			const n = Number(raw);
-			return !Number.isFinite(n) || n <= 0 ? "" : f === "POINT_10_DECIMAL" ? n.toFixed(1) : String(n);
-		};
-		const today = () => {
-			const d = new Date();
-			return {
-				year: d.getFullYear(),
-				month: d.getMonth() + 1,
-				day: d.getDate()
+			const maxOf = (info, type) => {
+				const n = Math.floor(Number(type === "ANIME" ? info?.episodes : info?.chapters));
+				return n > 0 ? n : null;
 			};
-		};
-		const scoreFormat = async () => (await tryOr(() => AniList.viewer()))?.scoreFormat || null;
-		let shown = null;
-		let gen = 0;
-		let rendering = false;
-		let rerender = false;
-		let saving = false;
-		let routeAt = Date.now();
-		let timer = 0;
-		let retry = {
-			key: null,
-			at: 0,
-			count: 0
-		};
-		const MAX_FAILURES = 3;
-		const panel = () => document.getElementById(ID);
-		const schedule = (ms = 300) => {
-			clearTimeout(timer);
-			timer = setTimeout(() => render(), ms);
-		};
-		function renderConnect(key, reason = "none") {
-			const spot = findSpot();
-			if (!spot) return void schedule(800);
-			const box = document.createElement("div");
-			box.id = ID;
-			box.dataset.mode = "connect";
-			box.innerHTML = `<div style="margin-bottom:10px;color:rgb(var(--color-text-lighter))">${reason === "rejected" ? "Couldn't verify your AniList session. Log in to AniList to edit your score and progress." : "Log in to AniList to edit your score and progress here."}</div><a class="ala-mi-save" href="/login" style="display:inline-block;text-decoration:none;color:#fff;text-align:center;">Log in to AniList</a>`;
-			panel()?.remove();
-			spot.parent.insertBefore(box, spot.before);
-			shown = key;
-			if (reason === "none") setTimeout(() => {
-				if (panel()?.dataset.mode === "connect" && AniList.hasAuth()) render(true);
-			}, 3e3);
-		}
-		function changeProgress(delta, input, limit) {
-			const next = Number(input.value) + delta;
-			if (!Number.isInteger(next) || next < 0 || limit !== null && next > limit) return;
-			input.value = String(next);
-		}
-		async function save(media, info, scoreInput, progressInput) {
-			if (saving) return null;
-			const fmt = await scoreFormat();
-			const max = maxOf(info, media.type);
-			const scoreText = scoreInput.value.trim();
-			const score = scoreText === "" ? 0 : Number(scoreText);
-			let progress = Number(progressInput.value);
-			if (!Number.isFinite(score) || score < 0 || score > scoreMax(fmt)) {
-				scoreInput.focus();
-				return null;
+			function airedEpisodes(info) {
+				const next = Number(info?.nextAiringEpisode?.episode);
+				if (Number.isFinite(next) && next > 0) return Math.max(0, Math.floor(next) - 1);
+				if (info?.status === "NOT_YET_RELEASED") return 0;
+				return info?.status === "FINISHED" ? maxOf(info, "ANIME") : null;
 			}
-			if (!Number.isInteger(progress) || progress < 0) {
-				progressInput.focus();
-				return null;
+			function findSpot() {
+				return findMediaSidebarSpot();
 			}
-			if (max !== null) progress = Math.min(progress, max);
-			progressInput.value = String(progress);
-			const prev = info.mediaListEntry || {};
-			const finishNow = max !== null && progress >= max && (prev.status !== "COMPLETED" || !prev.completedAt?.year);
-			const isStarting = (!prev.status || prev.status === "PLANNING") && progress > 0;
-			const status = finishNow ? "COMPLETED" : isStarting ? "CURRENT" : void 0;
-			saving = true;
-			logDebug("[MEDIAINFO]", "Saving media progress/score:", {
-				mediaId: media.id,
-				score,
-				progress,
-				status
-			});
-			try {
-				const entry = await MediaData.save(media.id, media.type, {
-					score,
-					progress,
-					status,
-					completedAt: finishNow ? today() : void 0
-				});
-				if (!entry) throw new Error("AniList did not return the updated entry");
-				info.mediaListEntry = entry;
-				logDebug("[MEDIAINFO]", "Save successful:", entry);
-				return entry;
-			} catch (e) {
-				logDebug("[MEDIAINFO]", "Media list save failed:", e);
-				console.warn("[AL-Additions] Media list save failed:", e);
-				return false;
-			} finally {
-				saving = false;
-			}
-		}
-		async function render(force = false) {
-			const route = mediaRoute();
-			if (!route) {
-				shown = null;
-				panel()?.remove();
-				return;
-			}
-			const key = `${route.type}:${route.id}`;
-			if (rendering) {
-				if (force) rerender = true;
-				return;
-			}
-			if (saving && !force) return;
-			if (!force && shown === key && panel()) return;
-			if (!force && retry.key === key && (retry.count >= MAX_FAILURES || Date.now() < retry.at)) return;
-			if (!findSpot()) {
-				if (Date.now() - routeAt < 15e3) schedule(800);
-				return;
-			}
-			if (!AniList.hasAuth()) return renderConnect(key, "none");
-			const g = gen;
-			const stale = () => g !== gen || mediaRoute()?.id !== route.id;
-			rendering = true;
-			logDebug("[MEDIAINFO]", "Rendering media info panel for:", key);
-			try {
-				let info = null;
-				let fmt = null;
-				try {
-					info = await MediaData.get(route.id, route.type, { throwAuth: true });
-					if (stale()) return;
-					if (info) fmt = (await AniList.viewer())?.scoreFormat || null;
-				} catch (e) {
-					if (stale()) return;
-					if (e?.auth) return renderConnect(key, "rejected");
-					info = null;
-				}
-				if (stale()) return;
-				if (!info || !fmt) {
-					if (!AniList.hasAuth()) return renderConnect(key, "none");
-					retry = {
-						key,
-						at: Date.now() + 15e3,
-						count: retry.key === key ? retry.count + 1 : 1
-					};
-					if (retry.count < MAX_FAILURES) schedule(15500);
-					return;
-				}
-				const spot = findSpot();
-				if (!spot) {
-					schedule(800);
-					return;
-				}
-				const entry = info.mediaListEntry || {
-					score: 0,
-					progress: 0
+			const scoreStep = (f) => f === "POINT_10_DECIMAL" ? "0.1" : "1";
+			const scoreMax = (f) => ({
+				POINT_100: 100,
+				POINT_5: 5,
+				POINT_3: 3
+			})[f || ""] || 10;
+			const formatScore = (raw, f) => {
+				const n = Number(raw);
+				return !Number.isFinite(n) || n <= 0 ? "" : f === "POINT_10_DECIMAL" ? n.toFixed(1) : String(n);
+			};
+			const today = () => {
+				const d = new Date();
+				return {
+					year: d.getFullYear(),
+					month: d.getMonth() + 1,
+					day: d.getDate()
 				};
-				const max = maxOf(info, route.type);
-				const anime = route.type === "ANIME";
-				const progress = Number.isFinite(Number(entry.progress)) ? Number(entry.progress) : 0;
-				const label = anime ? "Episode" : "Chapter";
-				const word = anime ? "aired" : "released";
-				const scoreTop = scoreMax(fmt);
-				let released = anime ? airedEpisodes(info) : null;
-				let lookupPending = !anime;
+			};
+			const scoreFormat = async () => (await tryOr(() => ctx.api.viewer()))?.scoreFormat || null;
+			let shown = null;
+			let gen = 0;
+			let rendering = false;
+			let rerender = false;
+			let saving = false;
+			let routeAt = Date.now();
+			let timer = 0;
+			let retry = {
+				key: null,
+				at: 0,
+				count: 0
+			};
+			const MAX_FAILURES = 3;
+			const panel = () => document.getElementById(ID);
+			const schedule = (ms = 300) => {
+				clearTimeout(timer);
+				timer = setTimeout(() => render(), ms);
+			};
+			function renderConnect(key, reason = "none") {
+				const spot = findSpot();
+				if (!spot) return void schedule(800);
 				const box = document.createElement("div");
 				box.id = ID;
-				box.innerHTML = `
+				box.dataset.mode = "connect";
+				box.innerHTML = `<div style="margin-bottom:10px;color:rgb(var(--color-text-lighter))">${reason === "rejected" ? "Couldn't verify your AniList session. Log in to AniList to edit your score and progress." : "Log in to AniList to edit your score and progress here."}</div><a class="ala-mi-save" href="/login" style="display:inline-block;text-decoration:none;color:#fff;text-align:center;">Log in to AniList</a>`;
+				panel()?.remove();
+				spot.parent.insertBefore(box, spot.before);
+				shown = key;
+				if (reason === "none") ctx.timeout(() => {
+					if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
+				}, 3e3);
+			}
+			function changeProgress(delta, input, limit) {
+				const next = Number(input.value) + delta;
+				if (!Number.isInteger(next) || next < 0 || limit !== null && next > limit) return;
+				input.value = String(next);
+			}
+			async function save(media, info, scoreInput, progressInput) {
+				if (saving) return null;
+				const fmt = await scoreFormat();
+				const max = maxOf(info, media.type);
+				const scoreText = scoreInput.value.trim();
+				const score = scoreText === "" ? 0 : Number(scoreText);
+				let progress = Number(progressInput.value);
+				if (!Number.isFinite(score) || score < 0 || score > scoreMax(fmt)) {
+					scoreInput.focus();
+					return null;
+				}
+				if (!Number.isInteger(progress) || progress < 0) {
+					progressInput.focus();
+					return null;
+				}
+				if (max !== null) progress = Math.min(progress, max);
+				progressInput.value = String(progress);
+				const prev = info.mediaListEntry || {};
+				const finishNow = max !== null && progress >= max && (prev.status !== "COMPLETED" || !prev.completedAt?.year);
+				const isStarting = (!prev.status || prev.status === "PLANNING") && progress > 0;
+				const status = finishNow ? "COMPLETED" : isStarting ? "CURRENT" : void 0;
+				saving = true;
+				ctx.debug.log("Saving media progress/score:", {
+					mediaId: media.id,
+					score,
+					progress,
+					status
+				});
+				try {
+					const entry = await ctx.api.media.save(media.id, media.type, {
+						score,
+						progress,
+						status,
+						completedAt: finishNow ? today() : void 0
+					});
+					if (!entry) throw new Error("AniList did not return the updated entry");
+					info.mediaListEntry = entry;
+					ctx.debug.log("Save successful:", entry);
+					return entry;
+				} catch (e) {
+					ctx.debug.log("Media list save failed:", e);
+					console.warn("[AL-Additions] Media list save failed:", e);
+					return false;
+				} finally {
+					saving = false;
+				}
+			}
+			async function render(force = false) {
+				const route = mediaRoute$1();
+				if (!route) {
+					shown = null;
+					panel()?.remove();
+					return;
+				}
+				const key = `${route.type}:${route.id}`;
+				if (rendering) {
+					if (force) rerender = true;
+					return;
+				}
+				if (saving && !force) return;
+				if (!force && shown === key && panel()) return;
+				if (!force && retry.key === key && (retry.count >= MAX_FAILURES || Date.now() < retry.at)) return;
+				if (!findSpot()) {
+					if (Date.now() - routeAt < 15e3) schedule(800);
+					return;
+				}
+				if (!ctx.api.hasAuth()) return renderConnect(key, "none");
+				const g = gen;
+				const stale = () => g !== gen || mediaRoute$1()?.id !== route.id;
+				rendering = true;
+				ctx.debug.log("Rendering media info panel for:", key);
+				try {
+					let info = null;
+					let fmt = null;
+					try {
+						info = await ctx.api.media.get(route.id, route.type, { throwAuth: true });
+						if (stale()) return;
+						if (info) fmt = (await ctx.api.viewer())?.scoreFormat || null;
+					} catch (e) {
+						if (stale()) return;
+						if (e?.auth) return renderConnect(key, "rejected");
+						info = null;
+					}
+					if (stale()) return;
+					if (!info || !fmt) {
+						if (!ctx.api.hasAuth()) return renderConnect(key, "none");
+						retry = {
+							key,
+							at: Date.now() + 15e3,
+							count: retry.key === key ? retry.count + 1 : 1
+						};
+						if (retry.count < MAX_FAILURES) schedule(15500);
+						return;
+					}
+					const spot = findSpot();
+					if (!spot) {
+						schedule(800);
+						return;
+					}
+					const entry = info.mediaListEntry || {
+						score: 0,
+						progress: 0
+					};
+					const max = maxOf(info, route.type);
+					const anime = route.type === "ANIME";
+					const progress = Number.isFinite(Number(entry.progress)) ? Number(entry.progress) : 0;
+					const label = anime ? "Episode" : "Chapter";
+					const word = anime ? "aired" : "released";
+					const scoreTop = scoreMax(fmt);
+					let released = anime ? airedEpisodes(info) : null;
+					let lookupPending = !anime;
+					const box = document.createElement("div");
+					box.id = ID;
+					box.innerHTML = `
           <div class="ala-mi-fields">
             <div class="ala-mi-field">
               <span class="ala-mi-label">Score</span>
@@ -7554,158 +7698,165 @@
           </div>
           <div class="ala-mi-bar"><div class="ala-mi-aired"></div><div class="ala-mi-done"></div></div>
           <button class="ala-mi-save" type="button" disabled>Save</button>`;
-				const scoreInput = box.querySelector(".ala-mi-score-input");
-				const progressInput = box.querySelector(".ala-mi-progress-input");
-				const saveBtn = box.querySelector(".ala-mi-save");
-				const sub = box.querySelector(".ala-mi-prog-sub");
-				const bar = box.querySelector(".ala-mi-bar");
-				const doneFill = box.querySelector(".ala-mi-done");
-				const airedFill = box.querySelector(".ala-mi-aired");
-				const limit = () => max !== null ? max : released;
-				let startScore = scoreInput.value.trim();
-				let startProgress = progressInput.value;
-				let savedTimer = 0;
-				let failedTimer = 0;
-				function clearSavedState() {
-					if (savedTimer) {
-						clearTimeout(savedTimer);
-						savedTimer = 0;
-					}
-					if (failedTimer) {
-						clearTimeout(failedTimer);
-						failedTimer = 0;
-					}
-					saveBtn.classList.remove("is-saved", "is-saving");
-					if (saveBtn.textContent === "Saved" || saveBtn.textContent === "Saving..." || saveBtn.textContent === "Failed") saveBtn.textContent = "Save";
-				}
-				function paint() {
-					const digits = String(progressInput.value || "").trim().length;
-					progressInput.dataset.digits = digits >= 4 ? String(digits) : "";
-					const typed = Number(progressInput.value);
-					const watched = Number.isFinite(typed) && typed > 0 ? typed : 0;
-					sub.innerHTML = `of <b>${max !== null ? max : "—"}</b>` + (released != null ? ` · <b>${released}</b> ${word}` : lookupPending ? " · …" : "");
-					const total = limit();
-					bar.hidden = !(total && total > 0);
-					if (total && total > 0) {
-						doneFill.style.width = Math.min(100, watched / total * 100) + "%";
-						airedFill.style.width = released != null ? Math.min(100, released / total * 100) + "%" : "0%";
-					}
-					const isDirty = scoreInput.value.trim() !== startScore || progressInput.value !== startProgress;
-					if (savedTimer && isDirty) clearSavedState();
-					saveBtn.disabled = saving || Boolean(savedTimer) || !isDirty;
-				}
-				saveBtn.addEventListener("click", async () => {
-					if (saving || saveBtn.disabled) return;
-					clearSavedState();
-					saveBtn.textContent = "Saving...";
-					saveBtn.classList.add("is-saving");
-					saveBtn.disabled = true;
-					let res = null;
-					try {
-						res = await save(route, info, scoreInput, progressInput);
-					} finally {
-						saveBtn.classList.remove("is-saving");
-					}
-					if (!box.isConnected) return;
-					if (res && res !== false) {
-						scoreInput.value = formatScore(res.score, fmt);
-						const nextProg = Number(res.progress);
-						progressInput.value = Number.isFinite(nextProg) ? String(nextProg) : progressInput.value;
-						startScore = scoreInput.value.trim();
-						startProgress = progressInput.value;
-						saveBtn.classList.add("is-saved");
-						saveBtn.textContent = "Saved";
-						saveBtn.disabled = true;
-						savedTimer = setTimeout(() => {
+					const scoreInput = box.querySelector(".ala-mi-score-input");
+					const progressInput = box.querySelector(".ala-mi-progress-input");
+					const saveBtn = box.querySelector(".ala-mi-save");
+					const sub = box.querySelector(".ala-mi-prog-sub");
+					const bar = box.querySelector(".ala-mi-bar");
+					const doneFill = box.querySelector(".ala-mi-done");
+					const airedFill = box.querySelector(".ala-mi-aired");
+					const limit = () => max !== null ? max : released;
+					let startScore = scoreInput.value.trim();
+					let startProgress = progressInput.value;
+					let savedTimer = 0;
+					let failedTimer = 0;
+					function clearSavedState() {
+						if (savedTimer) {
+							clearTimeout(savedTimer);
 							savedTimer = 0;
-							if (!box.isConnected) return;
-							saveBtn.classList.remove("is-saved");
-							saveBtn.textContent = "Save";
-							paint();
-						}, 1800);
-						paint();
-					} else if (res === false) {
-						saveBtn.textContent = "Failed";
-						saveBtn.disabled = false;
-						failedTimer = setTimeout(() => {
+						}
+						if (failedTimer) {
+							clearTimeout(failedTimer);
 							failedTimer = 0;
-							if (box.isConnected && saveBtn.textContent === "Failed") {
+						}
+						saveBtn.classList.remove("is-saved", "is-saving");
+						if (saveBtn.textContent === "Saved" || saveBtn.textContent === "Saving..." || saveBtn.textContent === "Failed") saveBtn.textContent = "Save";
+					}
+					function paint() {
+						const digits = String(progressInput.value || "").trim().length;
+						progressInput.dataset.digits = digits >= 4 ? String(digits) : "";
+						const typed = Number(progressInput.value);
+						const watched = Number.isFinite(typed) && typed > 0 ? typed : 0;
+						sub.innerHTML = `of <b>${max !== null ? max : "—"}</b>` + (released != null ? ` · <b>${released}</b> ${word}` : lookupPending ? " · …" : "");
+						const total = limit();
+						bar.hidden = !(total && total > 0);
+						if (total && total > 0) {
+							doneFill.style.width = Math.min(100, watched / total * 100) + "%";
+							airedFill.style.width = released != null ? Math.min(100, released / total * 100) + "%" : "0%";
+						}
+						const isDirty = scoreInput.value.trim() !== startScore || progressInput.value !== startProgress;
+						if (savedTimer && isDirty) clearSavedState();
+						saveBtn.disabled = saving || Boolean(savedTimer) || !isDirty;
+					}
+					saveBtn.addEventListener("click", async () => {
+						if (saving || saveBtn.disabled) return;
+						clearSavedState();
+						saveBtn.textContent = "Saving...";
+						saveBtn.classList.add("is-saving");
+						saveBtn.disabled = true;
+						let res = null;
+						try {
+							res = await save(route, info, scoreInput, progressInput);
+						} finally {
+							saveBtn.classList.remove("is-saving");
+						}
+						if (!box.isConnected) return;
+						if (res && res !== false) {
+							scoreInput.value = formatScore(res.score, fmt);
+							const nextProg = Number(res.progress);
+							progressInput.value = Number.isFinite(nextProg) ? String(nextProg) : progressInput.value;
+							startScore = scoreInput.value.trim();
+							startProgress = progressInput.value;
+							saveBtn.classList.add("is-saved");
+							saveBtn.textContent = "Saved";
+							saveBtn.disabled = true;
+							savedTimer = setTimeout(() => {
+								savedTimer = 0;
+								if (!box.isConnected) return;
+								saveBtn.classList.remove("is-saved");
 								saveBtn.textContent = "Save";
 								paint();
-							}
-						}, 2e3);
-					} else {
-						saveBtn.textContent = "Save";
-						paint();
-					}
-				});
-				for (const input of [scoreInput, progressInput]) {
-					input.addEventListener("keydown", (e) => {
-						if (e.key === "Enter") saveBtn.click();
-					});
-					input.addEventListener("input", paint);
-					input.addEventListener("focus", () => {
-						if (input.value) input.select();
-						else if (input.placeholder) {
-							input.dataset.placeholder = input.placeholder;
-							input.placeholder = "";
+							}, 1800);
+							paint();
+						} else if (res === false) {
+							saveBtn.textContent = "Failed";
+							saveBtn.disabled = false;
+							failedTimer = setTimeout(() => {
+								failedTimer = 0;
+								if (box.isConnected && saveBtn.textContent === "Failed") {
+									saveBtn.textContent = "Save";
+									paint();
+								}
+							}, 2e3);
+						} else {
+							saveBtn.textContent = "Save";
+							paint();
 						}
 					});
-					input.addEventListener("blur", () => {
-						if (!input.value && input.dataset.placeholder) input.placeholder = input.dataset.placeholder;
+					for (const input of [scoreInput, progressInput]) {
+						input.addEventListener("keydown", (e) => {
+							if (e.key === "Enter") saveBtn.click();
+						});
+						input.addEventListener("input", paint);
+						input.addEventListener("focus", () => {
+							if (input.value) input.select();
+							else if (input.placeholder) {
+								input.dataset.placeholder = input.placeholder;
+								input.placeholder = "";
+							}
+						});
+						input.addEventListener("blur", () => {
+							if (!input.value && input.dataset.placeholder) input.placeholder = input.dataset.placeholder;
+						});
+					}
+					box.querySelector(".ala-mi-minus")?.addEventListener("click", () => {
+						changeProgress(-1, progressInput, limit());
+						paint();
 					});
-				}
-				box.querySelector(".ala-mi-minus")?.addEventListener("click", () => {
-					changeProgress(-1, progressInput, limit());
+					box.querySelector(".ala-mi-plus")?.addEventListener("click", () => {
+						changeProgress(1, progressInput, limit());
+						paint();
+					});
+					panel()?.remove();
+					spot.parent.insertBefore(box, spot.before);
+					shown = key;
 					paint();
-				});
-				box.querySelector(".ala-mi-plus")?.addEventListener("click", () => {
-					changeProgress(1, progressInput, limit());
-					paint();
-				});
-				panel()?.remove();
-				spot.parent.insertBefore(box, spot.before);
-				shown = key;
-				paint();
-				if (!anime) externalReleased(info).then((n) => {
-					if (stale() || !box.isConnected) return;
-					released = n;
-					lookupPending = false;
-					paint();
-				});
-			} finally {
-				rendering = false;
-				if (rerender) {
-					rerender = false;
-					safe(() => render(true), "media info refresh");
+					if (!anime) externalReleased(info).then((n) => {
+						if (stale() || !box.isConnected) return;
+						released = n;
+						lookupPending = false;
+						paint();
+					});
+				} finally {
+					rendering = false;
+					if (rerender) {
+						rerender = false;
+						safe(() => render(true), "media info refresh");
+					}
 				}
 			}
+			ctx.listen(window, "load", () => schedule(500), { once: true });
+			ctx.ready(() => schedule(document.readyState === "complete" ? 500 : 1200));
+			ctx.onNav(() => {
+				const r = mediaRoute$1();
+				if (r && shown === `${r.type}:${r.id}` && panel()) return;
+				gen++;
+				shown = null;
+				routeAt = Date.now();
+				retry = {
+					key: null,
+					at: 0,
+					count: 0
+				};
+				panel()?.remove();
+				schedule(1200);
+			});
+			ctx.onBodyMutation(() => {
+				const r = mediaRoute$1();
+				if (!r || panel() || rendering || saving) return;
+				if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
+				schedule(500);
+			});
+			ctx.listen(window, "focus", () => {
+				if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
+			});
+			ctx.onCleanup(() => {
+				gen++;
+				clearTimeout(timer);
+				timer = 0;
+				panel()?.remove();
+			});
 		}
-		window.addEventListener("load", () => schedule(500), { once: true });
-		Core.ready(() => schedule(document.readyState === "complete" ? 500 : 1200));
-		Core.onNavigate(() => {
-			const r = mediaRoute();
-			if (r && shown === `${r.type}:${r.id}` && panel()) return;
-			gen++;
-			shown = null;
-			routeAt = Date.now();
-			retry = {
-				key: null,
-				at: 0,
-				count: 0
-			};
-			panel()?.remove();
-			schedule(1200);
-		});
-		Core.onBodyMutation(() => {
-			const r = mediaRoute();
-			if (!r || panel() || rendering || saving) return;
-			if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
-			schedule(500);
-		});
-		window.addEventListener("focus", () => {
-			if (panel()?.dataset.mode === "connect" && AniList.hasAuth()) render(true);
-		});
 	});
 	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
 	function getManualOverrides() {
@@ -9033,7 +9184,7 @@
 	}
 	var MODAL_ID = "ala-overrides-backdrop";
 	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
-	addStyle("ala-overrides-style", `
+	var OVERRIDES_CSS = `
   #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
   #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
   #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
@@ -9126,7 +9277,10 @@
     .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
     .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
   }
-  `);
+  `;
+	function ensureOverridesStyle() {
+		addStyle("ala-overrides-style", OVERRIDES_CSS);
+	}
 	function extractAlId(raw) {
 		const str = String(raw || "").trim();
 		const match = str.match(/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
@@ -9180,6 +9334,7 @@
 		}
 	}
 	async function openQuickOverrideModal(mediaId, mediaType = "ANIME") {
+		ensureOverridesStyle();
 		const existing = document.getElementById(QUICK_MODAL_ID);
 		if (existing) existing.remove();
 		const backdrop = document.createElement("div");
@@ -9286,6 +9441,7 @@
 		});
 	}
 	function openOverridesModal() {
+		ensureOverridesStyle();
 		const existing = document.getElementById(MODAL_ID);
 		if (existing) existing.remove();
 		refreshStaleOverrides().then(() => {
@@ -10141,10 +10297,12 @@
 		Core.onNavigate(place);
 		Core.onBodyMutation(repair);
 	});
-	defineFeature({
+	defineModule({
 		id: "removeTitle",
 		key: "linkShortenerEnabled",
 		section: "AniList Enhancements",
+		layer: "preload",
+		requiresReload: true,
 		def: false,
 		legacy: [
 			"linkShortenerEnabled",
@@ -10152,33 +10310,34 @@
 			"shortAniListUrls"
 		],
 		title: "Short AniList URLs",
-		help: "Remove the title slug from AniList anime, manga, staff, and character URLs."
-	}, () => {
-		const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
-		const strip = (s) => s.replace(/^((?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/)[^/?#]+\/?(?=[?#]|$)/, "$1");
-		function fixLocation() {
-			if (!/anilist\.co\/(manga|anime|staff|character)\//.test(location.href) || !/\/\d{1,10}\/./.test(location.href)) return;
-			const cur = location.pathname + location.search + location.hash;
-			const next = strip(cur.replace(/^https:\/\/anilist\.co/, ""));
-			if (cur !== next) Core.silently(() => history.replaceState(history.state, "", next));
-		}
-		function fixLinks(nodes) {
-			for (const node of Array.from(nodes)) {
-				if (node.nodeType !== 1) continue;
-				const el = node;
-				const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
-				for (const a of links) {
-					const href = a.getAttribute("href");
-					if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
+		help: "Remove the title slug from AniList anime, manga, staff, and character URLs.",
+		setup(ctx) {
+			const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
+			const strip = (s) => s.replace(/^((?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/)[^/?#]+\/?(?=[?#]|$)/, "$1");
+			function fixLocation() {
+				if (!/anilist\.co\/(manga|anime|staff|character)\//.test(location.href) || !/\/\d{1,10}\/./.test(location.href)) return;
+				const cur = location.pathname + location.search + location.hash;
+				const next = strip(cur.replace(/^https:\/\/anilist\.co/, ""));
+				if (cur !== next) ctx.silently(() => history.replaceState(history.state, "", next));
+			}
+			function fixLinks(nodes) {
+				for (const node of Array.from(nodes)) {
+					if (node.nodeType !== 1) continue;
+					const el = node;
+					const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
+					for (const a of links) {
+						const href = a.getAttribute("href");
+						if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
+					}
 				}
 			}
+			fixLocation();
+			ctx.onNav(fixLocation);
+			ctx.onBodyMutation((muts) => {
+				for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
+			});
+			ctx.ready(() => fixLinks([document.body]));
 		}
-		fixLocation();
-		Core.onNavigate(fixLocation);
-		Core.onBodyMutation((muts) => {
-			for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
-		});
-		Core.ready(() => fixLinks([document.body]));
 	});
 	var MODAL_CSS = `
   #ala-pwd-backdrop {
@@ -10710,7 +10869,7 @@
 			reader.readAsArrayBuffer(file);
 		});
 	}
-	addStyle("almal-style", `
+	var PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
   #almal-panel *{box-sizing:border-box}
   #almal-panel :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
@@ -10778,7 +10937,7 @@
     .almal-manual input{height:40px;font-size:16px}
     .almal-link{padding:8px 0}
   }
-  @media (prefers-reduced-motion:reduce){.almal-arrow-line,#almal-progress-fill.indeterminate{animation:none}}`);
+  @media (prefers-reduced-motion:reduce){.almal-arrow-line,#almal-progress-fill.indeterminate{animation:none}}`;
 	var ui = {
 		manual: false,
 		showLogs: false
@@ -11007,6 +11166,7 @@
 	}
 	var mountSoon = debounce(mountPanel, 250);
 	function initSyncPanel() {
+		addStyle("almal-style", PANEL_CSS);
 		onProgressChange((force) => updateProgressUI(force));
 		onStateChange(renderPanel);
 		Core.onBodyMutation(() => {
@@ -11307,11 +11467,12 @@
 		title: "Manual Mappings & Sync Audit",
 		help: "Manage custom MyAnimeList ID overrides, entries ignored from sync, and review database discrepancies."
 	}, () => {});
-	defineFeature({
+	defineModule({
 		id: "tagPercent",
 		key: "tagFilterEnabled",
 		section: "AniList Enhancements",
 		layer: "intercept",
+		requiresReload: true,
 		def: false,
 		legacy: ["tagFilterEnabled", "browseTagRankFilterEnabled"],
 		title: "Browse Tag Rank Filter",
@@ -11325,31 +11486,32 @@
 			legacy: ["tagPercentage", "minimumTagRankPercentage"],
 			title: "Minimum Tag Rank",
 			help: "The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles."
-		}]
-	}, () => {
-		const PARAM = "minimumTagRank";
-		const VALUE = String(Settings.get("tagPercentage"));
-		const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
-		const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
-		let fixing = false;
-		function apply(initial) {
-			if (fixing || !isTarget()) return;
-			const u = new URL(location.href);
-			if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
-			u.searchParams.set(PARAM, VALUE);
-			fixing = true;
-			try {
-				if (initial) location.replace(u.toString());
-				else {
-					history.replaceState(history.state, document.title, u.toString());
-					window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+		}],
+		setup(ctx) {
+			const PARAM = "minimumTagRank";
+			const VALUE = String(ctx.get("tagPercentage"));
+			const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
+			const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
+			let fixing = false;
+			function apply(initial) {
+				if (fixing || !isTarget()) return;
+				const u = new URL(location.href);
+				if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
+				u.searchParams.set(PARAM, VALUE);
+				fixing = true;
+				try {
+					if (initial) location.replace(u.toString());
+					else {
+						history.replaceState(history.state, document.title, u.toString());
+						window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+					}
+				} finally {
+					fixing = false;
 				}
-			} finally {
-				fixing = false;
 			}
+			apply(true);
+			ctx.onNav(() => apply(false));
 		}
-		apply(true);
-		Core.onNavigate(() => apply(false));
 	});
 	var DEFAULT_TIERS = [
 		{
@@ -11533,14 +11695,33 @@
 		const check = validateTiers(Settings.get("tierLabels"));
 		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 	}
-	defineFeature({
+	function migrateLegacyTierLabels() {
+		try {
+			const legacy = localStorage.getItem("anilistTierLabelsSettings");
+			if (legacy) {
+				const parsed = JSON.parse(legacy);
+				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
+					const check = validateTiers(parsed.tiers);
+					if (check.valid && check.tiers) store$1.set(SETTING_PREFIX + "tierLabels", check.tiers);
+				}
+				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(SETTING_PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
+			}
+		} catch (_) {}
+	}
+	defineModule({
 		id: "tierLabels",
 		key: "tierLabelsEnabled",
 		section: "AniList Enhancements",
+		layer: "feature",
+		requiresReload: true,
 		def: false,
 		legacy: ["tierLabelsEnabled"],
 		title: "AniList Tier Labels",
 		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
+		standalone: {
+			name: "AniList Tier Labels",
+			probe: () => detectStandalone("tierLabels")
+		},
 		options: [
 			{
 				key: "tierLabelsColorScore",
@@ -11564,20 +11745,11 @@
 				help: "Customize score ranges, badge labels, and colors.",
 				validate: validateTiers
 			}
-		]
-	}, () => {
-		try {
-			const legacy = localStorage.getItem("anilistTierLabelsSettings");
-			if (legacy) {
-				const parsed = JSON.parse(legacy);
-				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
-					const check = validateTiers(parsed.tiers);
-					if (check.valid && check.tiers) store$1.set(SETTING_PREFIX + "tierLabels", check.tiers);
-				}
-				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(SETTING_PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
-			}
-		} catch (_) {}
-		addStyle("ala-tier-labels-css", `
+		],
+		migrate: migrateLegacyTierLabels,
+		setup(ctx) {
+			migrateLegacyTierLabels();
+			ctx.addStyle("ala-tier-labels-css", `
       .ala-tier-badge {
         display: inline-block;
         font-weight: 700;
@@ -11609,196 +11781,201 @@
         overflow: hidden;
       }
       `);
-		function createBadge(tier, isBlockView = false) {
-			const badge = document.createElement("span");
-			badge.className = `ala-tier-badge ${isBlockView ? "ala-tier-badge--block" : "ala-tier-badge--list"}`;
-			badge.textContent = tier.label;
-			badge.style.backgroundColor = tier.color;
-			badge.style.color = tier.textColor;
-			return badge;
-		}
-		function getScoreSystem() {
-			const container = document.querySelector(".content.container, .medialist");
-			if (container) {
-				if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
-				if (container.querySelector(".medialist.table.POINT_10_DECIMAL, .medialist.POINT_10_DECIMAL")) return "POINT_10_DECIMAL";
-				if (container.querySelector(".medialist.table.POINT_10, .medialist.POINT_10")) return "POINT_10";
-				if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
-				if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
+			function createBadge(tier, isBlockView = false) {
+				const badge = document.createElement("span");
+				badge.className = `ala-tier-badge ${isBlockView ? "ala-tier-badge--block" : "ala-tier-badge--list"}`;
+				badge.textContent = tier.label;
+				badge.style.backgroundColor = tier.color;
+				badge.style.color = tier.textColor;
+				return badge;
 			}
-			const viewerFmt = store$1.get("al_score_format", null);
-			if (viewerFmt) return viewerFmt;
-			return "UNKNOWN";
-		}
-		function getCompareColumnFormat(el) {
-			const compareRoot = el.closest(".compare");
-			if (!compareRoot) return "UNKNOWN";
-			const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
-			const sideKey = isAuthUser ? "auth" : "target";
-			if (!compareRoot._colFormats) compareRoot._colFormats = {};
-			if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
-			if (isAuthUser) {
+			function getScoreSystem() {
+				const container = document.querySelector(".content.container, .medialist");
+				if (container) {
+					if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
+					if (container.querySelector(".medialist.table.POINT_10_DECIMAL, .medialist.POINT_10_DECIMAL")) return "POINT_10_DECIMAL";
+					if (container.querySelector(".medialist.table.POINT_10, .medialist.POINT_10")) return "POINT_10";
+					if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
+					if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
+				}
 				const viewerFmt = store$1.get("al_score_format", null);
-				if (viewerFmt) {
-					compareRoot._colFormats[sideKey] = viewerFmt;
-					return viewerFmt;
+				if (viewerFmt) return viewerFmt;
+				return "UNKNOWN";
+			}
+			function getCompareColumnFormat(el) {
+				const compareRoot = el.closest(".compare");
+				if (!compareRoot) return "UNKNOWN";
+				const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
+				const sideKey = isAuthUser ? "auth" : "target";
+				if (!compareRoot._colFormats) compareRoot._colFormats = {};
+				if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
+				if (isAuthUser) {
+					const viewerFmt = store$1.get("al_score_format", null);
+					if (viewerFmt) {
+						compareRoot._colFormats[sideKey] = viewerFmt;
+						return viewerFmt;
+					}
 				}
-			}
-			const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
-			const cells = compareRoot.querySelectorAll(colSelector);
-			let maxScore = 0;
-			let hasDecimal = false;
-			let hasStarIcon = false;
-			for (const cell of cells) {
-				if (cell.querySelector("svg, .icon")) hasStarIcon = true;
-				const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
-				const num = parseFloat(s);
-				if (!isNaN(num) && num > 0) {
-					if (num > maxScore) maxScore = num;
-					if (s.includes(".")) hasDecimal = true;
+				const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
+				const cells = compareRoot.querySelectorAll(colSelector);
+				let maxScore = 0;
+				let hasDecimal = false;
+				let hasStarIcon = false;
+				for (const cell of cells) {
+					if (cell.querySelector("svg, .icon")) hasStarIcon = true;
+					const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
+					const num = parseFloat(s);
+					if (!isNaN(num) && num > 0) {
+						if (num > maxScore) maxScore = num;
+						if (s.includes(".")) hasDecimal = true;
+					}
 				}
-			}
-			let detected = "UNKNOWN";
-			if (maxScore > 10) detected = "POINT_100";
-			else if (hasDecimal) detected = "POINT_10_DECIMAL";
-			else if (hasStarIcon) detected = "POINT_5";
-			else if (maxScore > 5) detected = "POINT_10";
-			else if (maxScore > 0) detected = "POINT_10";
-			compareRoot._colFormats[sideKey] = detected;
-			logDebug("[TIER]", `Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
-				maxScore,
-				hasDecimal,
-				hasStarIcon
-			});
-			return detected;
-		}
-		function normalizeScore(score, scoreSystem, isPercentage = false) {
-			if (isNaN(score) || score <= 0) return null;
-			if (isPercentage) return score;
-			switch (scoreSystem) {
-				case "POINT_100": return score;
-				case "POINT_10_DECIMAL":
-				case "POINT_10": return score * 10;
-				case "POINT_5": return score * 20;
-				case "POINT_3": return score === 3 ? 100 : score === 2 ? 60 : 20;
-				default: return score > 10 ? score : score * 10;
-			}
-		}
-		function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
-			if (el.hasAttribute("data-ala-probe")) return;
-			if (el.dataset.tierModified) {
-				const attrNow = el.getAttribute("score");
-				const changed = attrNow !== null && attrNow !== el.dataset.tierSource;
-				if (el.querySelector(".ala-tier-container") && !changed) return;
-				delete el.dataset.tierModified;
-			}
-			const attr = el.getAttribute("score");
-			const rawText = (attr || el.textContent || "").replace("%", "").trim();
-			if (!rawText || rawText === "-" || rawText === "0") return;
-			const num = parseFloat(rawText);
-			if (isNaN(num) || num <= 0) return;
-			const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
-			if (normalizedRating === null) return;
-			const tier = getTier(normalizedRating, tiers);
-			if (!tier) return;
-			logDebug("[TIER]", "Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
-			el.dataset.tierModified = "true";
-			el.dataset.tierSource = attr ?? "";
-			const container = document.createElement("div");
-			container.className = `ala-tier-container ${isBlockView ? "ala-tier-container--block" : ""}`;
-			const scoreSpan = document.createElement("span");
-			scoreSpan.className = "ala-tier-score-text";
-			if (colorScore) scoreSpan.style.color = tier.color;
-			const icon = el.querySelector("svg, .icon");
-			if (icon) {
-				scoreSpan.appendChild(icon.cloneNode(true));
-				scoreSpan.appendChild(document.createTextNode(" " + rawText));
-			} else scoreSpan.textContent = isPercentage ? `${rawText}%` : rawText;
-			container.appendChild(scoreSpan);
-			container.appendChild(createBadge(tier, isBlockView));
-			el.textContent = "";
-			el.appendChild(container);
-		}
-		function processTop100Elements(tiers, colorScore) {
-			document.querySelectorAll(".row.score").forEach((row) => {
-				const percentageEl = row.querySelector(".percentage");
-				if (!percentageEl || percentageEl.classList.contains("popularity")) return;
-				if (percentageEl.dataset.tierModified) {
-					if (percentageEl.querySelector(".ala-tier-container")) return;
-					delete percentageEl.dataset.tierModified;
-				}
-				const textNode = Array.from(percentageEl.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim() !== "");
-				if (!textNode) return;
-				const ratingText = (textNode.textContent || "").trim().replace("%", "");
-				const numericRating = parseFloat(ratingText);
-				if (isNaN(numericRating) || numericRating <= 0) return;
-				const tier = getTier(numericRating, tiers);
-				if (!tier) return;
-				percentageEl.dataset.tierModified = "true";
-				textNode.remove();
-				const ratingWrapper = document.createElement("div");
-				ratingWrapper.className = "ala-tier-container";
-				ratingWrapper.style.display = "inline-flex";
-				ratingWrapper.style.alignItems = "center";
-				ratingWrapper.style.gap = "6px";
-				const textSpan = document.createElement("span");
-				textSpan.className = "ala-tier-score-text";
-				textSpan.textContent = numericRating + "%";
-				if (colorScore) textSpan.style.color = tier.color;
-				ratingWrapper.appendChild(textSpan);
-				ratingWrapper.appendChild(createBadge(tier));
-				const popularityEl = percentageEl.querySelector(".sub-row.popularity");
-				if (popularityEl) percentageEl.insertBefore(ratingWrapper, popularityEl);
-				else percentageEl.appendChild(ratingWrapper);
-			});
-		}
-		function applyTierLabels() {
-			const tiers = getValidTiers();
-			const colorScore = Settings.get("tierLabelsColorScore");
-			const showAverage = Settings.get("tierLabelsAverageScore");
-			document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
-				processScoreElement(el, tiers, colorScore, false, false);
-			});
-			document.querySelectorAll(".entry-card .score").forEach((el) => {
-				processScoreElement(el, tiers, colorScore, false, true);
-			});
-			if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
-				const label = dataSet.querySelector(".type");
-				const value = dataSet.querySelector(".value");
-				if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
-			});
-			processTop100Elements(tiers, colorScore);
-		}
-		const HINT_KEY = "ala_standalone_seen_tierLabels";
-		let paused = !!store$1.get(HINT_KEY, false);
-		const runScan = () => {
-			if (!paused) applyTierLabels();
-		};
-		Core.ready(() => {
-			runScan();
-			Core.onNavigate(() => {
-				document.querySelectorAll(".compare").forEach((c) => {
-					delete c._colFormats;
+				let detected = "UNKNOWN";
+				if (maxScore > 10) detected = "POINT_100";
+				else if (hasDecimal) detected = "POINT_10_DECIMAL";
+				else if (hasStarIcon) detected = "POINT_5";
+				else if (maxScore > 5) detected = "POINT_10";
+				else if (maxScore > 0) detected = "POINT_10";
+				compareRoot._colFormats[sideKey] = detected;
+				ctx.debug.log(`Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
+					maxScore,
+					hasDecimal,
+					hasStarIcon
 				});
+				return detected;
+			}
+			function normalizeScore(score, scoreSystem, isPercentage = false) {
+				if (isNaN(score) || score <= 0) return null;
+				if (isPercentage) return score;
+				switch (scoreSystem) {
+					case "POINT_100": return score;
+					case "POINT_10_DECIMAL":
+					case "POINT_10": return score * 10;
+					case "POINT_5": return score * 20;
+					case "POINT_3": return score === 3 ? 100 : score === 2 ? 60 : 20;
+					default: return score > 10 ? score : score * 10;
+				}
+			}
+			function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
+				if (el.hasAttribute("data-ala-probe")) return;
+				if (el.dataset.tierModified) {
+					const attrNow = el.getAttribute("score");
+					const changed = attrNow !== null && attrNow !== el.dataset.tierSource;
+					if (el.querySelector(".ala-tier-container") && !changed) return;
+					delete el.dataset.tierModified;
+				}
+				const attr = el.getAttribute("score");
+				const rawText = (attr || el.textContent || "").replace("%", "").trim();
+				if (!rawText || rawText === "-" || rawText === "0") return;
+				const num = parseFloat(rawText);
+				if (isNaN(num) || num <= 0) return;
+				const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
+				if (normalizedRating === null) return;
+				const tier = getTier(normalizedRating, tiers);
+				if (!tier) return;
+				ctx.debug.log("Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
+				el.dataset.tierModified = "true";
+				el.dataset.tierSource = attr ?? "";
+				const container = document.createElement("div");
+				container.className = `ala-tier-container ${isBlockView ? "ala-tier-container--block" : ""}`;
+				const scoreSpan = document.createElement("span");
+				scoreSpan.className = "ala-tier-score-text";
+				if (colorScore) scoreSpan.style.color = tier.color;
+				const icon = el.querySelector("svg, .icon");
+				if (icon) {
+					scoreSpan.appendChild(icon.cloneNode(true));
+					scoreSpan.appendChild(document.createTextNode(" " + rawText));
+				} else scoreSpan.textContent = isPercentage ? `${rawText}%` : rawText;
+				container.appendChild(scoreSpan);
+				container.appendChild(createBadge(tier, isBlockView));
+				el.textContent = "";
+				el.appendChild(container);
+			}
+			function processTop100Elements(tiers, colorScore) {
+				document.querySelectorAll(".row.score").forEach((row) => {
+					const percentageEl = row.querySelector(".percentage");
+					if (!percentageEl || percentageEl.classList.contains("popularity")) return;
+					if (percentageEl.dataset.tierModified) {
+						if (percentageEl.querySelector(".ala-tier-container")) return;
+						delete percentageEl.dataset.tierModified;
+					}
+					const textNode = Array.from(percentageEl.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim() !== "");
+					if (!textNode) return;
+					const ratingText = (textNode.textContent || "").trim().replace("%", "");
+					const numericRating = parseFloat(ratingText);
+					if (isNaN(numericRating) || numericRating <= 0) return;
+					const tier = getTier(numericRating, tiers);
+					if (!tier) return;
+					percentageEl.dataset.tierModified = "true";
+					textNode.remove();
+					const ratingWrapper = document.createElement("div");
+					ratingWrapper.className = "ala-tier-container";
+					ratingWrapper.style.display = "inline-flex";
+					ratingWrapper.style.alignItems = "center";
+					ratingWrapper.style.gap = "6px";
+					const textSpan = document.createElement("span");
+					textSpan.className = "ala-tier-score-text";
+					textSpan.textContent = numericRating + "%";
+					if (colorScore) textSpan.style.color = tier.color;
+					ratingWrapper.appendChild(textSpan);
+					ratingWrapper.appendChild(createBadge(tier));
+					const popularityEl = percentageEl.querySelector(".sub-row.popularity");
+					if (popularityEl) percentageEl.insertBefore(ratingWrapper, popularityEl);
+					else percentageEl.appendChild(ratingWrapper);
+				});
+			}
+			function applyTierLabels() {
+				const tiers = getValidTiers();
+				const colorScore = !!ctx.get("tierLabelsColorScore");
+				const showAverage = !!ctx.get("tierLabelsAverageScore");
+				document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
+					processScoreElement(el, tiers, colorScore, false, false);
+				});
+				document.querySelectorAll(".entry-card .score").forEach((el) => {
+					processScoreElement(el, tiers, colorScore, false, true);
+				});
+				if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
+					const label = dataSet.querySelector(".type");
+					const value = dataSet.querySelector(".value");
+					if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
+				});
+				processTop100Elements(tiers, colorScore);
+			}
+			const HINT_KEY = "ala_standalone_seen_tierLabels";
+			let paused = !!store$1.get(HINT_KEY, false);
+			const runScan = () => {
+				if (!paused) applyTierLabels();
+			};
+			ctx.ready(() => {
 				runScan();
-			});
-			let scanQueued = false;
-			Core.onBodyMutation(() => {
-				if (scanQueued) return;
-				scanQueued = true;
-				setTimeout(() => {
-					scanQueued = false;
+				const unsubNav = ctx.onNav(() => {
+					document.querySelectorAll(".compare").forEach((c) => {
+						delete c._colFormats;
+					});
 					runScan();
-				}, 100);
+				});
+				let scanQueued = false;
+				const unsubBody = ctx.onBodyMutation(() => {
+					if (scanQueued) return;
+					scanQueued = true;
+					ctx.timeout(() => {
+						scanQueued = false;
+						runScan();
+					}, 100);
+				});
+				detectStandalone("tierLabels").then((found) => {
+					store$1.set(HINT_KEY, found);
+					const wasPaused = paused;
+					paused = found;
+					ctx.setStandalonePaused(found);
+					if (found) {
+						unsubNav();
+						unsubBody();
+						if (!wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
+					} else if (wasPaused) runScan();
+				});
 			});
-			detectStandalone("tierLabels").then((found) => {
-				store$1.set(HINT_KEY, found);
-				const wasPaused = paused;
-				paused = found;
-				if (found && !wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
-				if (!found && wasPaused) runScan();
-			});
-		});
+		}
 	});
 	var CREDITS = [
 		{
@@ -11862,6 +12039,198 @@
 	];
 	var creditLink = (url, text, cls = "") => `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
 	var creditsHtml = () => CREDITS.map((c) => `<div class="ala-credit"><b>${c.url ? creditLink(c.url, c.name) : esc(c.name)}</b> — ${esc(c.note)}${c.works ? `<ul>${c.works.map(([label, url]) => `<li>${creditLink(url, label)}</li>`).join("")}</ul>` : ""}</div>`).join("");
+	function openTierEditor(inputEl) {
+		let tiers;
+		try {
+			const check = validateTiers(JSON.parse(inputEl.value));
+			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		} catch {
+			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		}
+		const existing = document.getElementById("ala-tier-editor-backdrop");
+		if (existing) existing.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = "ala-tier-editor-backdrop";
+		backdrop.innerHTML = `
+    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
+      <header class="ala-sheet-head">
+        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
+        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-sheet-body">
+        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
+        <div class="ala-tier-table-wrap">
+          <table class="ala-tier-table">
+            <thead>
+              <tr>
+                <th style="width:75px">Label</th>
+                <th style="width:70px">Min</th>
+                <th style="width:70px">Max</th>
+                <th style="width:48px">Badge</th>
+                <th style="width:48px">Text</th>
+                <th style="width:75px">Preview</th>
+                <th style="width:36px"></th>
+              </tr>
+            </thead>
+            <tbody id="ala-tier-tbody"></tbody>
+          </table>
+        </div>
+        <div class="ala-tier-actions">
+          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
+        </div>
+        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
+          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
+          </div>
+        </div>
+      </div>
+      <footer class="ala-sheet-foot">
+        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
+        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const tbody = backdrop.querySelector("#ala-tier-tbody");
+		const status = backdrop.querySelector("#ala-tier-status");
+		const setModalStatus = (msg, isError = false) => {
+			status.textContent = msg;
+			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
+		};
+		const createRowHtml = (t, idx) => {
+			const badgeColor = normalizeHexColor(t.color) || "#000000";
+			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
+			return `
+    <tr data-idx="${idx}">
+      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
+      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
+      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
+      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
+      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
+      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
+      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
+    </tr>
+  `;
+		};
+		const renderTable = (list) => {
+			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
+		};
+		const getRowsData = () => {
+			const rows = tbody.querySelectorAll("tr");
+			const result = [];
+			rows.forEach((tr) => {
+				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
+				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
+				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
+				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+				result.push({
+					label: label || "Tier",
+					min: isNaN(min) ? 0 : min,
+					max: isNaN(max) ? 100 : max,
+					color,
+					textColor
+				});
+			});
+			return result;
+		};
+		const updatePreview = (tr) => {
+			const label = tr.querySelector(".ala-t-label")?.value || "";
+			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+			const preview = tr.querySelector(".ala-t-preview");
+			if (preview) {
+				preview.textContent = label;
+				preview.style.backgroundColor = color;
+				preview.style.color = textColor;
+			}
+		};
+		tbody.addEventListener("input", (e) => {
+			const tr = e.target.closest("tr");
+			if (tr) updatePreview(tr);
+		});
+		tbody.addEventListener("click", (e) => {
+			const btn = e.target.closest(".ala-tier-del-btn");
+			if (btn) {
+				const tr = btn.closest("tr");
+				if (tr) {
+					tr.remove();
+					setModalStatus("Tier removed.");
+				}
+			}
+		});
+		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
+			const current = getRowsData();
+			current.push({
+				min: 0,
+				max: 0,
+				label: "New",
+				color: "#3db4f2",
+				textColor: "#ffffff"
+			});
+			renderTable(current);
+			setModalStatus("Added new tier.");
+		});
+		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
+			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
+			setModalStatus("Reset to default tiers.");
+		});
+		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
+		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
+		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
+			if (jsonWrap.style.display === "none") {
+				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
+				jsonWrap.style.display = "block";
+			} else jsonWrap.style.display = "none";
+		});
+		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
+			try {
+				const check = validateTiers(JSON.parse(jsonArea.value));
+				if (!check.valid || !check.tiers) {
+					setModalStatus(check.error || "Invalid tier JSON.", true);
+					return;
+				}
+				renderTable(check.tiers);
+				jsonWrap.style.display = "none";
+				setModalStatus("JSON applied successfully.");
+			} catch (e) {
+				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
+			}
+		});
+		const closeModal = () => {
+			document.removeEventListener("keydown", onKey, true);
+			backdrop.remove();
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				closeModal();
+			}
+		};
+		document.addEventListener("keydown", onKey, true);
+		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
+		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) closeModal();
+		});
+		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
+			const check = validateTiers(getRowsData());
+			if (!check.valid || !check.tiers) {
+				setModalStatus(check.error || "Invalid tier configuration.", true);
+				return;
+			}
+			inputEl.value = JSON.stringify(check.tiers);
+			Settings.set("tierLabels", check.tiers);
+			closeModal();
+			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
+			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
+		});
+		renderTable(tiers);
+	}
 	var PINNED_FIRST = ["Sync", "General"];
 	var PINNED_LAST = ["Advanced"];
 	var CSS$1 = `
@@ -12115,198 +12484,6 @@
 		});
 	}
 	var prevOverflow = null;
-	function openTierEditor(inputEl) {
-		let tiers;
-		try {
-			const check = validateTiers(JSON.parse(inputEl.value));
-			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		} catch {
-			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		}
-		const existing = document.getElementById("ala-tier-editor-backdrop");
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = "ala-tier-editor-backdrop";
-		backdrop.innerHTML = `
-    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
-      <header class="ala-sheet-head">
-        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
-        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-sheet-body">
-        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
-        <div class="ala-tier-table-wrap">
-          <table class="ala-tier-table">
-            <thead>
-              <tr>
-                <th style="width:75px">Label</th>
-                <th style="width:70px">Min</th>
-                <th style="width:70px">Max</th>
-                <th style="width:48px">Badge</th>
-                <th style="width:48px">Text</th>
-                <th style="width:75px">Preview</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="ala-tier-tbody"></tbody>
-          </table>
-        </div>
-        <div class="ala-tier-actions">
-          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
-        </div>
-        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
-          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
-          </div>
-        </div>
-      </div>
-      <footer class="ala-sheet-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
-        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const tbody = backdrop.querySelector("#ala-tier-tbody");
-		const status = backdrop.querySelector("#ala-tier-status");
-		const setModalStatus = (msg, isError = false) => {
-			status.textContent = msg;
-			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
-		};
-		const createRowHtml = (t, idx) => {
-			const badgeColor = normalizeHexColor(t.color) || "#000000";
-			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
-			return `
-    <tr data-idx="${idx}">
-      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
-      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
-      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
-      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
-      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
-      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
-      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
-    </tr>
-  `;
-		};
-		const renderTable = (list) => {
-			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
-		};
-		const getRowsData = () => {
-			const rows = tbody.querySelectorAll("tr");
-			const result = [];
-			rows.forEach((tr) => {
-				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
-				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
-				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
-				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-				result.push({
-					label: label || "Tier",
-					min: isNaN(min) ? 0 : min,
-					max: isNaN(max) ? 100 : max,
-					color,
-					textColor
-				});
-			});
-			return result;
-		};
-		const updatePreview = (tr) => {
-			const label = tr.querySelector(".ala-t-label")?.value || "";
-			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-			const preview = tr.querySelector(".ala-t-preview");
-			if (preview) {
-				preview.textContent = label;
-				preview.style.backgroundColor = color;
-				preview.style.color = textColor;
-			}
-		};
-		tbody.addEventListener("input", (e) => {
-			const tr = e.target.closest("tr");
-			if (tr) updatePreview(tr);
-		});
-		tbody.addEventListener("click", (e) => {
-			const btn = e.target.closest(".ala-tier-del-btn");
-			if (btn) {
-				const tr = btn.closest("tr");
-				if (tr) {
-					tr.remove();
-					setModalStatus("Tier removed.");
-				}
-			}
-		});
-		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
-			const current = getRowsData();
-			current.push({
-				min: 0,
-				max: 0,
-				label: "New",
-				color: "#3db4f2",
-				textColor: "#ffffff"
-			});
-			renderTable(current);
-			setModalStatus("Added new tier.");
-		});
-		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
-			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
-			setModalStatus("Reset to default tiers.");
-		});
-		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
-		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
-		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
-			if (jsonWrap.style.display === "none") {
-				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
-				jsonWrap.style.display = "block";
-			} else jsonWrap.style.display = "none";
-		});
-		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
-			try {
-				const check = validateTiers(JSON.parse(jsonArea.value));
-				if (!check.valid || !check.tiers) {
-					setModalStatus(check.error || "Invalid tier JSON.", true);
-					return;
-				}
-				renderTable(check.tiers);
-				jsonWrap.style.display = "none";
-				setModalStatus("JSON applied successfully.");
-			} catch (e) {
-				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
-			}
-		});
-		const closeModal = () => {
-			document.removeEventListener("keydown", onKey, true);
-			backdrop.remove();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				closeModal();
-			}
-		};
-		document.addEventListener("keydown", onKey, true);
-		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
-		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) closeModal();
-		});
-		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
-			const check = validateTiers(getRowsData());
-			if (!check.valid || !check.tiers) {
-				setModalStatus(check.error || "Invalid tier configuration.", true);
-				return;
-			}
-			inputEl.value = JSON.stringify(check.tiers);
-			Settings.set("tierLabels", check.tiers);
-			closeModal();
-			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
-			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
-		});
-		renderTable(tiers);
-	}
 	function standaloneNote(id) {
 		return `<b>Standalone ${STANDALONE[id].name} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.`;
 	}

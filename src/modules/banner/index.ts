@@ -1,32 +1,30 @@
 import { GM_download } from 'vite-plugin-monkey/dist/client';
-import { defineFeature } from '../../core/registry';
-import { Settings } from '../../settings/settings';
-import { Core } from '../../core/observer';
-import { addStyle } from '../../core/styles';
-import { icon, mediaRoute } from '../../utils/dom';
+import { defineModule } from '../../core/registry';
+import { findBannerElement, mediaRoute } from '../../utils/anilistDom';
+import { icon } from '../../utils/dom';
 import { openTab, debounce } from '../../utils/helpers';
 
-defineFeature(
-  {
-    id: 'banner',
-    key: 'bannerEnabled',
-    section: 'External Links, Downloads & Mappings',
-    def: false,
-    legacy: ['bannerEnabled', 'bannerDownloadEnabled', 'bannerDownloaderEnabled'],
-    title: 'Anime/Manga Banner Downloader',
-    help: 'Add a button for downloading the AniList banner image.',
-    options: [
-      {
-        key: 'bannerProfiles',
-        type: 'toggle',
-        def: false,
-        title: 'User Profile Banners',
-        help: 'Also show the download button on user profile banners (it is always shown on anime and manga pages).'
-      }
-    ]
-  },
-  () => {
-    addStyle(
+defineModule({
+  id: 'banner',
+  key: 'bannerEnabled',
+  section: 'External Links, Downloads & Mappings',
+  layer: 'feature',
+  requiresReload: false,
+  def: false,
+  legacy: ['bannerEnabled', 'bannerDownloadEnabled', 'bannerDownloaderEnabled'],
+  title: 'Anime/Manga Banner Downloader',
+  help: 'Add a button for downloading the AniList banner image.',
+  options: [
+    {
+      key: 'bannerProfiles',
+      type: 'toggle',
+      def: false,
+      title: 'User Profile Banners',
+      help: 'Also show the download button on user profile banners (it is always shown on anime and manga pages).'
+    }
+  ],
+  setup(ctx) {
+    ctx.addStyle(
       'ala-banner-style',
       `
       .banner{position:relative}
@@ -50,10 +48,10 @@ defineFeature(
       )?.[2] || null;
 
     const bannerAllowed = (): boolean =>
-      !!mediaRoute() || (/^\/user\//.test(location.pathname) && Settings.get('bannerProfiles'));
+      !!mediaRoute() || (/^\/user\//.test(location.pathname) && !!ctx.get('bannerProfiles'));
 
     function download(onSaved?: () => void): void {
-      const banner = document.querySelector<HTMLElement>('.banner');
+      const banner = findBannerElement();
       const url = banner && bannerAllowed() && bannerUrl(banner);
       if (!url) return;
       const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || 'jpg').toLowerCase();
@@ -87,7 +85,7 @@ defineFeature(
           btn.classList.add('is-done');
           ico.innerHTML = icon('check', 18);
           lbl.textContent = 'Saved';
-          setTimeout(() => {
+          ctx.timeout(() => {
             btn.classList.remove('is-done');
             ico.innerHTML = icon('download', 18);
             lbl.textContent = 'Download banner';
@@ -98,7 +96,7 @@ defineFeature(
     }
 
     function scan(): void {
-      const banner = document.querySelector<HTMLElement>('.banner');
+      const banner = findBannerElement();
       if (!banner) return;
       let btn = banner.querySelector<HTMLButtonElement>('.ala-banner-dl');
       const show = bannerAllowed() && !!bannerUrl(banner);
@@ -111,8 +109,11 @@ defineFeature(
     }
 
     const scanSoon = debounce(scan, 150);
-    Core.ready(scan);
-    Core.onNavigate(() => setTimeout(scan, 300));
-    Core.onBodyMutation(scanSoon);
+    ctx.ready(scan);
+    ctx.onNav(() => ctx.timeout(scan, 300));
+    ctx.onBodyMutation(scanSoon);
+    ctx.onCleanup(() => {
+      document.querySelectorAll('.ala-banner-dl').forEach((el) => el.remove());
+    });
   }
-);
+});

@@ -1,9 +1,6 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
-import { AniList } from '../../api/anilist';
-import { addStyle } from '../../core/styles';
-import { mediaRoute } from '../../utils/dom';
-import { persistent, gm, memo, debounce } from '../../utils/helpers';
+import { defineModule } from '../../core/registry';
+import { findOverviewContainer, mediaRoute } from '../../utils/anilistDom';
+import { memo, debounce } from '../../utils/helpers';
 import {
   DEFAULT_ANISONGS_CONFIG,
   validateAniSongsConfig,
@@ -762,33 +759,34 @@ export function extractSongParams(song: SongEntry, groupType: 'OP' | 'ED' = 'OP'
   };
 }
 
-defineFeature(
-  {
-    id: 'aniSongs',
-    key: 'aniSongsEnabled',
-    section: 'AniList Enhancements',
-    def: false,
-    legacy: ['aniSongsEnabled', 'animeThemeSongsEnabled', 'anisongsEnabled'],
-    title: 'Anime Opening & Ending Songs',
-    help: 'Show OP/ED theme songs on anime pages.',
-    options: [
-      {
-        key: 'aniSongsProviders',
-        type: 'json',
-        def: DEFAULT_ANISONGS_CONFIG,
-        title: 'Song Search Providers',
-        help: 'Configure search shortcuts (YouTube, Spotify, etc.) and active music services.',
-        validate: validateAniSongsConfig
-      }
-    ]
-  },
-  () => {
+defineModule({
+  id: 'aniSongs',
+  key: 'aniSongsEnabled',
+  section: 'AniList Enhancements',
+  layer: 'feature',
+  requiresReload: false,
+  def: false,
+  legacy: ['aniSongsEnabled', 'animeThemeSongsEnabled', 'anisongsEnabled'],
+  title: 'Anime Opening & Ending Songs',
+  help: 'Show OP/ED theme songs on anime pages.',
+  options: [
+    {
+      key: 'aniSongsProviders',
+      type: 'json',
+      def: DEFAULT_ANISONGS_CONFIG,
+      title: 'Song Search Providers',
+      help: 'Configure search shortcuts (YouTube, Spotify, etc.) and active music services.',
+      validate: validateAniSongsConfig
+    }
+  ],
+  setup(ctx) {
     const API = 'https://rs.animethemes.moe/graphql';
     const ROOT = 'daiya-anisongs';
     const TTL = 7 * 86400e3;
     const EMPTY_TTL = 12 * 3600e3;
 
-    addStyle(
+    ctx.ownUi(`#${ROOT}`);
+    ctx.addStyle(
       'daiya-anisongs-style',
       `
       #${ROOT}{width:100%;margin-top:30px}
@@ -826,7 +824,7 @@ defineFeature(
       @media (prefers-reduced-motion:reduce){#${ROOT} .daiya-anisong-collapsible,#${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title,#${ROOT} .daiya-anisong-link,#${ROOT} .daiya-anisong-version,#${ROOT} .daiya-anisongs-toggle{transition:none!important}}`
     );
 
-    const cacheStore = persistent<Record<string, AnimeThemesCacheEntry>>('daiya_anisongs_cache_v8', (d) => {
+    const cacheStore = ctx.persistent<Record<string, AnimeThemesCacheEntry>>('daiya_anisongs_cache_v8', (d) => {
       for (const id of Object.keys(d)) {
         if (!(Number(d[id]?.expires) > Date.now())) delete d[id];
       }
@@ -887,7 +885,7 @@ defineFeature(
       }`;
 
       const [themesRes, alRes] = await Promise.allSettled([
-        gm.json(API, {
+        ctx.http.json(API, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -898,7 +896,7 @@ defineFeature(
             variables: { id: [Number(id)] }
           })
         }),
-        AniList.query(alQuery, { id: Number(id) })
+        ctx.api.query(alQuery, { id: Number(id) })
       ]);
 
       const result = themesRes.status === 'fulfilled' ? themesRes.value : null;
@@ -974,7 +972,7 @@ defineFeature(
         if (cur !== mine) return;
         if (!themes.OP.length && !themes.ED.length) return;
         mine.themes = themes;
-        const overview = await Core.waitForSelector('.overview', 10000);
+        const overview = await ctx.waitForSelector('.overview', 10000);
         if (cur === mine && overview && animeId() === id) mount(mine as { id: string; themes: ThemesGroup }, overview);
       } catch (err) {
         console.error('[AL-Additions] Anisongs sync error:', err);
@@ -992,7 +990,7 @@ defineFeature(
       if (!id) return;
       if (cur?.id !== id) return void sync();
       if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
-        const overview = document.querySelector<HTMLElement>('.overview');
+        const overview = findOverviewContainer();
         if (overview) {
           try {
             mount(cur as { id: string; themes: ThemesGroup }, overview);
@@ -1003,8 +1001,12 @@ defineFeature(
       }
     }
 
-    Core.ready(sync);
-    Core.onNavigate(sync);
-    Core.onBodyMutation(debounce(repair, 200));
+    ctx.ready(() => void sync());
+    ctx.onNav(() => void sync());
+    ctx.onBodyMutation(debounce(repair, 200));
+    ctx.onCleanup(() => {
+      cur = null;
+      document.getElementById(ROOT)?.remove();
+    });
   }
-);
+});

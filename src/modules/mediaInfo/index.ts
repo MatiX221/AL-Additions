@@ -1,25 +1,23 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
-import { AniList, MediaData } from '../../api/anilist';
+import { defineModule } from '../../core/registry';
 import { externalReleased } from '../../api/scrapers';
-import { addStyle } from '../../core/styles';
-import { mediaRoute } from '../../utils/dom';
-import { tryOr, safe, logDebug } from '../../utils/helpers';
+import { findMediaSidebarSpot, mediaRoute } from '../../utils/anilistDom';
+import { tryOr, safe } from '../../utils/helpers';
 import type { MediaRoute } from '../../types';
 
-defineFeature(
-  {
-    id: 'mediaInfo',
-    key: 'mediaInfoEnabled',
-    section: 'AniList Enhancements',
-    def: false,
-    legacy: ['mediaInfoEnabled', 'mediaListEditorEnabled'],
-    title: 'List Score & Progress Editor',
-    help: 'Show your score and episode/chapter progress controls on anime and manga pages.'
-  },
-  () => {
+defineModule({
+  id: 'mediaInfo',
+  key: 'mediaInfoEnabled',
+  section: 'AniList Enhancements',
+  layer: 'feature',
+  requiresReload: false,
+  def: false,
+  legacy: ['mediaInfoEnabled', 'mediaListEditorEnabled'],
+  title: 'List Score & Progress Editor',
+  help: 'Show your score and episode/chapter progress controls on anime and manga pages.',
+  setup(ctx) {
     const ID = 'ala-media-info';
-    addStyle(
+    ctx.ownUi(`#${ID}`);
+    ctx.addStyle(
       'ala-media-info-style',
       `
       #${ID}{box-sizing:border-box;width:100%;max-width:100%;margin:0 0 12px;padding:14px 15px 15px;border-radius:3px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:1.3rem;line-height:1.4;overflow:hidden}
@@ -68,8 +66,7 @@ defineFeature(
     }
 
     function findSpot(): { parent: HTMLElement; before: HTMLElement } | null {
-      const el = document.querySelector<HTMLElement>('.sidebar > .data');
-      return el?.parentElement && el.parentElement !== document.body ? { parent: el.parentElement, before: el } : null;
+      return findMediaSidebarSpot();
     }
 
     const scoreStep = (f: string | null): string => (f === 'POINT_10_DECIMAL' ? '0.1' : '1');
@@ -82,7 +79,7 @@ defineFeature(
       const d = new Date();
       return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
     };
-    const scoreFormat = async (): Promise<string | null> => (await tryOr(() => AniList.viewer()))?.scoreFormat || null;
+    const scoreFormat = async (): Promise<string | null> => (await tryOr(() => ctx.api.viewer()))?.scoreFormat || null;
 
     let shown: string | null = null;
     let gen = 0;
@@ -115,8 +112,8 @@ defineFeature(
       shown = key;
 
       if (reason === 'none') {
-        setTimeout(() => {
-          if (panel()?.dataset.mode === 'connect' && AniList.hasAuth()) render(true);
+        ctx.timeout(() => {
+          if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
         }, 3000);
       }
     }
@@ -154,9 +151,9 @@ defineFeature(
       const isStarting = (!prev.status || prev.status === 'PLANNING') && progress > 0;
       const status = finishNow ? 'COMPLETED' : isStarting ? 'CURRENT' : undefined;
       saving = true;
-      logDebug('[MEDIAINFO]', 'Saving media progress/score:', { mediaId: media.id, score, progress, status });
+      ctx.debug.log('Saving media progress/score:', { mediaId: media.id, score, progress, status });
       try {
-        const entry = await MediaData.save(media.id, media.type, {
+        const entry = await ctx.api.media.save(media.id, media.type, {
           score,
           progress,
           status,
@@ -164,10 +161,10 @@ defineFeature(
         });
         if (!entry) throw new Error('AniList did not return the updated entry');
         info.mediaListEntry = entry;
-        logDebug('[MEDIAINFO]', 'Save successful:', entry);
+        ctx.debug.log('Save successful:', entry);
         return entry;
       } catch (e) {
-        logDebug('[MEDIAINFO]', 'Media list save failed:', e);
+        ctx.debug.log('Media list save failed:', e);
         console.warn('[AL-Additions] Media list save failed:', e);
         return false;
       } finally {
@@ -195,19 +192,19 @@ defineFeature(
         return;
       }
 
-      if (!AniList.hasAuth()) return renderConnect(key, 'none');
+      if (!ctx.api.hasAuth()) return renderConnect(key, 'none');
 
       const g = gen;
       const stale = (): boolean => g !== gen || mediaRoute()?.id !== route.id;
       rendering = true;
-      logDebug('[MEDIAINFO]', 'Rendering media info panel for:', key);
+      ctx.debug.log('Rendering media info panel for:', key);
       try {
         let info: any = null;
         let fmt: string | null = null;
         try {
-          info = await MediaData.get(route.id, route.type, { throwAuth: true });
+          info = await ctx.api.media.get(route.id, route.type, { throwAuth: true });
           if (stale()) return;
-          if (info) fmt = (await AniList.viewer())?.scoreFormat || null;
+          if (info) fmt = (await ctx.api.viewer())?.scoreFormat || null;
         } catch (e: any) {
           if (stale()) return;
           if (e?.auth) return renderConnect(key, 'rejected');
@@ -216,7 +213,7 @@ defineFeature(
 
         if (stale()) return;
         if (!info || !fmt) {
-          if (!AniList.hasAuth()) return renderConnect(key, 'none');
+          if (!ctx.api.hasAuth()) return renderConnect(key, 'none');
           retry = { key, at: Date.now() + 15000, count: retry.key === key ? retry.count + 1 : 1 };
           if (retry.count < MAX_FAILURES) schedule(15500);
           return;
@@ -407,9 +404,9 @@ defineFeature(
       }
     }
 
-    window.addEventListener('load', () => schedule(500), { once: true });
-    Core.ready(() => schedule(document.readyState === 'complete' ? 500 : 1200));
-    Core.onNavigate(() => {
+    ctx.listen(window, 'load', () => schedule(500), { once: true });
+    ctx.ready(() => schedule(document.readyState === 'complete' ? 500 : 1200));
+    ctx.onNav(() => {
       const r = mediaRoute();
       if (r && shown === `${r.type}:${r.id}` && panel()) return;
       gen++;
@@ -419,14 +416,20 @@ defineFeature(
       panel()?.remove();
       schedule(1200);
     });
-    Core.onBodyMutation(() => {
+    ctx.onBodyMutation(() => {
       const r = mediaRoute();
       if (!r || panel() || rendering || saving) return;
       if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
       schedule(500);
     });
-    window.addEventListener('focus', () => {
-      if (panel()?.dataset.mode === 'connect' && AniList.hasAuth()) render(true);
+    ctx.listen(window, 'focus', () => {
+      if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
+    });
+    ctx.onCleanup(() => {
+      gen++;
+      clearTimeout(timer);
+      timer = 0;
+      panel()?.remove();
     });
   }
-);
+});

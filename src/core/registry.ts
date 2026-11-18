@@ -761,7 +761,6 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
           }
           if (rec.standalonePaused) {
             rec.booted = false;
-            runCleanupsReverse(rec.id, cleanups);
           }
         },
         (err) => {
@@ -771,7 +770,6 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
     }
     if (rec.standalonePaused) {
       rec.booted = false;
-      runCleanupsReverse(rec.id, cleanups);
     }
     return Promise.resolve();
   } catch (err) {

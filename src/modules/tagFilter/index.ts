@@ -1,33 +1,30 @@
-import { defineFeature } from '../../core/registry';
-import { Settings } from '../../settings/settings';
-import { Core } from '../../core/observer';
+import { defineModule } from '../../core/registry';
 
-defineFeature(
-  {
-    id: 'tagPercent',
-    key: 'tagFilterEnabled',
-    section: 'AniList Enhancements',
-    layer: 'intercept',
-    def: false,
-    legacy: ['tagFilterEnabled', 'browseTagRankFilterEnabled'],
-    title: 'Browse Tag Rank Filter',
-    help: 'Automatically apply a minimum tag-rank percentage when you search with a tag or genre.',
-    options: [
-      {
-        key: 'tagPercentage',
-        type: 'number',
-        def: 50,
-        min: 1,
-        max: 100,
-        legacy: ['tagPercentage', 'minimumTagRankPercentage'],
-        title: 'Minimum Tag Rank',
-        help: 'The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles.'
-      }
-    ]
-  },
-  () => {
+defineModule({
+  id: 'tagPercent',
+  key: 'tagFilterEnabled',
+  section: 'AniList Enhancements',
+  layer: 'intercept',
+  requiresReload: true,
+  def: false,
+  legacy: ['tagFilterEnabled', 'browseTagRankFilterEnabled'],
+  title: 'Browse Tag Rank Filter',
+  help: 'Automatically apply a minimum tag-rank percentage when you search with a tag or genre.',
+  options: [
+    {
+      key: 'tagPercentage',
+      type: 'number',
+      def: 50,
+      min: 1,
+      max: 100,
+      legacy: ['tagPercentage', 'minimumTagRankPercentage'],
+      title: 'Minimum Tag Rank',
+      help: 'The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles.'
+    }
+  ],
+  setup(ctx) {
     const PARAM = 'minimumTagRank';
-    const VALUE = String(Settings.get('tagPercentage'));
+    const VALUE = String(ctx.get('tagPercentage'));
     const isTarget = (): boolean => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
     const hasSelection = (url: URL): boolean =>
       [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== '');
@@ -52,6 +49,6 @@ defineFeature(
     }
 
     apply(true);
-    Core.onNavigate(() => apply(false));
+    ctx.onNav(() => apply(false));
   }
-);
+});

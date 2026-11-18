@@ -16,9 +16,7 @@ import { SyncMediaType } from './types';
 const MODAL_ID = 'ala-overrides-backdrop';
 const QUICK_MODAL_ID = 'ala-quick-override-backdrop';
 
-addStyle(
-  'ala-overrides-style',
-  `
+const OVERRIDES_CSS = `
   #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
   #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
   #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
@@ -111,8 +109,11 @@ addStyle(
     .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
     .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
   }
-  `
-);
+  `;
+
+function ensureOverridesStyle(): void {
+  addStyle('ala-overrides-style', OVERRIDES_CSS);
+}
 
 function extractAlId(raw: string): number {
   const str = String(raw || '').trim();
@@ -190,6 +191,7 @@ async function batchFetchUnmatchedMeta(ids: number[]): Promise<void> {
 }
 
 export async function openQuickOverrideModal(mediaId: number, mediaType: SyncMediaType = 'ANIME'): Promise<void> {
+  ensureOverridesStyle();
   const existing = document.getElementById(QUICK_MODAL_ID);
   if (existing) existing.remove();
 
@@ -328,6 +330,7 @@ export async function openQuickOverrideModal(mediaId: number, mediaType: SyncMed
 }
 
 export function openOverridesModal(): void {
+  ensureOverridesStyle();
   const existing = document.getElementById(MODAL_ID);
   if (existing) existing.remove();
 

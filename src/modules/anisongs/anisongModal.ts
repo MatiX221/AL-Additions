@@ -201,9 +201,7 @@ export function buildProviderUrl(template: string, params: SongParams): string {
 
 const MODAL_ID = 'ala-anisongs-modal-backdrop';
 
-addStyle(
-  'ala-anisongs-modal-style',
-  `
+const MODAL_CSS = `
   #${MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
   #${MODAL_ID} .ala-as-sheet{display:flex;flex-direction:column;width:min(660px,100%);height:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
   .ala-as-sheet *{box-sizing:border-box}
@@ -283,10 +281,10 @@ addStyle(
     .ala-as-json-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center}
     .ala-as-textarea{height:200px}
   }
-  `
-);
+  `;
 
 export function openAniSongsModal(inputEl?: HTMLInputElement): void {
+  addStyle('ala-anisongs-modal-style', MODAL_CSS);
   const existing = document.getElementById(MODAL_ID);
   if (existing) existing.remove();
 

@@ -15,9 +15,7 @@ import { Core } from '../../core/observer';
 import { progress, syncStatus, onProgressChange, onStateChange } from './state';
 import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';
 
-addStyle(
-  'almal-style',
-  `
+const PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
   #almal-panel *{box-sizing:border-box}
   #almal-panel :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
@@ -85,8 +83,7 @@ addStyle(
     .almal-manual input{height:40px;font-size:16px}
     .almal-link{padding:8px 0}
   }
-  @media (prefers-reduced-motion:reduce){.almal-arrow-line,#almal-progress-fill.indeterminate{animation:none}}`
-);
+  @media (prefers-reduced-motion:reduce){.almal-arrow-line,#almal-progress-fill.indeterminate{animation:none}}`;
 
 const ui = { manual: false, showLogs: false };
 let progressTimer: ReturnType<typeof setTimeout> | 0 = 0;
@@ -393,6 +390,7 @@ export function mountPanel(): void {
 const mountSoon = debounce(mountPanel, 250);
 
 export function initSyncPanel(): void {
+  addStyle('almal-style', PANEL_CSS);
   onProgressChange((force) => updateProgressUI(force));
   onStateChange(renderPanel);
 

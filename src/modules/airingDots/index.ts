@@ -1,8 +1,6 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
-import { AniList } from '../../api/anilist';
-import { addStyle } from '../../core/styles';
-import { persistent, clean, debounce } from '../../utils/helpers';
+import { defineModule } from '../../core/registry';
+import { ANILIST_SELECTORS } from '../../utils/anilistDom';
+import { clean, debounce } from '../../utils/helpers';
 
 interface AiringCacheEntry {
   status: string | null;
@@ -12,17 +10,17 @@ interface AiringCacheEntry {
   nextCheck: number;
 }
 
-defineFeature(
-  {
-    id: 'behindDots',
-    key: 'behindDotsEnabled',
-    section: 'AniList Enhancements',
-    def: false,
-    legacy: ['behindDotsEnabled', 'airingProgressIndicatorEnabled'],
-    title: 'Airing Progress Indicator',
-    help: 'Show an orange indicator when your watched episode count is behind the number of aired episodes.'
-  },
-  () => {
+defineModule({
+  id: 'behindDots',
+  key: 'behindDotsEnabled',
+  section: 'AniList Enhancements',
+  layer: 'feature',
+  requiresReload: false,
+  def: false,
+  legacy: ['behindDotsEnabled', 'airingProgressIndicatorEnabled'],
+  title: 'Airing Progress Indicator',
+  help: 'Show an orange indicator when your watched episode count is behind the number of aired episodes.',
+  setup(ctx) {
     const CLASS = 'daiya-behind-dot';
     const ORANGE = 'rgb(255, 152, 0)';
     const NO_AIRING_TTL = 6 * 3600e3;
@@ -35,14 +33,14 @@ defineFeature(
     const QUERY =
       'query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }';
 
-    addStyle(
+    ctx.addStyle(
       'daiya-behind-dot-css',
       `
       .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
       .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`
     );
 
-    const cacheStore = persistent<Record<string, AiringCacheEntry>>('daiya-anilist-airing-cache-v5', (d) => {
+    const cacheStore = ctx.persistent<Record<string, AiringCacheEntry>>('daiya-anilist-airing-cache-v5', (d) => {
       for (const id of Object.keys(d)) {
         if (!(Date.now() - Number(d[id]?.updated) < PRUNE_AGE)) delete d[id];
       }
@@ -68,7 +66,7 @@ defineFeature(
 
     function watchingEntries(): Element[] {
       const out: Element[] = [];
-      for (const wrap of document.querySelectorAll('.list-wrap')) {
+      for (const wrap of document.querySelectorAll(ANILIST_SELECTORS.listWrap)) {
         if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll('.list-entries .entry')));
       }
       return out;
@@ -171,7 +169,7 @@ defineFeature(
     async function updateBatch(ids: string[]): Promise<void> {
       const returned = new Set<string>();
       try {
-        const data = await AniList.query(QUERY, { ids: ids.map(Number) });
+        const data = await ctx.api.query(QUERY, { ids: ids.map(Number) });
         for (const m of data?.Page?.media || []) {
           const id = String(m.id);
           returned.add(id);
@@ -247,7 +245,7 @@ defineFeature(
     };
     const refresh = debounce(scanAll, 100);
 
-    Core.onBodyMutation((muts) => {
+    ctx.onBodyMutation((muts) => {
       if (!onListPage()) return;
       for (const m of muts) {
         const t = (m.target.nodeType === 1 ? m.target : m.target.parentElement) as Element | null;
@@ -269,7 +267,7 @@ defineFeature(
       }
     });
 
-    Core.onNavigate(() => {
+    ctx.onNav(() => {
       if (onListPage()) {
         fullScan = true;
         mark();
@@ -289,7 +287,8 @@ defineFeature(
       return false;
     };
 
-    document.addEventListener(
+    ctx.listen(
+      document,
       'pointerdown',
       (e) => {
         if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
@@ -314,7 +313,8 @@ defineFeature(
     );
 
     for (const type of ['click', 'input', 'change']) {
-      document.addEventListener(
+      ctx.listen(
+        document,
         type,
         (e) => {
           if (e.target instanceof Element && e.target.closest('.entry')) refresh();
@@ -322,18 +322,29 @@ defineFeature(
         true
       );
     }
-    window.addEventListener('focus', refresh);
-    document.addEventListener('visibilitychange', () => {
+    ctx.listen(window, 'focus', refresh);
+    ctx.listen(document, 'visibilitychange', () => {
       if (!document.hidden) refresh();
     });
 
-    setInterval(scanAll, 60000);
-    Core.ready(() => {
+    ctx.interval(scanAll, 60000);
+    ctx.ready(() => {
       if (onListPage()) {
         scanAll();
-        setTimeout(scanAll, 500);
-        setTimeout(scanAll, 1500);
+        ctx.timeout(scanAll, 500);
+        ctx.timeout(scanAll, 1500);
       }
     });
+    ctx.onCleanup(() => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+      pending.clear();
+      active.clear();
+      optimistic.clear();
+      dirty.clear();
+      document.querySelectorAll(`.${CLASS}`).forEach((el) => el.classList.remove(CLASS));
+    });
   }
-);
+});
