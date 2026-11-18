@@ -1,5 +1,5 @@
 import { AniList } from '../../api/anilist';
-import { addStyle } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
 import { malFetchList, malDeleteEntry } from '../../api/mal';
 import { stores } from './state';
 import { alFetchAll } from './engine';

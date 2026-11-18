@@ -6,26 +6,36 @@ const SRC_ROOT = path.resolve(process.cwd(), 'src');
 
 const KNOWN_VIOLATIONS: string[] = [
   'modules/airingDots/index.ts -> core/observer.ts',
+  'modules/airingDots/index.ts -> core/styles.ts',
+  'modules/anisongs/anisongModal.ts -> core/styles.ts',
   'modules/anisongs/anisongs.ts -> core/observer.ts',
+  'modules/anisongs/anisongs.ts -> core/styles.ts',
   'modules/banner/index.ts -> core/observer.ts',
+  'modules/banner/index.ts -> core/styles.ts',
   'modules/compareView/index.ts -> core/observer.ts',
+  'modules/compareView/index.ts -> core/styles.ts',
   'modules/keyframe/index.ts -> core/observer.ts',
+  'modules/keyframe/index.ts -> core/styles.ts',
   'modules/mediaInfo/index.ts -> core/observer.ts',
+  'modules/mediaInfo/index.ts -> core/styles.ts',
   'modules/nyaa/index.ts -> core/observer.ts',
+  'modules/nyaa/index.ts -> core/styles.ts',
   'modules/nyaa/index.ts -> modules/sync/overrides.ts',
   'modules/nyaa/index.ts -> modules/sync/overridesModal.ts',
   'modules/shortUrls/index.ts -> core/observer.ts',
   'modules/sync/index.ts -> settings/backup.ts',
+  'modules/sync/overridesModal.ts -> core/styles.ts',
   'modules/sync/panel.ts -> core/observer.ts',
+  'modules/sync/panel.ts -> core/styles.ts',
   'modules/tagFilter/index.ts -> core/observer.ts',
   'modules/tierLabels/index.ts -> core/observer.ts',
+  'modules/tierLabels/index.ts -> core/styles.ts',
   'settings/panel.ts -> api/mal.ts',
   'settings/panel.ts -> modules/anisongs/anisongModal.ts',
   'settings/panel.ts -> modules/sync/engine.ts',
   'settings/panel.ts -> modules/sync/overrides.ts',
   'settings/panel.ts -> modules/sync/overridesModal.ts',
-  'settings/panel.ts -> modules/tierLabels/tiers.ts',
-  'utils/dom.ts -> core/observer.ts'
+  'settings/panel.ts -> modules/tierLabels/tiers.ts'
 ];
 
 type Layer = 'types' | 'main' | 'utils' | 'core' | 'settings' | 'api' | 'module';

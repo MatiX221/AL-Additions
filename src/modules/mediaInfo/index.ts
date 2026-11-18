@@ -2,7 +2,8 @@ import { defineFeature } from '../../core/registry';
 import { Core } from '../../core/observer';
 import { AniList, MediaData } from '../../api/anilist';
 import { externalReleased } from '../../api/scrapers';
-import { addStyle, mediaRoute } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
+import { mediaRoute } from '../../utils/dom';
 import { tryOr, safe, logDebug } from '../../utils/helpers';
 import type { MediaRoute } from '../../types';
 

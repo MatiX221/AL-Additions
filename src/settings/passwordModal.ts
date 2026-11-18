@@ -1,4 +1,4 @@
-import { addStyle } from '../utils/dom';
+import { addStyle } from '../core/styles';
 import { esc } from '../utils/helpers';
 
 export interface PasswordModalOptions {

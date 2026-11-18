@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
-import { modules } from '../src/core/registry';
+import { bootModuleForTest } from '../src/core/registry';
 import { store as gmStore } from '../src/utils/helpers';
 import { AniList } from '../src/api/anilist';
 import '../src/modules/fastLoad';
@@ -17,7 +17,7 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
 
   const flushAsync = () => new Promise((resolve) => setTimeout(resolve, 15));
 
-  beforeAll(() => {
+  beforeAll(async () => {
     window.Response = globalThis.Response;
     window.Headers = globalThis.Headers;
     window.Request = globalThis.Request;
@@ -25,8 +25,7 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
     window.fetch = ((...args: any[]) => mockNativeFetch(...args)) as any;
     (window as any).unsafeWindow = window;
 
-    const fastLoadModule = modules.find((m) => m.name === 'fastLoad');
-    fastLoadModule?.init();
+    await bootModuleForTest('fastLoad');
   });
 
   beforeEach(() => {

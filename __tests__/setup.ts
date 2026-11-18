@@ -113,3 +113,23 @@ beforeEach(() => {
   document.body.innerHTML = '';
   document.head.innerHTML = '';
 });
+
+const [{ configureCoreServices }, { AniList, MediaData }] = await Promise.all([
+  import('../src/core/registry'),
+  import('../src/api/anilist')
+]);
+
+configureCoreServices({
+  api: {
+    ...AniList,
+    media: MediaData,
+    session: {
+      hasAuth: AniList.hasAuth,
+      clear: AniList.clearViewer
+    }
+  },
+  session: {
+    hasAuth: AniList.hasAuth,
+    clear: AniList.clearViewer
+  }
+});

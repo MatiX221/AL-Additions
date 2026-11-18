@@ -1,7 +1,8 @@
 import { defineFeature } from '../../core/registry';
 import { Core } from '../../core/observer';
 import { AniList } from '../../api/anilist';
-import { addStyle, mediaRoute } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
+import { mediaRoute } from '../../utils/dom';
 import { persistent, gm, memo, debounce } from '../../utils/helpers';
 import {
   DEFAULT_ANISONGS_CONFIG,

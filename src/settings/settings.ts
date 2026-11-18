@@ -103,10 +103,16 @@ export const TYPES: Record<
 };
 
 function register(f: FeatureMeta): void {
+  const toggleType = f.type || 'toggle';
+  const toggleDef = f.def !== undefined ? f.def : toggleType === 'json' ? {} : false;
+  if (toggleType === 'toggle' && toggleDef !== false) {
+    throw new Error(`Toggle setting "${f.key}" for module "${f.id}" must default to false`);
+  }
+
   const toggle: SettingRow = {
     key: f.key,
-    type: f.type || 'toggle',
-    def: f.def !== undefined ? f.def : f.type === 'json' ? {} : false,
+    type: toggleType,
+    def: toggleDef,
     legacy: f.legacy || [],
     title: f.title,
     help: f.help
@@ -116,12 +122,37 @@ function register(f: FeatureMeta): void {
     legacy: o.legacy || []
   }));
 
-  for (const row of [toggle, ...options]) {
-    if (ROWS[row.key]) throw new Error(`Duplicate setting: ${row.key}`);
+  const batch = [toggle, ...options];
+  const seenKeys = new Set<string>();
+  for (const row of batch) {
+    if (seenKeys.has(row.key) || ROWS[row.key]) {
+      throw new Error(`Duplicate setting: ${row.key}`);
+    }
+    seenKeys.add(row.key);
+  }
+
+  for (const row of batch) {
     row.legacy = [...new Set([row.key, ...row.legacy])];
     ROWS[row.key] = row;
   }
-  features.push({ id: f.id, section: f.section || 'Other', title: f.title, help: f.help, toggle, options });
+
+  features.push({
+    id: f.id,
+    section: f.section || 'Other',
+    title: f.title,
+    help: f.help,
+    toggle,
+    options,
+    layer: f.layer ?? (f.early ? 'intercept' : 'feature'),
+    hosts: f.hosts,
+    requiresReload: f.requiresReload,
+    dependsOn: f.dependsOn,
+    after: f.after,
+    accounts: f.accounts,
+    debug: f.debug,
+    standalone: f.standalone,
+    backupTools: f.backupTools
+  });
 }
 
 function get(key: string): any {

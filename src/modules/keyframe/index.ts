@@ -1,6 +1,7 @@
 import { defineFeature } from '../../core/registry';
 import { Core } from '../../core/observer';
-import { addStyle, icon } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
+import { icon } from '../../utils/dom';
 import { debounce } from '../../utils/helpers';
 
 interface KeyframeRoute {

@@ -9,7 +9,8 @@ import {
   exchangeMalCode
 } from '../../api/mal';
 import { store, tryOr, esc, debounce } from '../../utils/helpers';
-import { addStyle, icon } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
+import { icon } from '../../utils/dom';
 import { Core } from '../../core/observer';
 import { progress, syncStatus, onProgressChange, onStateChange } from './state';
 import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';

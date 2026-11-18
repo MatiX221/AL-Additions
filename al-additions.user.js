@@ -51,7 +51,7 @@
 	var _GM_xmlhttpRequest = (() => typeof GM_xmlhttpRequest != "undefined" ? GM_xmlhttpRequest : void 0)();
 	var _unsafeWindow = (() => typeof unsafeWindow != "undefined" ? unsafeWindow : void 0)();
 	var SETTING_PREFIX = "ala_setting_";
-	var HOST = location.hostname;
+	location.hostname;
 	var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 	var clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
 	var esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({
@@ -365,10 +365,13 @@
 		}
 	};
 	function register(f) {
+		const toggleType = f.type || "toggle";
+		const toggleDef = f.def !== void 0 ? f.def : toggleType === "json" ? {} : false;
+		if (toggleType === "toggle" && toggleDef !== false) throw new Error(`Toggle setting "${f.key}" for module "${f.id}" must default to false`);
 		const toggle = {
 			key: f.key,
-			type: f.type || "toggle",
-			def: f.def !== void 0 ? f.def : f.type === "json" ? {} : false,
+			type: toggleType,
+			def: toggleDef,
 			legacy: f.legacy || [],
 			title: f.title,
 			help: f.help
@@ -377,8 +380,13 @@
 			...o,
 			legacy: o.legacy || []
 		}));
-		for (const row of [toggle, ...options]) {
-			if (ROWS[row.key]) throw new Error(`Duplicate setting: ${row.key}`);
+		const batch = [toggle, ...options];
+		const seenKeys = new Set();
+		for (const row of batch) {
+			if (seenKeys.has(row.key) || ROWS[row.key]) throw new Error(`Duplicate setting: ${row.key}`);
+			seenKeys.add(row.key);
+		}
+		for (const row of batch) {
 			row.legacy = [...new Set([row.key, ...row.legacy])];
 			ROWS[row.key] = row;
 		}
@@ -388,7 +396,16 @@
 			title: f.title,
 			help: f.help,
 			toggle,
-			options
+			options,
+			layer: f.layer ?? (f.early ? "intercept" : "feature"),
+			hosts: f.hosts,
+			requiresReload: f.requiresReload,
+			dependsOn: f.dependsOn,
+			after: f.after,
+			accounts: f.accounts,
+			debug: f.debug,
+			standalone: f.standalone,
+			backupTools: f.backupTools
 		});
 	}
 	function get(key) {
@@ -429,179 +446,365 @@
 		register,
 		migrate
 	};
-	var modules = [];
-	var LAYER_ORDER = {
-		intercept: 0,
-		preload: 1,
-		service: 2,
-		feature: 3,
-		shell: 4
-	};
-	var ID_RE = /^[a-z][A-Za-z0-9]*$/;
-	var registeredIds = new Set();
-	var defineModule = (name, setting, init, hosts = ["anilist.co"], early = false, layer, dependsOn = [], after = []) => {
-		const resolvedLayer = layer ?? (early ? "intercept" : "feature");
-		const resolvedEarly = resolvedLayer === "intercept" || resolvedLayer === "preload";
-		modules.push({
-			name,
-			setting,
-			init,
-			hosts,
-			early: resolvedEarly,
-			layer: resolvedLayer,
-			dependsOn: dependsOn.slice(),
-			after: after.slice()
-		});
-	};
-	var registerShellModule = (name, init, hosts = ["anilist.co"]) => {
-		if (!ID_RE.test(name)) {
-			console.error(`[AL-Additions] Invalid shell module ID "${name}". Must match ${ID_RE}.`);
-			return;
-		}
-		if (registeredIds.has(name)) {
-			console.error(`[AL-Additions] Duplicate module ID "${name}" ignored.`);
-			return;
-		}
-		registeredIds.add(name);
-		defineModule(name, null, init, hosts, false, "shell");
-	};
-	var defineFeature = (meta, init) => {
-		if (!ID_RE.test(meta.id)) {
-			console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
-			return;
-		}
-		if (registeredIds.has(meta.id)) {
-			console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
-			return;
-		}
-		registeredIds.add(meta.id);
-		Settings.register(meta);
-		const layer = meta.layer ?? (meta.early ? "intercept" : "feature");
-		defineModule(meta.id, meta.alwaysRun ? null : meta.key, init, meta.hosts, layer === "intercept" || layer === "preload", layer, meta.dependsOn || [], meta.after || []);
-	};
-	function hasHardDepPath(byId, startId, targetId, seen = new Set()) {
-		if (startId === targetId) return true;
-		if (seen.has(startId)) return false;
-		seen.add(startId);
-		const mod = byId.get(startId);
-		if (!mod) return false;
-		for (const dep of mod.dependsOn) if (hasHardDepPath(byId, dep, targetId, seen)) return true;
-		return false;
+	var providers = new Map();
+	function getAccountProvider(id) {
+		return providers.get(id);
 	}
-	function resolveBootOrder(all) {
-		const active = new Map();
-		for (const m of all) {
-			if (!m.hosts.includes("*") && !m.hosts.includes(HOST)) continue;
-			if (m.setting && !Settings.get(m.setting)) continue;
-			active.set(m.name, m);
+	function getAccountSecretKeys(providerId) {
+		if (providerId !== void 0) {
+			const p = providers.get(providerId);
+			return p ? [...new Set(p.secretKeys)] : [];
 		}
-		let changed = true;
-		while (changed) {
-			changed = false;
-			for (const [id, m] of active) {
-				const invalidDep = m.dependsOn.find((depId) => {
-					const dep = active.get(depId);
-					if (!dep) return true;
-					return LAYER_ORDER[dep.layer] > LAYER_ORDER[m.layer];
-				});
-				if (invalidDep !== void 0) {
-					console.warn(`[AL-Additions] Module "${id}" disabled: dependency "${invalidDep}" is unavailable or in a later layer.`);
-					active.delete(id);
-					changed = true;
+		const keys = new Set();
+		for (const p of providers.values()) for (const k of p.secretKeys) keys.add(k);
+		return [...keys];
+	}
+	function clearAccountSecrets(providerId) {
+		for (const key of getAccountSecretKeys(providerId)) store$1.del(key);
+	}
+	async function runAccountAuthCallbacks() {
+		for (const p of [...providers.values()]) {
+			if (!p.onAuthCallback) continue;
+			await safe(async () => {
+				await p.onAuthCallback();
+			}, `account auth callback (${p.id})`);
+		}
+	}
+	var ServiceRegistryImpl = class {
+		services = new Map();
+		watchers = new Map();
+		provide(name, impl) {
+			this.services.set(name, impl);
+			const subs = this.watchers.get(name);
+			if (subs) for (const entry of [...subs]) {
+				this.runCleanup(entry);
+				try {
+					const res = entry.cb(impl);
+					entry.cleanup = typeof res === "function" ? res : null;
+				} catch (e) {
+					console.error(`[AL-Additions] Service watcher for "${name}" failed:`, e);
 				}
 			}
+			return () => {
+				if (this.services.get(name) !== impl) return;
+				this.services.delete(name);
+				const currentSubs = this.watchers.get(name);
+				if (currentSubs) for (const entry of [...currentSubs]) this.runCleanup(entry);
+			};
 		}
-		const hardIn = new Map();
-		const hardOut = new Map();
-		for (const id of active.keys()) {
-			hardIn.set(id, 0);
-			hardOut.set(id, []);
+		get(name) {
+			return this.services.get(name);
 		}
-		for (const [id, m] of active) for (const depId of new Set(m.dependsOn)) {
-			hardIn.set(id, (hardIn.get(id) || 0) + 1);
-			hardOut.get(depId).push(id);
-		}
-		const q = [];
-		for (const [id, deg] of hardIn) if (deg === 0) q.push(id);
-		const acyclicIds = new Set();
-		while (q.length) {
-			const id = q.shift();
-			acyclicIds.add(id);
-			for (const next of hardOut.get(id) || []) {
-				const d = (hardIn.get(next) || 0) - 1;
-				hardIn.set(next, d);
-				if (d === 0) q.push(next);
+		onAvailable(name, cb) {
+			const entry = {
+				cb,
+				cleanup: null
+			};
+			let subs = this.watchers.get(name);
+			if (!subs) {
+				subs = new Set();
+				this.watchers.set(name, subs);
 			}
-		}
-		for (const id of [...active.keys()]) if (!acyclicIds.has(id)) {
-			console.warn(`[AL-Additions] Module "${id}" disabled due to dependency cycle.`);
-			active.delete(id);
-		}
-		const ordered = [];
-		for (const layer of [
-			"intercept",
-			"preload",
-			"service",
-			"feature",
-			"shell"
-		]) {
-			const layerMods = [...active.values()].filter((m) => m.layer === layer);
-			if (!layerMods.length) continue;
-			const layerSet = new Set(layerMods.map((m) => m.name));
-			const hardDeps = new Map();
-			const allDeps = new Map();
-			const dependents = new Map();
-			for (const m of layerMods) {
-				hardDeps.set(m.name, new Set());
-				allDeps.set(m.name, new Set());
-				dependents.set(m.name, new Set());
-			}
-			for (const m of layerMods) for (const depId of m.dependsOn) if (layerSet.has(depId) && depId !== m.name) {
-				hardDeps.get(m.name).add(depId);
-				allDeps.get(m.name).add(depId);
-				dependents.get(depId).add(m.name);
-			}
-			for (const m of layerMods) for (const afterId of m.after) {
-				if (!layerSet.has(afterId) || afterId === m.name) continue;
-				if (hasHardDepPath(active, afterId, m.name)) continue;
-				allDeps.get(m.name).add(afterId);
-				dependents.get(afterId).add(m.name);
-			}
-			const remaining = new Set(layerSet);
-			while (remaining.size) {
-				const ready = [...remaining].filter((id) => allDeps.get(id).size === 0).sort((a, b) => a.localeCompare(b));
-				let pick;
-				if (ready.length) pick = ready[0];
-				else pick = [...remaining].filter((id) => hardDeps.get(id).size === 0).sort((a, b) => a.localeCompare(b))[0] || [...remaining].sort((a, b) => a.localeCompare(b))[0];
-				remaining.delete(pick);
-				ordered.push(active.get(pick));
-				for (const next of dependents.get(pick) || []) {
-					hardDeps.get(next)?.delete(pick);
-					allDeps.get(next)?.delete(pick);
-				}
-			}
-		}
-		return ordered;
-	}
-	function startModules(early) {
-		const ordered = resolveBootOrder(modules).filter((m) => m.early === early);
-		for (const m of ordered) {
-			logDebug("[CORE]", `Initializing module "${m.name}" (layer=${m.layer}, early=${early})`);
-			try {
-				Promise.resolve(m.init()).catch((e) => console.error("[AL-Additions]", m.name, e));
+			subs.add(entry);
+			if (this.services.has(name)) try {
+				const res = cb(this.services.get(name));
+				entry.cleanup = typeof res === "function" ? res : null;
 			} catch (e) {
-				console.error("[AL-Additions]", m.name, e);
+				console.error(`[AL-Additions] Service watcher for "${name}" failed:`, e);
+			}
+			return () => {
+				this.runCleanup(entry);
+				subs?.delete(entry);
+				if (subs && subs.size === 0) this.watchers.delete(name);
+			};
+		}
+		runCleanup(entry) {
+			if (!entry.cleanup) return;
+			const fn = entry.cleanup;
+			entry.cleanup = null;
+			try {
+				fn();
+			} catch (e) {
+				console.error("[AL-Additions] Service subscriber cleanup failed:", e);
 			}
 		}
+	};
+	var EventBusImpl = class {
+		listeners = new Map();
+		emit(event, payload) {
+			const set = this.listeners.get(event);
+			if (!set) return;
+			for (const cb of [...set]) try {
+				cb(payload);
+			} catch (e) {
+				console.error(`[AL-Additions] Event listener for "${event}" failed:`, e);
+			}
+		}
+		on(event, cb) {
+			let set = this.listeners.get(event);
+			if (!set) {
+				set = new Set();
+				this.listeners.set(event, set);
+			}
+			set.add(cb);
+			return () => {
+				set?.delete(cb);
+				if (set && set.size === 0) this.listeners.delete(event);
+			};
+		}
+	};
+	var ServiceRegistry = new ServiceRegistryImpl();
+	var EventBus = new EventBusImpl();
+	function resolvePageWindow() {
+		return typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+	}
+	function isAniListGraphqlUrl(rawUrl) {
+		if (!rawUrl) return false;
+		if (rawUrl === "/graphql") return true;
+		try {
+			const u = new URL(rawUrl, location.href);
+			return u.pathname === "/graphql" && (u.hostname === "anilist.co" || u.hostname === "graphql.anilist.co");
+		} catch {
+			return false;
+		}
+	}
+	var CoreHooks = (() => {
+		let clearingDepth = 0;
+		let cacheBridge = null;
+		let fetchOwnerActive = false;
+		const gqlListeners = new Set();
+		const rpcBlockers = new Set();
+		const prefetchTokens = new Set();
+		let fallbackInstalled = false;
+		let fallbackTargetWin = null;
+		let origFetch = null;
+		let wrappedFetch = null;
+		function syncMirror() {
+			try {
+				const win = resolvePageWindow();
+				const snapshot = {
+					sessionClearing: clearingDepth > 0,
+					fetchOwner: fetchOwnerActive,
+					hasCacheBridge: !!cacheBridge,
+					rpcBlockers: rpcBlockers.size,
+					prefetchSuppressed: prefetchTokens.size > 0,
+					gqlSubscribers: gqlListeners.size
+				};
+				const existing = win.__alaCoreMirror;
+				if (existing && typeof existing === "object" && !Object.isFrozen(existing)) try {
+					Object.assign(existing, snapshot);
+					return;
+				} catch {}
+				try {
+					win.__alaCoreMirror = snapshot;
+				} catch {}
+			} catch {}
+		}
+		function installFallbackFetch() {
+			if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
+			if (location.hostname !== "anilist.co") return;
+			const win = resolvePageWindow();
+			const currentFetch = typeof win.fetch === "function" ? win.fetch : typeof fetch === "function" ? fetch : null;
+			if (!currentFetch) return;
+			origFetch = currentFetch;
+			fallbackTargetWin = win;
+			wrappedFetch = async function(input, init) {
+				const baseFetch = origFetch;
+				if (fetchOwnerActive || gqlListeners.size === 0 || location.hostname !== "anilist.co") return baseFetch.apply(this, arguments);
+				const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input && typeof input.url === "string" ? input.url : "";
+				if ((init?.method || (input && typeof input.method === "string" ? input.method : "GET")).toUpperCase() !== "POST" || !isAniListGraphqlUrl(rawUrl)) return baseFetch.apply(this, arguments);
+				let parsedBody = null;
+				try {
+					if (typeof init?.body === "string") parsedBody = JSON.parse(init.body);
+					else if (typeof Request !== "undefined" && input instanceof Request) {
+						const text = await input.clone().text();
+						if (text) parsedBody = JSON.parse(text);
+					}
+				} catch {}
+				const query = typeof parsedBody?.query === "string" ? parsedBody.query : "";
+				const variables = parsedBody?.variables && typeof parsedBody.variables === "object" ? parsedBody.variables : {};
+				const operationName = typeof parsedBody?.operationName === "string" ? parsedBody.operationName : void 0;
+				if (query) emitGqlFetch({
+					phase: "request",
+					url: rawUrl,
+					query,
+					variables,
+					operationName
+				});
+				const res = await baseFetch.apply(this, arguments);
+				if (query && !fetchOwnerActive && gqlListeners.size > 0) {
+					let data = void 0;
+					try {
+						data = (await res.clone().json())?.data;
+					} catch {}
+					emitGqlFetch({
+						phase: "response",
+						url: rawUrl,
+						query,
+						variables,
+						operationName,
+						status: res.status,
+						ok: res.ok,
+						data
+					});
+				}
+				return res;
+			};
+			try {
+				win.fetch = wrappedFetch;
+				fallbackInstalled = true;
+			} catch {
+				origFetch = null;
+				wrappedFetch = null;
+				fallbackTargetWin = null;
+			}
+		}
+		function uninstallFallbackFetch() {
+			if (!fallbackInstalled) return;
+			try {
+				if (fallbackTargetWin && fallbackTargetWin.fetch === wrappedFetch && origFetch) fallbackTargetWin.fetch = origFetch;
+			} catch {}
+			fallbackInstalled = false;
+			origFetch = null;
+			wrappedFetch = null;
+			fallbackTargetWin = null;
+		}
+		function emitGqlFetch(event) {
+			for (const cb of [...gqlListeners]) try {
+				cb(event);
+			} catch (e) {
+				console.error("[AL-Additions] onGqlFetch listener failed:", e);
+			}
+		}
+		return {
+			setSessionClearing(active) {
+				clearingDepth = Math.max(0, clearingDepth + (active ? 1 : -1));
+				syncMirror();
+			},
+			isSessionClearing() {
+				return clearingDepth > 0;
+			},
+			clearAuth() {
+				try {
+					cacheBridge?.clearAuth();
+				} catch (e) {
+					console.error("[AL-Additions] cacheBridge.clearAuth failed:", e);
+				}
+			},
+			registerCacheBridge(bridge) {
+				cacheBridge = bridge;
+				syncMirror();
+				return () => {
+					if (cacheBridge === bridge) {
+						cacheBridge = null;
+						syncMirror();
+					}
+				};
+			},
+			getCacheBridge() {
+				return cacheBridge;
+			},
+			markFetchOwner(active) {
+				fetchOwnerActive = !!active;
+				if (fetchOwnerActive) uninstallFallbackFetch();
+				else if (gqlListeners.size > 0) installFallbackFetch();
+				syncMirror();
+			},
+			hasGqlFetchSubscribers() {
+				return gqlListeners.size > 0;
+			},
+			emitGqlFetch,
+			onGqlFetch(cb) {
+				gqlListeners.add(cb);
+				installFallbackFetch();
+				syncMirror();
+				return () => {
+					gqlListeners.delete(cb);
+					if (gqlListeners.size === 0) uninstallFallbackFetch();
+					syncMirror();
+				};
+			},
+			blockRpc(fn) {
+				rpcBlockers.add(fn);
+				syncMirror();
+				return () => {
+					rpcBlockers.delete(fn);
+					syncMirror();
+				};
+			},
+			isRpcBlocked(query, variables) {
+				for (const fn of [...rpcBlockers]) try {
+					if (fn(query, variables)) return true;
+				} catch (e) {
+					console.error("[AL-Additions] RPC blocker failed:", e);
+				}
+				return false;
+			},
+			setPrefetchPaused(paused) {
+				if (!paused) return () => {};
+				const token = Symbol("prefetch-pause");
+				prefetchTokens.add(token);
+				syncMirror();
+				return () => {
+					prefetchTokens.delete(token);
+					syncMirror();
+				};
+			},
+			isPrefetchSuppressed() {
+				return prefetchTokens.size > 0;
+			}
+		};
+	})();
+	var entries = new Map();
+	function resolveRegisterMenuCommand() {
+		const g = globalThis;
+		if (Object.prototype.hasOwnProperty.call(g, "GM_registerMenuCommand")) return typeof g.GM_registerMenuCommand === "function" ? g.GM_registerMenuCommand : null;
+		return typeof _GM_registerMenuCommand === "function" ? _GM_registerMenuCommand : null;
+	}
+	function registerMenuCommand(label, onClick) {
+		let entry = entries.get(label);
+		if (!entry) {
+			entry = {
+				handler: null,
+				registered: false
+			};
+			entries.set(label, entry);
+		}
+		entry.handler = onClick;
+		if (!entry.registered) {
+			const regFn = resolveRegisterMenuCommand();
+			if (regFn) {
+				entry.registered = true;
+				regFn(label, () => {
+					try {
+						entry?.handler?.();
+					} catch (e) {
+						console.error(`[AL-Additions] Menu command "${label}" failed:`, e);
+					}
+				});
+			}
+		}
+		return () => {
+			if (entry && entry.handler === onClick) entry.handler = null;
+		};
 	}
 	var Core = (() => {
 		const navCbs = [];
 		const bodyCbs = [];
+		const ownSelectors = new Map();
+		const BASE_OWN_UI = [
+			"#almal-panel",
+			"#almal-toast",
+			"#ala-toast",
+			"#ala-media-info",
+			"#daiya-anisongs",
+			"#ala-settings-backdrop"
+		];
 		let observer = null;
+		let readyCancel = null;
 		let lastHref = location.href;
 		let muted = false;
 		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		const OWN_UI = "#almal-panel,#almal-toast,#ala-media-info,#daiya-anisongs,#ala-settings-backdrop";
 		let queued = [];
 		let flushTimer = 0;
 		const fire = (list, arg) => {
@@ -627,14 +830,63 @@
 		window.addEventListener("hashchange", notifyNav);
 		setInterval(notifyNav, 400);
 		function ready(cb) {
-			if (document.body) safe(cb, "ready");
-			else document.addEventListener("DOMContentLoaded", () => safe(cb, "ready"), { once: true });
+			if (document.body) {
+				safe(cb, "ready");
+				return () => {};
+			}
+			let cancelled = false;
+			const onReady = () => {
+				if (cancelled) return;
+				cancelled = true;
+				safe(cb, "ready");
+			};
+			document.addEventListener("DOMContentLoaded", onReady, { once: true });
+			return () => {
+				if (cancelled) return;
+				cancelled = true;
+				document.removeEventListener("DOMContentLoaded", onReady);
+			};
+		}
+		function combinedOwnSelector() {
+			if (ownSelectors.size === 0) return BASE_OWN_UI.join(",");
+			return [...BASE_OWN_UI, ...ownSelectors.values()].join(",");
+		}
+		function isOwn(m) {
+			const t = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+			if (!t) return false;
+			try {
+				return !!t.closest(combinedOwnSelector());
+			} catch {
+				for (const sel of [...BASE_OWN_UI, ...ownSelectors.values()]) try {
+					if (t.closest(sel)) return true;
+				} catch {}
+				return false;
+			}
+		}
+		function disconnectObserver() {
+			if (flushTimer) {
+				clearTimeout(flushTimer);
+				flushTimer = 0;
+			}
+			queued = [];
+			if (observer) {
+				observer.disconnect();
+				observer = null;
+			}
+			if (readyCancel) {
+				readyCancel();
+				readyCancel = null;
+			}
 		}
 		function ensureObserver() {
-			if (observer || !document.body) return;
-			const isOwn = (m) => {
-				return !!(m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest(OWN_UI);
-			};
+			if (!bodyCbs.length || observer) return;
+			if (!document.body) {
+				if (!readyCancel) readyCancel = ready(() => {
+					readyCancel = null;
+					ensureObserver();
+				});
+				return;
+			}
 			observer = new MutationObserver((records) => {
 				for (const record of records) if (!isOwn(record)) queued.push(record);
 				if (queued.length && !flushTimer) flushTimer = setTimeout(() => {
@@ -651,28 +903,51 @@
 				characterData: true
 			});
 		}
-		ready(ensureObserver);
+		function registerOwnUi(selector) {
+			const cleanSel = String(selector || "").trim();
+			if (!cleanSel) return () => {};
+			const token = Symbol(cleanSel);
+			ownSelectors.set(token, cleanSel);
+			return () => {
+				ownSelectors.delete(token);
+			};
+		}
+		function onNavigate(cb) {
+			navCbs.push(cb);
+			return () => {
+				const i = navCbs.indexOf(cb);
+				if (i !== -1) navCbs.splice(i, 1);
+			};
+		}
 		function onBodyMutation(cb) {
 			bodyCbs.push(cb);
-			ready(ensureObserver);
+			ensureObserver();
 			return () => {
 				const i = bodyCbs.indexOf(cb);
 				if (i !== -1) bodyCbs.splice(i, 1);
+				if (bodyCbs.length === 0) disconnectObserver();
 			};
 		}
-		function waitForSelector(selector, timeoutMs = 8e3) {
+		function waitForSelector(selector, timeoutMs = 8e3, signal) {
+			if (signal?.aborted) return Promise.resolve(null);
 			return new Promise((resolve) => {
 				const existing = document.querySelector(selector);
 				if (existing) return resolve(existing);
 				let done = false;
 				let unsub = null;
+				let onAbort = null;
 				const finish = (v) => {
 					if (done) return;
 					done = true;
 					clearTimeout(timer);
+					if (onAbort && signal) signal.removeEventListener("abort", onAbort);
 					if (unsub) unsub();
 					resolve(v);
 				};
+				if (signal) {
+					onAbort = () => finish(null);
+					signal.addEventListener("abort", onAbort, { once: true });
+				}
 				const timer = setTimeout(() => finish(null), timeoutMs);
 				unsub = onBodyMutation(() => {
 					const el = document.querySelector(selector);
@@ -690,13 +965,808 @@
 			}
 		}
 		return {
-			onNavigate: (cb) => navCbs.push(cb),
+			onNavigate,
 			onBodyMutation,
 			waitForSelector,
 			ready,
-			silently
+			silently,
+			registerOwnUi
 		};
 	})();
+	var styleRefCounts = new Map();
+	function addStyle(id, css) {
+		let disposed = false;
+		let cancelReady = null;
+		styleRefCounts.set(id, (styleRefCounts.get(id) || 0) + 1);
+		const mount = () => {
+			if (disposed) return;
+			const parent = document.head || document.documentElement;
+			if (!parent) return;
+			if (!document.getElementById(id)) {
+				const s = document.createElement("style");
+				s.id = id;
+				s.textContent = css;
+				parent.appendChild(s);
+			}
+		};
+		if (document.head) mount();
+		else cancelReady = Core.ready(mount);
+		return () => {
+			if (disposed) return;
+			disposed = true;
+			cancelReady?.();
+			cancelReady = null;
+			const nextCount = (styleRefCounts.get(id) || 1) - 1;
+			if (nextCount <= 0) {
+				styleRefCounts.delete(id);
+				document.getElementById(id)?.remove();
+			} else styleRefCounts.set(id, nextCount);
+		};
+	}
+	var TOAST_ID = "ala-toast";
+	var hideTimer = 0;
+	var ownUiRegistered = false;
+	function showToast(msg, opts = {}) {
+		const { type = "info", durationMs = 6e3, closeTab = false } = opts;
+		Core.ready(() => {
+			if (!ownUiRegistered) {
+				ownUiRegistered = true;
+				Core.registerOwnUi(`#${TOAST_ID}`);
+			}
+			let t = document.getElementById(TOAST_ID);
+			if (!t) {
+				t = document.createElement("div");
+				t.id = TOAST_ID;
+				t.setAttribute("role", "status");
+				t.style.cssText = "position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:4px;color:#fff;font-size:1.2rem;z-index:999999;box-shadow:0 4px 16px rgba(0,0,0,.45);max-width:min(90vw,480px);text-align:center";
+				document.body.appendChild(t);
+			}
+			t.textContent = msg;
+			t.style.background = type === "error" ? "#b23b3b" : type === "success" ? "#2f8f5b" : "#2b6cb0";
+			t.style.display = "block";
+			clearTimeout(hideTimer);
+			if (durationMs > 0) hideTimer = setTimeout(() => {
+				if (t) t.style.display = "none";
+			}, durationMs);
+			if (closeTab) setTimeout(() => safe(() => window.close()), 1800);
+		});
+	}
+	var toastSuccess = (msg, opts = {}) => showToast(msg, {
+		...opts,
+		type: "success"
+	});
+	var toastError = (msg, opts = {}) => showToast(msg, {
+		...opts,
+		type: "error"
+	});
+	var modules = [];
+	var LAYER_ORDER = {
+		intercept: 0,
+		preload: 1,
+		service: 2,
+		feature: 3,
+		shell: 4
+	};
+	var ID_RE = /^[a-z][A-Za-z0-9]*$/;
+	var configuredServices = null;
+	function configureCoreServices(services) {
+		configuredServices = services;
+	}
+	function getCoreApi() {
+		if (!configuredServices) throw new Error("[AL-Additions] Core services not configured before module access.");
+		return configuredServices.api;
+	}
+	function getCoreSession() {
+		if (!configuredServices) throw new Error("[AL-Additions] Core services not configured before module access.");
+		return configuredServices.session;
+	}
+	var records = [];
+	var recordsById = new Map();
+	var invalidIds = new Map();
+	var liveStatuses = new Map();
+	var statusListeners = new Set();
+	function currentHost() {
+		return location.hostname;
+	}
+	function resolveHostMatches(hosts, host) {
+		return hosts.includes("*") || hosts.includes(host);
+	}
+	function emitStatusChange(id, status) {
+		const prev = liveStatuses.get(id);
+		const changed = !prev || prev.active !== status.active || prev.reason !== status.reason || prev.error !== status.error || JSON.stringify(prev.missingDeps || []) !== JSON.stringify(status.missingDeps || []) || JSON.stringify(prev.disabledDeps || []) !== JSON.stringify(status.disabledDeps || []);
+		liveStatuses.set(id, status);
+		if (changed) for (const cb of [...statusListeners]) try {
+			cb(id, status);
+		} catch (e) {
+			console.error("[AL-Additions] Module status listener failed:", e);
+		}
+	}
+	function resolveAllStates(stagedEnabled) {
+		const host = currentHost();
+		const statuses = {};
+		const candidates = new Map();
+		for (const [badId, status] of invalidIds) statuses[badId] = status;
+		for (const rec of records) {
+			if (rec.invalidId) {
+				statuses[rec.id] = {
+					active: false,
+					reason: "invalid-id"
+				};
+				continue;
+			}
+			if (rec.idCollision) {
+				statuses[rec.id] = {
+					active: false,
+					reason: "id-collision"
+				};
+				continue;
+			}
+			if (!resolveHostMatches(rec.hosts, host)) {
+				statuses[rec.id] = {
+					active: false,
+					reason: "host-mismatch"
+				};
+				continue;
+			}
+			if (!(stagedEnabled && rec.id in stagedEnabled ? !!stagedEnabled[rec.id] : rec.setting ? !!Settings.get(rec.setting) : true)) {
+				statuses[rec.id] = {
+					active: false,
+					reason: "disabled"
+				};
+				continue;
+			}
+			if (rec.standalonePaused) {
+				statuses[rec.id] = {
+					active: false,
+					reason: "standalone-paused"
+				};
+				continue;
+			}
+			if (!stagedEnabled && rec.runtimeError) {
+				statuses[rec.id] = {
+					active: false,
+					reason: "error",
+					error: rec.runtimeError
+				};
+				continue;
+			}
+			candidates.set(rec.id, rec);
+		}
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const [id, rec] of [...candidates]) {
+				const missingDeps = [];
+				const disabledDeps = [];
+				let layerConflict = false;
+				let cycleDep = false;
+				for (const depId of rec.dependsOn) {
+					const depRec = recordsById.get(depId);
+					if (!depRec) {
+						missingDeps.push(depId);
+						continue;
+					}
+					if (LAYER_ORDER[depRec.layer] > LAYER_ORDER[rec.layer]) {
+						layerConflict = true;
+						continue;
+					}
+					if (!candidates.has(depId)) {
+						const depStatus = statuses[depId];
+						if (depStatus?.reason === "disabled" || depStatus?.reason === "dep-off") disabledDeps.push(depId);
+						else if (depStatus?.reason === "cycle") cycleDep = true;
+						else missingDeps.push(depId);
+					}
+				}
+				let reason = null;
+				if (layerConflict) reason = "layer-conflict";
+				else if (missingDeps.length) reason = "dep-unavailable";
+				else if (disabledDeps.length) reason = "dep-off";
+				else if (cycleDep) reason = "cycle";
+				if (reason) {
+					statuses[id] = {
+						active: false,
+						reason,
+						...missingDeps.length ? { missingDeps } : {},
+						...disabledDeps.length ? { disabledDeps } : {}
+					};
+					candidates.delete(id);
+					changed = true;
+				}
+			}
+		}
+		const hardIn = new Map();
+		const hardOut = new Map();
+		for (const id of candidates.keys()) {
+			hardIn.set(id, 0);
+			hardOut.set(id, []);
+		}
+		for (const [id, rec] of candidates) for (const depId of new Set(rec.dependsOn)) if (candidates.has(depId)) {
+			hardIn.set(id, (hardIn.get(id) || 0) + 1);
+			hardOut.get(depId).push(id);
+		}
+		const kahnQueue = [];
+		for (const [id, deg] of hardIn) if (deg === 0) kahnQueue.push(id);
+		const acyclic = new Set();
+		while (kahnQueue.length) {
+			const id = kahnQueue.shift();
+			acyclic.add(id);
+			for (const next of hardOut.get(id) || []) {
+				const deg = (hardIn.get(next) || 0) - 1;
+				hardIn.set(next, deg);
+				if (deg === 0) kahnQueue.push(next);
+			}
+		}
+		for (const id of [...candidates.keys()]) if (!acyclic.has(id)) {
+			statuses[id] = {
+				active: false,
+				reason: "cycle"
+			};
+			candidates.delete(id);
+		}
+		const ordered = [];
+		const layers = [
+			"intercept",
+			"preload",
+			"service",
+			"feature",
+			"shell"
+		];
+		const hasHardPath = (startId, targetId, seen = new Set()) => {
+			if (startId === targetId) return true;
+			if (seen.has(startId)) return false;
+			seen.add(startId);
+			const mod = candidates.get(startId);
+			if (!mod) return false;
+			return mod.dependsOn.some((dep) => hasHardPath(dep, targetId, seen));
+		};
+		for (const layer of layers) {
+			const layerMods = [...candidates.values()].filter((m) => m.layer === layer);
+			if (!layerMods.length) continue;
+			const layerSet = new Set(layerMods.map((m) => m.id));
+			const hardDeps = new Map();
+			const allDeps = new Map();
+			const dependents = new Map();
+			for (const m of layerMods) {
+				hardDeps.set(m.id, new Set());
+				allDeps.set(m.id, new Set());
+				dependents.set(m.id, new Set());
+			}
+			for (const m of layerMods) for (const depId of m.dependsOn) if (layerSet.has(depId) && depId !== m.id) {
+				hardDeps.get(m.id).add(depId);
+				allDeps.get(m.id).add(depId);
+				dependents.get(depId).add(m.id);
+			}
+			for (const m of layerMods) for (const afterId of m.after) {
+				if (!layerSet.has(afterId) || afterId === m.id) continue;
+				if (hasHardPath(afterId, m.id)) continue;
+				allDeps.get(m.id).add(afterId);
+				dependents.get(afterId).add(m.id);
+			}
+			const remaining = new Set(layerSet);
+			while (remaining.size) {
+				const ready = [...remaining].filter((id) => allDeps.get(id).size === 0).sort((a, b) => a.localeCompare(b));
+				let pick;
+				if (ready.length) pick = ready[0];
+				else pick = [...remaining].filter((id) => hardDeps.get(id).size === 0).sort((a, b) => a.localeCompare(b))[0] || [...remaining].sort((a, b) => a.localeCompare(b))[0];
+				remaining.delete(pick);
+				const rec = candidates.get(pick);
+				ordered.push(rec);
+				statuses[pick] = { active: true };
+				for (const next of dependents.get(pick) || []) {
+					hardDeps.get(next)?.delete(pick);
+					allDeps.get(next)?.delete(pick);
+				}
+			}
+		}
+		return {
+			statuses,
+			ordered
+		};
+	}
+	function syncAllLiveStatuses(statuses) {
+		for (const [id, st] of Object.entries(statuses)) emitStatusChange(id, st);
+	}
+	function runCleanupsReverse(id, cleanups) {
+		for (let i = cleanups.length - 1; i >= 0; i--) try {
+			cleanups[i]();
+		} catch (e) {
+			console.error(`[AL-Additions] Module "${id}" failed during cleanup:`, e);
+		}
+		cleanups.length = 0;
+	}
+	function createContextForRecord(rec, cleanups, ac) {
+		let disposed = false;
+		const activeRequests = new Set();
+		const track = (fn) => {
+			if (disposed) {
+				try {
+					fn();
+				} catch {}
+				return fn;
+			}
+			cleanups.push(fn);
+			return fn;
+		};
+		track(() => {
+			disposed = true;
+			ac.abort();
+			for (const req of [...activeRequests]) {
+				try {
+					req.abort?.();
+				} catch {}
+				try {
+					req.reject?.(new Error("Request aborted"));
+				} catch {}
+			}
+			activeRequests.clear();
+		});
+		const storagePrefix = `ala_mod_${rec.id}_`;
+		const addMount = (spec, pushCleanup) => {
+			let mountedEl = null;
+			let mountDisposed = false;
+			let ownDisposer = null;
+			const tryMount = () => {
+				if (mountDisposed || disposed) return;
+				if (spec.match && !spec.match()) {
+					if (mountedEl) {
+						mountedEl.remove();
+						mountedEl = null;
+					}
+					return;
+				}
+				if (mountedEl?.isConnected) return;
+				if (spec.id) {
+					const existing = document.getElementById(spec.id);
+					if (existing?.isConnected) {
+						mountedEl = existing;
+						return;
+					}
+				}
+				const anchor = typeof spec.anchor === "string" ? document.querySelector(spec.anchor) : spec.anchor();
+				if (!anchor) return;
+				const el = spec.create();
+				if (spec.id && !el.id) el.id = spec.id;
+				anchor.insertAdjacentElement(spec.position ?? "afterend", el);
+				mountedEl = el;
+				if (spec.ownUi && !ownDisposer) {
+					const sel = el.id ? `#${el.id}` : spec.id ? `#${spec.id}` : "";
+					if (sel) ownDisposer = Core.registerOwnUi(sel);
+				}
+			};
+			const unsubReady = Core.ready(tryMount);
+			const unsubNav = Core.onNavigate(tryMount);
+			const unsubBody = Core.onBodyMutation(tryMount);
+			const disposeMount = () => {
+				if (mountDisposed) return;
+				mountDisposed = true;
+				unsubReady();
+				unsubNav();
+				unsubBody();
+				ownDisposer?.();
+				ownDisposer = null;
+				mountedEl?.remove();
+				mountedEl = null;
+			};
+			pushCleanup(disposeMount);
+			return disposeMount;
+		};
+		const makeScopedHelpers = (push, signal) => ({
+			listen: (target, type, listener, options) => {
+				if (signal.aborted) return () => {};
+				target.addEventListener(type, listener, options);
+				const cleanup = () => target.removeEventListener(type, listener, options);
+				push(cleanup);
+				return cleanup;
+			},
+			interval: (fn, ms) => {
+				if (signal.aborted) return () => {};
+				const id = setInterval(fn, ms);
+				const cleanup = () => clearInterval(id);
+				push(cleanup);
+				return cleanup;
+			},
+			timeout: (fn, ms) => {
+				if (signal.aborted) return () => {};
+				const id = setTimeout(fn, ms);
+				const cleanup = () => clearTimeout(id);
+				push(cleanup);
+				return cleanup;
+			},
+			mount: (spec) => addMount(spec, push),
+			waitForSelector: (selector, timeoutMs = 8e3) => Core.waitForSelector(selector, timeoutMs, signal)
+		});
+		const rootScoped = makeScopedHelpers(track, ac.signal);
+		const onRoute = (matchOrHandler, maybeHandler) => {
+			const matcher = typeof maybeHandler === "function" ? matchOrHandler : null;
+			const handler = maybeHandler ?? matchOrHandler;
+			let routeCleanups = [];
+			let routeAc = null;
+			let routeSubDisposed = false;
+			const teardownRoute = () => {
+				routeAc?.abort();
+				routeAc = null;
+				runCleanupsReverse(rec.id, routeCleanups);
+			};
+			const evaluate = () => {
+				if (routeSubDisposed || disposed) return;
+				teardownRoute();
+				let url;
+				try {
+					url = new URL(location.href);
+				} catch {
+					url = new URL("https://anilist.co/");
+				}
+				let matchArr = null;
+				if (matcher instanceof RegExp) {
+					matchArr = url.pathname.match(matcher);
+					if (!matchArr) return;
+				} else if (typeof matcher === "function") {
+					if (!matcher(url)) return;
+				}
+				const localAc = new AbortController();
+				routeAc = localAc;
+				const localCleanups = [];
+				routeCleanups = localCleanups;
+				const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal);
+				const rc = {
+					url,
+					pathname: url.pathname,
+					match: matchArr,
+					signal: localAc.signal,
+					onCleanup: (fn) => {
+						if (localAc.signal.aborted) try {
+							fn();
+						} catch {}
+						else localCleanups.push(fn);
+					},
+					...localScoped
+				};
+				try {
+					const res = handler(rc);
+					if (typeof res === "function") rc.onCleanup(res);
+					else if (res && typeof res.then === "function") Promise.resolve(res).then((maybeCleanup) => {
+						if (typeof maybeCleanup === "function") rc.onCleanup(maybeCleanup);
+					}, (err) => {
+						if (!localAc.signal.aborted) console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+					});
+				} catch (err) {
+					console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+				}
+			};
+			evaluate();
+			const unsubNav = Core.onNavigate(evaluate);
+			const disposeRouteWatcher = () => {
+				if (routeSubDisposed) return;
+				routeSubDisposed = true;
+				unsubNav();
+				teardownRoute();
+			};
+			return track(disposeRouteWatcher);
+		};
+		const httpRequest = (url, opts = {}) => {
+			if (disposed || ac.signal.aborted) return Promise.reject(new Error("Request aborted"));
+			return new Promise((resolve, reject) => {
+				const entry = { reject };
+				activeRequests.add(entry);
+				const settle = (fn) => {
+					if (!activeRequests.has(entry)) return;
+					activeRequests.delete(entry);
+					fn();
+				};
+				const g = globalThis;
+				const handle = (Object.prototype.hasOwnProperty.call(g, "GM_xmlhttpRequest") && typeof g.GM_xmlhttpRequest === "function" ? g.GM_xmlhttpRequest : _GM_xmlhttpRequest)({
+					method: "GET",
+					timeout: 15e3,
+					...opts,
+					url,
+					onload: (res) => settle(() => resolve(res)),
+					onerror: () => settle(() => reject(new Error("Network error"))),
+					ontimeout: () => settle(() => reject(new Error("Timeout"))),
+					onabort: () => settle(() => reject(new Error("Request aborted")))
+				});
+				entry.abort = () => {
+					try {
+						handle?.abort?.();
+					} catch {}
+				};
+			});
+		};
+		const trackedHooks = {
+			setSessionClearing: (active) => CoreHooks.setSessionClearing(active),
+			isSessionClearing: () => CoreHooks.isSessionClearing(),
+			clearAuth: () => CoreHooks.clearAuth(),
+			registerCacheBridge: (bridge) => track(CoreHooks.registerCacheBridge(bridge)),
+			getCacheBridge: () => CoreHooks.getCacheBridge(),
+			markFetchOwner: (active) => CoreHooks.markFetchOwner(active),
+			hasGqlFetchSubscribers: () => CoreHooks.hasGqlFetchSubscribers(),
+			emitGqlFetch: (event) => CoreHooks.emitGqlFetch(event),
+			onGqlFetch: (cb) => track(CoreHooks.onGqlFetch(cb)),
+			blockRpc: (fn) => track(CoreHooks.blockRpc(fn)),
+			isRpcBlocked: (q, v) => CoreHooks.isRpcBlocked(q, v),
+			setPrefetchPaused: (paused) => track(CoreHooks.setPrefetchPaused(paused)),
+			isPrefetchSuppressed: () => CoreHooks.isPrefetchSuppressed()
+		};
+		const debugChannel = rec.debugChannel || rec.id;
+		return {
+			id: rec.id,
+			get: (key) => Settings.get(key),
+			set: (key, val) => Settings.set(key, val),
+			storage: {
+				get: (k, d) => store$1.get(`${storagePrefix}${k}`, d),
+				set: (k, v) => store$1.set(`${storagePrefix}${k}`, v),
+				del: (k) => store$1.del(`${storagePrefix}${k}`),
+				watch: (k, cb) => track(store$1.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => cb(k, oldV, newV, remote))),
+				clear: () => {
+					for (const k of store$1.list()) if (k.startsWith(storagePrefix)) store$1.del(k);
+				}
+			},
+			persistent: (key, prune) => persistent(key, prune),
+			ready: (cb) => track(Core.ready(cb)),
+			onNav: (cb) => track(Core.onNavigate(cb)),
+			onBodyMutation: (cb) => track(Core.onBodyMutation(cb)),
+			onRoute,
+			mount: rootScoped.mount,
+			addStyle: (id, css) => track(addStyle(id, css)),
+			listen: rootScoped.listen,
+			interval: rootScoped.interval,
+			timeout: rootScoped.timeout,
+			trackEl: (el) => {
+				track(() => el.remove());
+				return el;
+			},
+			waitForSelector: rootScoped.waitForSelector,
+			silently: (fn) => Core.silently(fn),
+			ownUi: (selector) => track(Core.registerOwnUi(selector)),
+			onCleanup: (fn) => {
+				track(fn);
+			},
+			http: {
+				request: httpRequest,
+				text: async (url, opts) => {
+					const r = await httpRequest(url, opts);
+					if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+					return r.responseText || "";
+				},
+				json: async (url, opts) => {
+					const r = await httpRequest(url, opts);
+					if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+					return JSON.parse(r.responseText || "");
+				}
+			},
+			get api() {
+				return getCoreApi();
+			},
+			get session() {
+				return getCoreSession();
+			},
+			accounts: {
+				get: (id) => getAccountProvider(id),
+				isConnected: (id) => !!getAccountProvider(id)?.isConnected(),
+				connect: (id) => getAccountProvider(id)?.connect(),
+				disconnect: (id) => getAccountProvider(id)?.disconnect(),
+				clearSecrets: (providerId) => clearAccountSecrets(providerId)
+			},
+			toast: {
+				show: showToast,
+				success: toastSuccess,
+				error: toastError
+			},
+			menuCommand: (label, onClick) => track(registerMenuCommand(label, onClick)),
+			services: {
+				provide: (localName, impl) => track(ServiceRegistry.provide(`${rec.id}:${localName}`, impl)),
+				get: (fullName) => ServiceRegistry.get(fullName),
+				onAvailable: (fullName, cb) => track(ServiceRegistry.onAvailable(fullName, cb))
+			},
+			events: {
+				emit: (event, payload) => EventBus.emit(event, payload),
+				on: (event, cb) => track(EventBus.on(event, cb))
+			},
+			hooks: trackedHooks,
+			debug: {
+				enabled: () => isDebug(debugChannel),
+				log: (...args) => logDebug(`[${debugChannel.toUpperCase()}]`, ...args)
+			},
+			setStandalonePaused: (paused) => {
+				rec.standalonePaused = !!paused;
+				syncAllLiveStatuses(resolveAllStates().statuses);
+			}
+		};
+	}
+	function bootRecord(rec) {
+		if (rec.booted) return Promise.resolve();
+		const seq = ++rec.bootSeq;
+		rec.runtimeError = void 0;
+		const ac = new AbortController();
+		const cleanups = [];
+		rec.cleanups = cleanups;
+		rec.abortController = ac;
+		rec.booted = true;
+		const ctx = createContextForRecord(rec, cleanups, ac);
+		logDebug("[CORE]", `Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
+		const handleFailure = (err) => {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error(`[AL-Additions] Module "${rec.id}" failed during setup:`, err);
+			runCleanupsReverse(rec.id, cleanups);
+			if (rec.bootSeq === seq) {
+				rec.booted = false;
+				rec.abortController = null;
+				rec.runtimeError = msg;
+				syncAllLiveStatuses(resolveAllStates().statuses);
+			}
+		};
+		try {
+			const res = rec.setup(ctx);
+			if (res && typeof res.then === "function") return Promise.resolve(res).then(() => {
+				if (rec.bootSeq !== seq) {
+					runCleanupsReverse(rec.id, cleanups);
+					return;
+				}
+				if (rec.standalonePaused) {
+					rec.booted = false;
+					runCleanupsReverse(rec.id, cleanups);
+				}
+			}, (err) => {
+				handleFailure(err);
+			});
+			if (rec.standalonePaused) {
+				rec.booted = false;
+				runCleanupsReverse(rec.id, cleanups);
+			}
+			return Promise.resolve();
+		} catch (err) {
+			handleFailure(err);
+			return Promise.resolve();
+		}
+	}
+	function registerRecord(rec) {
+		records.push(rec);
+		recordsById.set(rec.id, rec);
+		modules.push({
+			name: rec.id,
+			setting: rec.setting,
+			init: rec.legacyInit ?? (() => bootRecord(rec)),
+			hosts: rec.hosts,
+			early: rec.early,
+			layer: rec.layer,
+			dependsOn: rec.dependsOn,
+			after: rec.after
+		});
+	}
+	function registerShellModule(name, init, hosts = ["anilist.co"]) {
+		if (!ID_RE.test(name)) {
+			console.error(`[AL-Additions] Invalid shell module ID "${name}". Must match ${ID_RE}.`);
+			invalidIds.set(name, {
+				active: false,
+				reason: "invalid-id"
+			});
+			emitStatusChange(name, {
+				active: false,
+				reason: "invalid-id"
+			});
+			return;
+		}
+		const existing = recordsById.get(name);
+		if (existing) {
+			console.error(`[AL-Additions] Duplicate module ID "${name}" ignored.`);
+			existing.idCollision = true;
+			emitStatusChange(name, {
+				active: false,
+				reason: "id-collision"
+			});
+			return;
+		}
+		registerRecord({
+			id: name,
+			setting: null,
+			hosts: hosts.slice(),
+			layer: "shell",
+			early: false,
+			requiresReload: true,
+			dependsOn: [],
+			after: [],
+			setup: () => init(),
+			legacyInit: init,
+			invalidId: false,
+			idCollision: false,
+			standalonePaused: false,
+			booted: false,
+			bootSeq: 0,
+			cleanups: [],
+			abortController: null
+		});
+	}
+	var defineFeature = (meta, init) => {
+		if (!ID_RE.test(meta.id)) {
+			console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+			invalidIds.set(meta.id, {
+				active: false,
+				reason: "invalid-id"
+			});
+			emitStatusChange(meta.id, {
+				active: false,
+				reason: "invalid-id"
+			});
+			return;
+		}
+		const existing = recordsById.get(meta.id);
+		if (existing) {
+			console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
+			existing.idCollision = true;
+			emitStatusChange(meta.id, {
+				active: false,
+				reason: "id-collision"
+			});
+			return;
+		}
+		const layer = meta.layer ?? (meta.early ? "intercept" : "feature");
+		const hosts = meta.hosts?.length ? meta.hosts.slice() : ["anilist.co"];
+		const dependsOn = (meta.dependsOn || []).slice();
+		const after = (meta.after || []).slice();
+		Settings.register({
+			...meta,
+			hosts,
+			layer,
+			dependsOn,
+			after
+		});
+		registerRecord({
+			id: meta.id,
+			setting: meta.alwaysRun ? null : meta.key,
+			hosts,
+			layer,
+			early: layer === "intercept" || layer === "preload",
+			requiresReload: meta.requiresReload ?? true,
+			dependsOn,
+			after,
+			setup: () => init(),
+			legacyInit: init,
+			invalidId: false,
+			idCollision: false,
+			standalonePaused: false,
+			booted: false,
+			bootSeq: 0,
+			cleanups: [],
+			abortController: null
+		});
+	};
+	function runMigrations() {
+		Settings.migrate();
+		for (const layer of [
+			"intercept",
+			"preload",
+			"service",
+			"feature",
+			"shell"
+		]) {
+			const layerRecs = records.filter((r) => !r.invalidId && !r.idCollision && r.layer === layer).sort((a, b) => a.id.localeCompare(b.id));
+			for (const rec of layerRecs) {
+				if (!rec.migrate) continue;
+				try {
+					rec.migrate();
+				} catch (e) {
+					console.error(`[AL-Additions] Module "${rec.id}" failed during migrate:`, e);
+				}
+			}
+		}
+	}
+	function startModules(early) {
+		const graph = resolveAllStates();
+		syncAllLiveStatuses(graph.statuses);
+		for (const rec of graph.ordered) {
+			if (rec.early !== early) continue;
+			if (rec.dependsOn.some((depId) => {
+				const dep = recordsById.get(depId);
+				return !dep || !!dep.runtimeError || dep.standalonePaused || !dep.booted;
+			})) {
+				emitStatusChange(rec.id, {
+					active: false,
+					reason: "dep-unavailable"
+				});
+				continue;
+			}
+			bootRecord(rec);
+		}
+	}
 	var RateLimiter = class {
 		rate;
 		min;
@@ -1392,46 +2462,6 @@
 			save
 		};
 	})();
-	var ICONS = {
-		download: "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><polyline points=\"7 10 12 15 17 10\"/><line x1=\"12\" y1=\"15\" x2=\"12\" y2=\"3\"/>",
-		check: "<polyline points=\"20 6 9 17 4 12\"/>",
-		resync: "<polyline points=\"1 4 1 10 7 10\"/><path d=\"M3.51 15a9 9 0 1 0 2.13-9.36L1 10\"/>",
-		stop: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"currentColor\"/>",
-		list: "<line x1=\"8\" y1=\"6\" x2=\"21\" y2=\"6\"/><line x1=\"8\" y1=\"12\" x2=\"21\" y2=\"12\"/><line x1=\"8\" y1=\"18\" x2=\"21\" y2=\"18\"/><line x1=\"3\" y1=\"6\" x2=\"3.01\" y2=\"6\"/><line x1=\"3\" y1=\"12\" x2=\"3.01\" y2=\"12\"/><line x1=\"3\" y1=\"18\" x2=\"3.01\" y2=\"18\"/>",
-		sliders: "<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/><line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/><line x1=\"1\" y1=\"14\" x2=\"7\" y2=\"14\"/><line x1=\"9\" y1=\"8\" x2=\"15\" y2=\"8\"/><line x1=\"17\" y1=\"16\" x2=\"23\" y2=\"16\"/>",
-		close: "<line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/>",
-		edit: "<path d=\"M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z\"/>",
-		external: "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/><polyline points=\"15 3 21 3 21 9\"/><line x1=\"10\" y1=\"14\" x2=\"21\" y2=\"3\"/>",
-		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
-	};
-	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
-	function addStyle(id, css) {
-		Core.ready(() => {
-			if (document.getElementById(id)) return;
-			const s = document.createElement("style");
-			s.id = id;
-			s.textContent = css;
-			(document.head || document.documentElement).appendChild(s);
-		});
-	}
-	var mediaRoute = () => {
-		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
-		return m ? {
-			kind: m[1],
-			type: m[1].toUpperCase(),
-			id: Number(m[2])
-		} : null;
-	};
-	function findExactText(text) {
-		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-		for (let t; t = walker.nextNode();) {
-			if (t.nodeValue?.trim() !== text || !t.parentElement) continue;
-			let el = t.parentElement;
-			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent?.trim() === text) el = el.parentElement;
-			return el;
-		}
-		return null;
-	}
 	defineFeature({
 		id: "behindDots",
 		key: "behindDotsEnabled",
@@ -1711,6 +2741,37 @@
 			}
 		});
 	});
+	var ICONS = {
+		download: "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><polyline points=\"7 10 12 15 17 10\"/><line x1=\"12\" y1=\"15\" x2=\"12\" y2=\"3\"/>",
+		check: "<polyline points=\"20 6 9 17 4 12\"/>",
+		resync: "<polyline points=\"1 4 1 10 7 10\"/><path d=\"M3.51 15a9 9 0 1 0 2.13-9.36L1 10\"/>",
+		stop: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"currentColor\"/>",
+		list: "<line x1=\"8\" y1=\"6\" x2=\"21\" y2=\"6\"/><line x1=\"8\" y1=\"12\" x2=\"21\" y2=\"12\"/><line x1=\"8\" y1=\"18\" x2=\"21\" y2=\"18\"/><line x1=\"3\" y1=\"6\" x2=\"3.01\" y2=\"6\"/><line x1=\"3\" y1=\"12\" x2=\"3.01\" y2=\"12\"/><line x1=\"3\" y1=\"18\" x2=\"3.01\" y2=\"18\"/>",
+		sliders: "<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/><line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/><line x1=\"1\" y1=\"14\" x2=\"7\" y2=\"14\"/><line x1=\"9\" y1=\"8\" x2=\"15\" y2=\"8\"/><line x1=\"17\" y1=\"16\" x2=\"23\" y2=\"16\"/>",
+		close: "<line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/>",
+		edit: "<path d=\"M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z\"/>",
+		external: "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/><polyline points=\"15 3 21 3 21 9\"/><line x1=\"10\" y1=\"14\" x2=\"21\" y2=\"3\"/>",
+		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
+	};
+	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
+	var mediaRoute = () => {
+		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
+		return m ? {
+			kind: m[1],
+			type: m[1].toUpperCase(),
+			id: Number(m[2])
+		} : null;
+	};
+	function findExactText(text) {
+		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+		for (let t; t = walker.nextNode();) {
+			if (t.nodeValue?.trim() !== text || !t.parentElement) continue;
+			let el = t.parentElement;
+			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent?.trim() === text) el = el.parentElement;
+			return el;
+		}
+		return null;
+	}
 	var DEFAULT_ANISONGS_CONFIG = {
 		active: [],
 		presets: [
@@ -11559,14 +12620,32 @@
 			if (onSettingsPage() && !(document.getElementById("ala-settings-nav-section") && document.getElementById("ala-settings-mobile-launcher"))) attempt();
 		});
 		Core.onNavigate(() => {
-			if (onSettingsPage()) return attempt();
+			if (onSettingsPage()) {
+				attempt();
+				return;
+			}
 			closePanel();
 			document.getElementById("ala-settings-mobile-launcher")?.remove();
 		});
 	}
+	configureCoreServices({
+		api: {
+			...AniList,
+			media: MediaData,
+			session: {
+				hasAuth: AniList.hasAuth,
+				clear: AniList.clearViewer
+			}
+		},
+		session: {
+			hasAuth: AniList.hasAuth,
+			clear: AniList.clearViewer
+		}
+	});
 	registerShellModule("settings", initSettingsPage);
-	Settings.migrate();
+	runMigrations();
 	safe(captureCredentials, "credential capture");
+	runAccountAuthCallbacks();
 	startModules(true);
 	Core.ready(() => startModules(false));
 })();

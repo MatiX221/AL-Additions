@@ -1,6 +1,7 @@
 import { Settings, TYPES, ROWS, features } from './settings';
 import { creditsHtml } from './credits';
-import { addStyle, findExactText, icon } from '../utils/dom';
+import { addStyle } from '../core/styles';
+import { findExactText, icon } from '../utils/dom';
 import { debounce, store, esc } from '../utils/helpers';
 import { malConnect, clearMalAuth } from '../api/mal';
 import { Core } from '../core/observer';
@@ -875,7 +876,10 @@ export function initSettingsPage(): void {
     }
   });
   Core.onNavigate(() => {
-    if (onSettingsPage()) return attempt();
+    if (onSettingsPage()) {
+      attempt();
+      return;
+    }
     closePanel();
     document.getElementById('ala-settings-mobile-launcher')?.remove();
   });

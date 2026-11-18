@@ -1,6 +1,6 @@
 import { defineFeature } from '../../core/registry';
 import { Core } from '../../core/observer';
-import { addStyle } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
 import { debounce, logDebug, store, esc } from '../../utils/helpers';
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import { AniList, type MediaListEntryItem } from '../../api/anilist';

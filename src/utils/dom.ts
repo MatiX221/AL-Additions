@@ -1,4 +1,3 @@
-import { Core } from '../core/observer';
 import type { MediaRoute } from '../types';
 
 export const ICONS = {
@@ -16,16 +15,6 @@ export const ICONS = {
 
 export const icon = (name: keyof typeof ICONS, size = 18): string =>
   `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
-
-export function addStyle(id: string, css: string): void {
-  Core.ready(() => {
-    if (document.getElementById(id)) return;
-    const s = document.createElement('style');
-    s.id = id;
-    s.textContent = css;
-    (document.head || document.documentElement).appendChild(s);
-  });
-}
 
 export const mediaRoute = (): MediaRoute | null => {
   const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);

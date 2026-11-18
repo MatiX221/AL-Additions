@@ -1,5 +1,5 @@
 import { Settings } from '../../settings/settings';
-import { addStyle } from '../../utils/dom';
+import { addStyle } from '../../core/styles';
 
 export interface SongProviderPreset {
   id: string;
