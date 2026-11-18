@@ -1,8 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import '../src/modules/fastLoad';
 import '../src/modules/tagFilter';
+import '../src/modules/shortUrls';
+import '../src/modules/banner';
 import '../src/modules/nyaa';
-import '../src/modules/sync';
+import '../src/modules/keyframe';
+import '../src/modules/mediaInfo';
+import '../src/modules/airingDots';
+import '../src/modules/anisongs/anisongs';
 import '../src/modules/tierLabels';
+import '../src/modules/compareView';
+import '../src/modules/sync';
+import '../src/modules/devMode';
+import legacyKeys from './fixtures/legacy-keys.json';
 import { Settings, TYPES, ROWS, PREFIX } from '../src/settings/settings';
 import { store } from '../src/utils/helpers';
 import type { SettingRow } from '../src/types';
@@ -240,5 +250,18 @@ describe('Settings: Legacy Migration (Settings.migrate)', () => {
     store.set('al_token', 'legacy_oauth_token_val');
     Settings.migrate();
     expect(store.get('al_token', null)).toBeNull();
+  });
+});
+
+describe('Settings: Legacy Key Parity', () => {
+  it('preserves every legacy key, type, default, and fallback list in ROWS', () => {
+    expect(legacyKeys).toHaveLength(33);
+    for (const expected of legacyKeys) {
+      const actual = ROWS[expected.key];
+      expect(actual, `Missing setting row for key "${expected.key}"`).toBeDefined();
+      expect(actual.type).toBe(expected.type);
+      expect(actual.def).toEqual(expected.def);
+      expect(actual.legacy).toEqual(expected.legacy);
+    }
   });
 });

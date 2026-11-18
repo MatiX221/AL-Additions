@@ -355,29 +355,6 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
       const rpcCache = (window as any).__ALFL_RPC_CACHE__ as Map<string, any>;
       expect(rpcCache).toBeDefined();
 
-      const cachedCollection = {
-        data: {
-          MediaListCollection: {
-            user: { id: 7053169, name: 'TargetUser' },
-            lists: [
-              {
-                name: 'Completed',
-                isCustomList: false,
-                entries: [
-                  {
-                    id: 111,
-                    mediaId: 1,
-                    status: 'COMPLETED',
-                    score: 9,
-                    media: { id: 1, title: { userPreferred: 'Cowboy Bebop' } }
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      };
-
       const gqlStore = (window as any).__ALFL_GQL_STORE__ as Map<string, any>;
       const cachedMlc = {
         user: { id: 7053169, name: 'TargetUser' },
@@ -475,7 +452,7 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
       const rpcCache = pageWin.__ALFL_RPC_CACHE__ as Map<string, any>;
       mockNativeFetch.mockClear();
 
-      rpcPayload = {
+      const rpcPayload = {
         entities: {
           mediaListEntry: {
             '1001': { id: 1001, mediaId: 888, status: 'COMPLETED', score: 9.5 }

@@ -11,7 +11,6 @@ import {
   extractSongParams,
   parseTheme,
   groupThemes,
-  pickVideo,
   resolveProviderLink,
   sortEpisodes,
   formatEpsTag,

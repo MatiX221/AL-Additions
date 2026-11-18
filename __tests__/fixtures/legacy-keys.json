@@ -1,0 +1,386 @@
+[
+  {
+    "key": "fastLoadEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "fastLoadEnabled"
+    ]
+  },
+  {
+    "key": "tagFilterEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "tagFilterEnabled",
+      "browseTagRankFilterEnabled"
+    ]
+  },
+  {
+    "key": "tagPercentage",
+    "type": "number",
+    "def": 50,
+    "legacy": [
+      "tagPercentage",
+      "minimumTagRankPercentage"
+    ]
+  },
+  {
+    "key": "linkShortenerEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "linkShortenerEnabled",
+      "shortAniListUrlsEnabled",
+      "shortAniListUrls"
+    ]
+  },
+  {
+    "key": "bannerEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "bannerEnabled",
+      "bannerDownloadEnabled",
+      "bannerDownloaderEnabled"
+    ]
+  },
+  {
+    "key": "bannerProfiles",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "bannerProfiles"
+    ]
+  },
+  {
+    "key": "nyaaEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "nyaaEnabled",
+      "malNyaaLinksEnabled",
+      "malNyaaEnabled"
+    ]
+  },
+  {
+    "key": "nyaaProviders",
+    "type": "list",
+    "def": [
+      "SubsPlease",
+      "ToonsHub"
+    ],
+    "legacy": [
+      "nyaaProviders",
+      "nyaaSearchGroups"
+    ]
+  },
+  {
+    "key": "keyframeEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "keyframeEnabled"
+    ]
+  },
+  {
+    "key": "mediaInfoEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "mediaInfoEnabled",
+      "mediaListEditorEnabled"
+    ]
+  },
+  {
+    "key": "behindDotsEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "behindDotsEnabled",
+      "airingProgressIndicatorEnabled"
+    ]
+  },
+  {
+    "key": "aniSongsEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "aniSongsEnabled",
+      "animeThemeSongsEnabled",
+      "anisongsEnabled"
+    ]
+  },
+  {
+    "key": "aniSongsProviders",
+    "type": "json",
+    "def": {
+      "active": [],
+      "presets": [
+        {
+          "id": "youtube",
+          "name": "YouTube",
+          "icon": "https://www.google.com/s2/favicons?domain=youtube.com&sz=32",
+          "url": "https://www.youtube.com/results?search_query={title}+{artist}"
+        },
+        {
+          "id": "youtube_music",
+          "name": "YouTube Music",
+          "icon": "https://www.google.com/s2/favicons?domain=music.youtube.com&sz=32",
+          "url": "https://music.youtube.com/search?q={title}+{artist}"
+        },
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "icon": "https://www.google.com/s2/favicons?domain=spotify.com&sz=32",
+          "url": "https://open.spotify.com/search/{title}%20{artist}"
+        },
+        {
+          "id": "apple_music",
+          "name": "Apple Music",
+          "icon": "https://www.google.com/s2/favicons?domain=music.apple.com&sz=32",
+          "url": "https://music.apple.com/us/search?term={title}+{artist}"
+        },
+        {
+          "id": "aniplaylist",
+          "name": "AniPlaylist",
+          "icon": "https://www.google.com/s2/favicons?domain=aniplaylist.com&sz=32",
+          "url": "https://aniplaylist.com/{title}"
+        },
+        {
+          "id": "youtube_theme",
+          "name": "YouTube (Anime + Theme)",
+          "icon": "https://www.google.com/s2/favicons?domain=youtube.com&sz=32",
+          "url": "https://www.youtube.com/results?search_query={anime}+{theme}"
+        },
+        {
+          "id": "youtube_jp",
+          "name": "YouTube (Japanese Anime + Theme)",
+          "icon": "https://www.google.com/s2/favicons?domain=youtube.com&sz=32",
+          "url": "https://www.youtube.com/results?search_query={anime_jp}+{theme}"
+        }
+      ]
+    },
+    "legacy": [
+      "aniSongsProviders"
+    ]
+  },
+  {
+    "key": "tierLabelsEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "tierLabelsEnabled"
+    ]
+  },
+  {
+    "key": "tierLabelsColorScore",
+    "type": "toggle",
+    "def": true,
+    "legacy": [
+      "tierLabelsColorScore"
+    ]
+  },
+  {
+    "key": "tierLabelsAverageScore",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "tierLabelsAverageScore"
+    ]
+  },
+  {
+    "key": "tierLabels",
+    "type": "json",
+    "def": [
+      {
+        "min": 95,
+        "max": 100,
+        "label": "S+",
+        "color": "#FFD700",
+        "textColor": "#000000"
+      },
+      {
+        "min": 85,
+        "max": 94.9,
+        "label": "S",
+        "color": "#ff7f00",
+        "textColor": "#FFFFFF"
+      },
+      {
+        "min": 75,
+        "max": 84.9,
+        "label": "A",
+        "color": "#aa00ff",
+        "textColor": "#FFFFFF"
+      },
+      {
+        "min": 65,
+        "max": 74.9,
+        "label": "B",
+        "color": "#007fff",
+        "textColor": "#FFFFFF"
+      },
+      {
+        "min": 55,
+        "max": 64.9,
+        "label": "C",
+        "color": "#00aa00",
+        "textColor": "#FFFFFF"
+      },
+      {
+        "min": 41,
+        "max": 54.9,
+        "label": "D",
+        "color": "#aaaaaa",
+        "textColor": "#FFFFFF"
+      },
+      {
+        "min": 0,
+        "max": 40.9,
+        "label": "F",
+        "color": "#666666",
+        "textColor": "#FFFFFF"
+      }
+    ],
+    "legacy": [
+      "tierLabels"
+    ]
+  },
+  {
+    "key": "compareViewEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "compareViewEnabled"
+    ]
+  },
+  {
+    "key": "syncEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "syncEnabled",
+      "syncOn"
+    ]
+  },
+  {
+    "key": "syncAutoAnime",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "syncAutoAnime"
+    ]
+  },
+  {
+    "key": "syncIntervalAnime",
+    "type": "number",
+    "def": 6,
+    "legacy": [
+      "syncIntervalAnime",
+      "syncIntervalHours",
+      "autoSyncIntervalHours",
+      "autoSyncInterval"
+    ]
+  },
+  {
+    "key": "syncAutoManga",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "syncAutoManga"
+    ]
+  },
+  {
+    "key": "syncIntervalManga",
+    "type": "number",
+    "def": 6,
+    "legacy": [
+      "syncIntervalManga",
+      "syncIntervalMangaHours",
+      "autoSyncIntervalMangaHours",
+      "syncIntervalHours"
+    ]
+  },
+  {
+    "key": "syncScoreRounding",
+    "type": "select",
+    "def": "round",
+    "legacy": [
+      "syncScoreRounding",
+      "scoreConversionMethod"
+    ]
+  },
+  {
+    "key": "syncMode",
+    "type": "select",
+    "def": "update",
+    "legacy": [
+      "syncMode"
+    ]
+  },
+  {
+    "key": "syncManualOverrides",
+    "type": "json",
+    "def": {},
+    "legacy": [
+      "syncManualOverrides"
+    ]
+  },
+  {
+    "key": "devModeEnabled",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "devModeEnabled"
+    ]
+  },
+  {
+    "key": "debugFastLoad",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "debugFastLoad"
+    ]
+  },
+  {
+    "key": "debugSync",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "debugSync"
+    ]
+  },
+  {
+    "key": "debugCompareView",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "debugCompareView"
+    ]
+  },
+  {
+    "key": "debugMediaInfo",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "debugMediaInfo"
+    ]
+  },
+  {
+    "key": "debugTierLabels",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "debugTierLabels"
+    ]
+  },
+  {
+    "key": "debugGeneral",
+    "type": "toggle",
+    "def": false,
+    "legacy": [
+      "debugGeneral"
+    ]
+  }
+]

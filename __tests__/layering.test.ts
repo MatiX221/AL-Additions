@@ -1,0 +1,228 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, it, expect } from 'vitest';
+
+const SRC_ROOT = path.resolve(process.cwd(), 'src');
+
+const KNOWN_VIOLATIONS: string[] = [
+  'main.ts -> modules/airingDots.ts',
+  'main.ts -> modules/anisongs/anisongs.ts',
+  'main.ts -> modules/banner.ts',
+  'main.ts -> modules/compareView.ts',
+  'main.ts -> modules/devMode.ts',
+  'main.ts -> modules/fastLoad/index.ts',
+  'main.ts -> modules/keyframe.ts',
+  'main.ts -> modules/mediaInfo.ts',
+  'main.ts -> modules/nyaa.ts',
+  'main.ts -> modules/shortUrls.ts',
+  'main.ts -> modules/sync/index.ts',
+  'main.ts -> modules/tagFilter.ts',
+  'main.ts -> modules/tierLabels.ts',
+  'modules/airingDots.ts -> core/observer.ts',
+  'modules/anisongs/anisongs.ts -> core/observer.ts',
+  'modules/banner.ts -> core/observer.ts',
+  'modules/compareView.ts -> core/observer.ts',
+  'modules/keyframe.ts -> core/observer.ts',
+  'modules/mediaInfo.ts -> core/observer.ts',
+  'modules/nyaa.ts -> core/observer.ts',
+  'modules/nyaa.ts -> modules/sync/overrides.ts',
+  'modules/nyaa.ts -> modules/sync/overridesModal.ts',
+  'modules/shortUrls.ts -> core/observer.ts',
+  'modules/sync/index.ts -> settings/backup.ts',
+  'modules/sync/panel.ts -> core/observer.ts',
+  'modules/tagFilter.ts -> core/observer.ts',
+  'modules/tierLabels.ts -> core/observer.ts',
+  'settings/panel.ts -> api/mal.ts',
+  'settings/panel.ts -> modules/anisongs/anisongModal.ts',
+  'settings/panel.ts -> modules/sync/engine.ts',
+  'settings/panel.ts -> modules/sync/overrides.ts',
+  'settings/panel.ts -> modules/sync/overridesModal.ts',
+  'utils/dom.ts -> core/observer.ts'
+];
+
+type Layer = 'types' | 'main' | 'utils' | 'core' | 'settings' | 'api' | 'module';
+
+function collectTsFiles(dir: string): string[] {
+  const results: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectTsFiles(full));
+    } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+      results.push(full);
+    }
+  }
+  return results;
+}
+
+function toRelPosix(absPath: string): string {
+  return path.relative(SRC_ROOT, absPath).replace(/\\/g, '/');
+}
+
+function stripCommentsAndStringsForImports(source: string): string {
+  // Replace comments with spaces while keeping string literals intact so import specifiers remain parseable.
+  let out = '';
+  let i = 0;
+  const len = source.length;
+  while (i < len) {
+    const ch = source[i];
+    const next = source[i + 1];
+
+    if (ch === '/' && next === '/') {
+      i += 2;
+      while (i < len && source[i] !== '\n') i++;
+      out += '\n';
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < len && !(source[i] === '*' && source[i + 1] === '/')) i++;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      out += ch;
+      i++;
+      while (i < len) {
+        const c = source[i];
+        out += c;
+        if (c === '\\') {
+          i++;
+          if (i < len) out += source[i];
+        } else if (c === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+function extractRelativeSpecifiers(source: string): string[] {
+  const cleaned = stripCommentsAndStringsForImports(source);
+  const specifiers: string[] = [];
+
+  // Static ES imports & re-exports: import ... from '...', import '...', export ... from '...'
+  const staticRe = /(?:^|[\s;])(?:import|export)\s+(?:type\s+)?(?:[^;'"]*?\s+from\s+)?(['"])([^'"]+)\1/gm;
+  for (const m of cleaned.matchAll(staticRe)) {
+    specifiers.push(m[2]);
+  }
+
+  // Dynamic import('...'), ignoring import.meta.glob(...)
+  const dynamicRe = /(?<![.\w])import\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
+  for (const m of cleaned.matchAll(dynamicRe)) {
+    specifiers.push(m[2]);
+  }
+
+  return specifiers.filter((s) => s.startsWith('.'));
+}
+
+function resolveRelativeImport(fromAbs: string, specifier: string): string | null {
+  const rawTarget = path.resolve(path.dirname(fromAbs), specifier);
+  const base = rawTarget.endsWith('.ts') ? rawTarget.slice(0, -3) : rawTarget;
+  const candidates = [`${base}.ts`, path.join(base, 'index.ts')];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      const rel = toRelPosix(candidate);
+      if (!rel.startsWith('..')) return rel;
+    }
+  }
+  return null;
+}
+
+function getLayer(rel: string): Layer {
+  if (rel === 'types.ts') return 'types';
+  if (rel === 'main.ts') return 'main';
+  if (rel.startsWith('utils/')) return 'utils';
+  if (rel.startsWith('core/')) return 'core';
+  if (rel.startsWith('settings/')) return 'settings';
+  if (rel.startsWith('api/')) return 'api';
+  if (rel.startsWith('modules/')) return 'module';
+  throw new Error(`Unrecognized src/ path layer: ${rel}`);
+}
+
+function getModuleName(rel: string): string {
+  const rest = rel.slice('modules/'.length);
+  const slash = rest.indexOf('/');
+  if (slash !== -1) return rest.slice(0, slash);
+  return rest.replace(/\.ts$/, '');
+}
+
+function isAllowedEdge(from: string, to: string): boolean {
+  if (to === 'main.ts') return false;
+  if (from === 'types.ts') return false;
+  if (to === 'types.ts') return true;
+
+  const fromLayer = getLayer(from);
+  const toLayer = getLayer(to);
+
+  switch (fromLayer) {
+    case 'main':
+      return toLayer !== 'module';
+    case 'utils':
+      return toLayer === 'utils';
+    case 'core':
+      if (toLayer === 'utils' || toLayer === 'core') return true;
+      return from === 'core/registry.ts' && to === 'settings/settings.ts';
+    case 'settings':
+      if (from === 'settings/settings.ts') return toLayer === 'utils';
+      return toLayer === 'utils' || toLayer === 'settings' || (toLayer === 'core' && to !== 'core/registry.ts');
+    case 'api':
+      return toLayer === 'utils' || toLayer === 'api' || (toLayer === 'core' && to !== 'core/registry.ts');
+    case 'module':
+      if (toLayer === 'utils' || toLayer === 'api') return true;
+      if (to === 'settings/settings.ts') return true;
+      if (to === 'core/registry.ts') return true;
+      if (toLayer === 'module') return getModuleName(from) === getModuleName(to);
+      return false;
+    default:
+      return false;
+  }
+}
+
+describe('Architecture: Acyclic Layering DAG', () => {
+  const files = collectTsFiles(SRC_ROOT);
+  const edges = new Map<string, string[]>();
+
+  for (const file of files) {
+    const from = toRelPosix(file);
+    const content = fs.readFileSync(file, 'utf8');
+    const resolved = extractRelativeSpecifiers(content)
+      .map((spec) => resolveRelativeImport(file, spec))
+      .filter((target): target is string => target !== null);
+    edges.set(from, [...new Set(resolved)].sort());
+  }
+
+  it('keeps src/types.ts as a zero-dependency leaf module within src/', () => {
+    expect(edges.get('types.ts')).toEqual([]);
+  });
+
+  it('matches the exact KNOWN_VIOLATIONS allowlist with no new or stale entries', () => {
+    const actualViolations: string[] = [];
+    for (const [from, targets] of edges.entries()) {
+      for (const to of targets) {
+        if (!isAllowedEdge(from, to)) {
+          actualViolations.push(`${from} -> ${to}`);
+        }
+      }
+    }
+    actualViolations.sort();
+
+    const knownSet = new Set(KNOWN_VIOLATIONS);
+    const actualSet = new Set(actualViolations);
+
+    const unexpected = actualViolations.filter((v) => !knownSet.has(v));
+    const stale = KNOWN_VIOLATIONS.filter((v) => !actualSet.has(v));
+
+    expect(unexpected, `Unexpected layering violations:\n${unexpected.join('\n')}`).toEqual([]);
+    expect(stale, `Stale entries in KNOWN_VIOLATIONS (remove them!):\n${stale.join('\n')}`).toEqual([]);
+  });
+});
