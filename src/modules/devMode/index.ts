@@ -1,4 +1,4 @@
-import { defineFeature } from '../core/registry';
+import { defineFeature } from '../../core/registry';
 
 defineFeature(
   {

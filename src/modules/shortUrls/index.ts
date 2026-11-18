@@ -1,5 +1,5 @@
-import { defineFeature } from '../core/registry';
-import { Core } from '../core/observer';
+import { defineFeature } from '../../core/registry';
+import { Core } from '../../core/observer';
 
 defineFeature(
   {

@@ -7,7 +7,7 @@ import {
   isValidColor,
   normalizeHexColor,
   type TierConfig
-} from '../src/utils/tiers';
+} from '../src/modules/tierLabels/tiers';
 import { getValidTiers } from '../src/modules/tierLabels';
 import { Settings } from '../src/settings/settings';
 

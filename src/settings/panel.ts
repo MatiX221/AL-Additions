@@ -9,7 +9,7 @@ import { maybeAutoSync } from '../modules/sync/engine';
 import { createBackup, createRawBackup, downloadBackupFile, importBackup, readFileAsBytes } from './backup';
 import { promptPasswordModal } from './passwordModal';
 import type { SettingRow, RegisteredFeature } from '../types';
-import { DEFAULT_TIERS, validateTiers, normalizeHexColor, type TierConfig } from '../utils/tiers';
+import { DEFAULT_TIERS, validateTiers, normalizeHexColor, type TierConfig } from '../modules/tierLabels/tiers';
 import { openOverridesModal } from '../modules/sync/overridesModal';
 import { OVERRIDES_SETTING_KEY, getManualOverrides } from '../modules/sync/overrides';
 import { openAniSongsModal } from '../modules/anisongs/anisongModal';

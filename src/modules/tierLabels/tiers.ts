@@ -1,3 +1,5 @@
+export const PROBE_ATTR = 'data-ala-probe';
+
 export interface TierConfig {
   min: number;
   max: number;

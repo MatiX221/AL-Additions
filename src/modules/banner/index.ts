@@ -1,9 +1,9 @@
 import { GM_download } from 'vite-plugin-monkey/dist/client';
-import { defineFeature } from '../core/registry';
-import { Settings } from '../settings/settings';
-import { Core } from '../core/observer';
-import { addStyle, icon, mediaRoute } from '../utils/dom';
-import { openTab, debounce } from '../utils/helpers';
+import { defineFeature } from '../../core/registry';
+import { Settings } from '../../settings/settings';
+import { Core } from '../../core/observer';
+import { addStyle, icon, mediaRoute } from '../../utils/dom';
+import { openTab, debounce } from '../../utils/helpers';
 
 defineFeature(
   {

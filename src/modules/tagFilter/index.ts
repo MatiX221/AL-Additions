@@ -1,6 +1,6 @@
-import { defineFeature } from '../core/registry';
-import { Settings } from '../settings/settings';
-import { Core } from '../core/observer';
+import { defineFeature } from '../../core/registry';
+import { Settings } from '../../settings/settings';
+import { Core } from '../../core/observer';
 
 defineFeature(
   {

@@ -1,12 +1,12 @@
-import { defineFeature } from '../core/registry';
-import { Settings } from '../settings/settings';
-import { Core } from '../core/observer';
-import { MediaData } from '../api/anilist';
-import { addStyle, icon, mediaRoute } from '../utils/dom';
-import { openTab, debounce } from '../utils/helpers';
-import type { MediaRoute } from '../types';
-import { getEffectiveMalId, isIgnored } from './sync/overrides';
-import { openQuickOverrideModal } from './sync/overridesModal';
+import { defineFeature } from '../../core/registry';
+import { Settings } from '../../settings/settings';
+import { Core } from '../../core/observer';
+import { MediaData } from '../../api/anilist';
+import { addStyle, icon, mediaRoute } from '../../utils/dom';
+import { openTab, debounce } from '../../utils/helpers';
+import type { MediaRoute } from '../../types';
+import { getEffectiveMalId, isIgnored } from '../sync/overrides';
+import { openQuickOverrideModal } from '../sync/overridesModal';
 
 defineFeature(
   {

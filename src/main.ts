@@ -6,19 +6,7 @@ import { defineModule, startModules } from './core/registry';
 import { captureCredentials } from './api/mal';
 import { safe } from './utils/helpers';
 
-import './modules/fastLoad';
-import './modules/tagFilter';
-import './modules/shortUrls';
-import './modules/banner';
-import './modules/nyaa';
-import './modules/keyframe';
-import './modules/mediaInfo';
-import './modules/airingDots';
-import './modules/anisongs/anisongs';
-import './modules/tierLabels';
-import './modules/compareView';
-import './modules/sync';
-import './modules/devMode';
+import.meta.glob('./modules/*/index.ts', { eager: true });
 
 defineModule('settings', null, initSettingsPage);
 

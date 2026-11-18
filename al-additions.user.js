@@ -206,109 +206,6 @@
 		for (let i = 0; i < len; i++) out += chars[arr[i] % 62];
 		return out;
 	}
-	var Core = (() => {
-		const navCbs = [];
-		const bodyCbs = [];
-		let observer = null;
-		let lastHref = location.href;
-		let muted = false;
-		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		const OWN_UI = "#almal-panel,#almal-toast,#ala-media-info,#daiya-anisongs,#ala-settings-backdrop";
-		let queued = [];
-		let flushTimer = 0;
-		const fire = (list, arg) => {
-			for (const cb of list.slice()) safe(() => cb(arg), "core");
-		};
-		function notifyNav() {
-			if (muted || location.href === lastHref) return;
-			lastHref = location.href;
-			logDebug("[CORE]", "Navigation detected:", location.pathname + location.search);
-			fire(navCbs);
-		}
-		for (const name of ["pushState", "replaceState"]) {
-			const orig = pageWin.history[name];
-			try {
-				pageWin.history[name] = function(...args) {
-					const r = orig.apply(this, args);
-					notifyNav();
-					return r;
-				};
-			} catch (_) {}
-		}
-		window.addEventListener("popstate", notifyNav);
-		window.addEventListener("hashchange", notifyNav);
-		setInterval(notifyNav, 400);
-		function ready(cb) {
-			if (document.body) safe(cb, "ready");
-			else document.addEventListener("DOMContentLoaded", () => safe(cb, "ready"), { once: true });
-		}
-		function ensureObserver() {
-			if (observer || !document.body) return;
-			const isOwn = (m) => {
-				return !!(m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest(OWN_UI);
-			};
-			observer = new MutationObserver((records) => {
-				for (const record of records) if (!isOwn(record)) queued.push(record);
-				if (queued.length && !flushTimer) flushTimer = setTimeout(() => {
-					flushTimer = 0;
-					const batch = queued;
-					queued = [];
-					logDebug("[OBSERVER]", `Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.length} listener(s)`);
-					fire(bodyCbs, batch);
-				}, 50);
-			});
-			observer.observe(document.body, {
-				childList: true,
-				subtree: true,
-				characterData: true
-			});
-		}
-		ready(ensureObserver);
-		function onBodyMutation(cb) {
-			bodyCbs.push(cb);
-			ready(ensureObserver);
-			return () => {
-				const i = bodyCbs.indexOf(cb);
-				if (i !== -1) bodyCbs.splice(i, 1);
-			};
-		}
-		function waitForSelector(selector, timeoutMs = 8e3) {
-			return new Promise((resolve) => {
-				const existing = document.querySelector(selector);
-				if (existing) return resolve(existing);
-				let done = false;
-				let unsub = null;
-				const finish = (v) => {
-					if (done) return;
-					done = true;
-					clearTimeout(timer);
-					if (unsub) unsub();
-					resolve(v);
-				};
-				const timer = setTimeout(() => finish(null), timeoutMs);
-				unsub = onBodyMutation(() => {
-					const el = document.querySelector(selector);
-					if (el) finish(el);
-				});
-			});
-		}
-		function silently(fn) {
-			muted = true;
-			try {
-				fn();
-			} finally {
-				muted = false;
-				lastHref = location.href;
-			}
-		}
-		return {
-			onNavigate: (cb) => navCbs.push(cb),
-			onBodyMutation,
-			waitForSelector,
-			ready,
-			silently
-		};
-	})();
 	var PREFIX = "ala_setting_";
 	var features = [];
 	var ROWS = {};
@@ -452,108 +349,135 @@
 		register,
 		migrate
 	};
-	var CREDITS = [
-		{
-			name: "Daiya",
-			url: "https://github.com/Daiya404",
-			note: "Combining, fixing and maintaining this script, and the standalone script check for Fast Load and Tier Labels. Everything not credited below, such as the Keyframe Staff List button, the List Score & Progress Editor, and AniList Fast Load, is original work.",
-			works: [["AL-Additions on GitHub", "https://github.com/Daiya404/AL-Additions"], ["AniList Fast Load on GitHub", "https://github.com/Daiya404/AL-Fast-Load"]]
-		},
-		{
-			name: "MatiX221",
-			url: "https://github.com/MatiX221",
-			note: "The API limit fix idea, modularising the script, general bug fixes, AniList Fast Load and Tier Labels integration and improvements, Compare View improvements, manual sync mappings, and the backup and restore feature.",
-			works: [["MatiX221/AL-Additions", "https://github.com/MatiX221/AL-Additions"]]
-		},
-		{
-			name: "Plennhar",
-			url: "https://greasyfork.org/en/users/1323916-plennhar",
-			note: "Browse Tag Rank Filter and Airing Progress Indicator.",
-			works: [["AniList Browse: set default minimum tag percentage to 50", "https://greasyfork.org/en/scripts/559539-anilist-browse-set-default-minimum-tag-percentage-to-50"], ["AniList: color airing dots on anime lists orange if the user is behind on episodes", "https://greasyfork.org/en/scripts/563899-anilist-color-airing-dots-on-anime-lists-orange-if-the-user-is-behind-on-episodes"]]
-		},
-		{
-			name: "Morimasa",
-			url: "https://greasyfork.org/en/users/61126-morimasa",
-			note: "Anime OP/ED songs.",
-			works: [["Anisongs", "https://greasyfork.org/en/scripts/374785-anisongs"]]
-		},
-		{
-			name: "Samu",
-			url: "https://greasyfork.org/en/users/17840-samu",
-			note: "Nyaa search link.",
-			works: [["Find on Nyaa", "https://greasyfork.org/en/scripts/379776-find-on-nyaa"]]
-		},
-		{
-			name: "trevor229",
-			url: "https://greasyfork.org/en/users/158806-trevor229",
-			note: "Banner Downloader.",
-			works: [["AniList Banner Downloader", "https://greasyfork.org/en/scripts/370470-anilist-banner-downloader"]]
-		},
-		{
-			name: "meatloaf1",
-			url: "https://greasyfork.org/en/users/1630083-meatloaf1",
-			note: "Short AniList URLs.",
-			works: [["Remove AniList titles from URL", "https://greasyfork.org/en/scripts/589540-remove-anilist-titles-from-url"]]
-		},
-		{
-			name: "MALSync",
-			url: "https://github.com/MALSync",
-			note: "Inspiration for the MyAnimeList sync, and for the episode/chapter and score embedding.",
-			works: [["MALSync on GitHub", "https://github.com/MALSync/MALSync"]]
-		},
-		{
-			name: "ercarp",
-			url: "https://greasyfork.org/en/users/1434372-ercarp",
-			note: "AniList Tier Labels.",
-			works: [["AniList Tier Labels", "https://greasyfork.org/en/scripts/526694-anilist-tier-labels"]]
-		},
-		{
-			name: "Claude & ChatGPT",
-			note: "AI assistance throughout the consolidation and fixes."
-		}
-	];
-	var creditLink = (url, text, cls = "") => `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
-	var creditsHtml = () => CREDITS.map((c) => `<div class="ala-credit"><b>${c.url ? creditLink(c.url, c.name) : esc(c.name)}</b> — ${esc(c.note)}${c.works ? `<ul>${c.works.map(([label, url]) => `<li>${creditLink(url, label)}</li>`).join("")}</ul>` : ""}</div>`).join("");
-	var ICONS = {
-		download: "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><polyline points=\"7 10 12 15 17 10\"/><line x1=\"12\" y1=\"15\" x2=\"12\" y2=\"3\"/>",
-		check: "<polyline points=\"20 6 9 17 4 12\"/>",
-		resync: "<polyline points=\"1 4 1 10 7 10\"/><path d=\"M3.51 15a9 9 0 1 0 2.13-9.36L1 10\"/>",
-		stop: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"currentColor\"/>",
-		list: "<line x1=\"8\" y1=\"6\" x2=\"21\" y2=\"6\"/><line x1=\"8\" y1=\"12\" x2=\"21\" y2=\"12\"/><line x1=\"8\" y1=\"18\" x2=\"21\" y2=\"18\"/><line x1=\"3\" y1=\"6\" x2=\"3.01\" y2=\"6\"/><line x1=\"3\" y1=\"12\" x2=\"3.01\" y2=\"12\"/><line x1=\"3\" y1=\"18\" x2=\"3.01\" y2=\"18\"/>",
-		sliders: "<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/><line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/><line x1=\"1\" y1=\"14\" x2=\"7\" y2=\"14\"/><line x1=\"9\" y1=\"8\" x2=\"15\" y2=\"8\"/><line x1=\"17\" y1=\"16\" x2=\"23\" y2=\"16\"/>",
-		close: "<line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/>",
-		edit: "<path d=\"M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z\"/>",
-		external: "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/><polyline points=\"15 3 21 3 21 9\"/><line x1=\"10\" y1=\"14\" x2=\"21\" y2=\"3\"/>",
-		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
-	};
-	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
-	function addStyle(id, css) {
-		Core.ready(() => {
-			if (document.getElementById(id)) return;
-			const s = document.createElement("style");
-			s.id = id;
-			s.textContent = css;
-			(document.head || document.documentElement).appendChild(s);
+	var modules = [];
+	var defineModule = (name, setting, init, hosts = ["anilist.co"], early = false) => {
+		modules.push({
+			name,
+			setting,
+			init,
+			hosts,
+			early
 		});
-	}
-	var mediaRoute = () => {
-		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
-		return m ? {
-			kind: m[1],
-			type: m[1].toUpperCase(),
-			id: Number(m[2])
-		} : null;
 	};
-	function findExactText(text) {
-		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-		for (let t; t = walker.nextNode();) {
-			if (t.nodeValue?.trim() !== text || !t.parentElement) continue;
-			let el = t.parentElement;
-			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent?.trim() === text) el = el.parentElement;
-			return el;
+	var defineFeature = (meta, init) => {
+		Settings.register(meta);
+		defineModule(meta.id, meta.alwaysRun ? null : meta.key, init, meta.hosts, meta.early);
+	};
+	function startModules(early) {
+		for (const m of modules) {
+			if (m.early !== early || !m.hosts.includes(HOST)) continue;
+			if (m.setting && !Settings.get(m.setting)) continue;
+			logDebug("[CORE]", `Initializing module "${m.name}" (early=${early})`);
+			try {
+				Promise.resolve(m.init()).catch((e) => console.error("[AL-Additions]", m.name, e));
+			} catch (e) {
+				console.error("[AL-Additions]", m.name, e);
+			}
 		}
-		return null;
 	}
+	var Core = (() => {
+		const navCbs = [];
+		const bodyCbs = [];
+		let observer = null;
+		let lastHref = location.href;
+		let muted = false;
+		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+		const OWN_UI = "#almal-panel,#almal-toast,#ala-media-info,#daiya-anisongs,#ala-settings-backdrop";
+		let queued = [];
+		let flushTimer = 0;
+		const fire = (list, arg) => {
+			for (const cb of list.slice()) safe(() => cb(arg), "core");
+		};
+		function notifyNav() {
+			if (muted || location.href === lastHref) return;
+			lastHref = location.href;
+			logDebug("[CORE]", "Navigation detected:", location.pathname + location.search);
+			fire(navCbs);
+		}
+		for (const name of ["pushState", "replaceState"]) {
+			const orig = pageWin.history[name];
+			try {
+				pageWin.history[name] = function(...args) {
+					const r = orig.apply(this, args);
+					notifyNav();
+					return r;
+				};
+			} catch (_) {}
+		}
+		window.addEventListener("popstate", notifyNav);
+		window.addEventListener("hashchange", notifyNav);
+		setInterval(notifyNav, 400);
+		function ready(cb) {
+			if (document.body) safe(cb, "ready");
+			else document.addEventListener("DOMContentLoaded", () => safe(cb, "ready"), { once: true });
+		}
+		function ensureObserver() {
+			if (observer || !document.body) return;
+			const isOwn = (m) => {
+				return !!(m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest(OWN_UI);
+			};
+			observer = new MutationObserver((records) => {
+				for (const record of records) if (!isOwn(record)) queued.push(record);
+				if (queued.length && !flushTimer) flushTimer = setTimeout(() => {
+					flushTimer = 0;
+					const batch = queued;
+					queued = [];
+					logDebug("[OBSERVER]", `Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.length} listener(s)`);
+					fire(bodyCbs, batch);
+				}, 50);
+			});
+			observer.observe(document.body, {
+				childList: true,
+				subtree: true,
+				characterData: true
+			});
+		}
+		ready(ensureObserver);
+		function onBodyMutation(cb) {
+			bodyCbs.push(cb);
+			ready(ensureObserver);
+			return () => {
+				const i = bodyCbs.indexOf(cb);
+				if (i !== -1) bodyCbs.splice(i, 1);
+			};
+		}
+		function waitForSelector(selector, timeoutMs = 8e3) {
+			return new Promise((resolve) => {
+				const existing = document.querySelector(selector);
+				if (existing) return resolve(existing);
+				let done = false;
+				let unsub = null;
+				const finish = (v) => {
+					if (done) return;
+					done = true;
+					clearTimeout(timer);
+					if (unsub) unsub();
+					resolve(v);
+				};
+				const timer = setTimeout(() => finish(null), timeoutMs);
+				unsub = onBodyMutation(() => {
+					const el = document.querySelector(selector);
+					if (el) finish(el);
+				});
+			});
+		}
+		function silently(fn) {
+			muted = true;
+			try {
+				fn();
+			} finally {
+				muted = false;
+				lastHref = location.href;
+			}
+		}
+		return {
+			onNavigate: (cb) => navCbs.push(cb),
+			onBodyMutation,
+			waitForSelector,
+			ready,
+			silently
+		};
+	})();
 	var RateLimiter = class {
 		rate;
 		min;
@@ -629,428 +553,6 @@
 			if (this.persistKey) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
 		}
 	};
-	var normTitle$1 = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(the|a|an)\b/g, " ").replace(/\s+/g, " ").trim();
-	var strictTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
-	function titleScore(a, b) {
-		const x = normTitle$1(a);
-		const y = normTitle$1(b);
-		if (!x || !y) return 0;
-		if (x === y) return 100;
-		const wordsA = x.split(" ").filter(Boolean);
-		const wordsB = y.split(" ").filter(Boolean);
-		const setA = new Set(wordsA);
-		const setB = new Set(wordsB);
-		let common = 0;
-		for (const w of setA) if (setB.has(w)) common++;
-		const totalUnique = new Set([...wordsA, ...wordsB]).size;
-		const wordScore = totalUnique > 0 ? common / totalUnique * 100 : 0;
-		const strA = ` ${x} `;
-		const strB = ` ${y} `;
-		if (strA.includes(strB) || strB.includes(strA)) {
-			const lenRatio = Math.min(x.length, y.length) / Math.max(x.length, y.length);
-			const subScore = Math.round(60 + lenRatio * 35);
-			return Math.max(Math.round(wordScore), subScore);
-		}
-		return Math.round(wordScore);
-	}
-	function bestMatch(list, title, getTitle, min = 70) {
-		let best = null;
-		let bestScore = -1;
-		for (const item of list) {
-			const s = titleScore(title, getTitle(item));
-			if (s > bestScore) {
-				best = item;
-				bestScore = s;
-			}
-		}
-		return best && bestScore >= min ? best : null;
-	}
-	var MAL_AUTH_URL = "https://myanimelist.net/v1/oauth2/authorize";
-	var MAL_TOKEN_URL = "https://myanimelist.net/v1/oauth2/token";
-	var MAL_API = "https://api.myanimelist.net/v2";
-	var MAL_REDIRECT = "https://myanimelist.net/";
-	var MAL_CLIENT_ID = "f8197fe8cb24188073de4c0227307edf";
-	var hooks = {};
-	var logLines = [];
-	var lastNotice = "";
-	function log(msg, level = "info") {
-		const time = new Date().toLocaleTimeString([], {
-			hour: "2-digit",
-			minute: "2-digit",
-			second: "2-digit"
-		});
-		const marker = level === "error" ? "ERROR" : level === "warn" ? "WARN " : level === "success" ? "OK   " : "INFO ";
-		logLines.unshift(`${time}  ${marker} ${String(msg)}`);
-		logLines = logLines.slice(0, 60);
-		console[level === "error" ? "error" : level === "warn" ? "warn" : "log"]("[AL→MAL Sync]", msg);
-		lastNotice = String(msg);
-		const box = document.getElementById("almal-log");
-		const hint = document.getElementById("almal-hint");
-		if (box) box.textContent = logLines.join("\n");
-		if (hint) hint.textContent = lastNotice;
-	}
-	function toast(msg, isError, closeTab) {
-		log(msg);
-		Core.ready(() => {
-			let t = document.getElementById("almal-toast");
-			if (!t) {
-				t = document.createElement("div");
-				t.id = "almal-toast";
-				t.style.cssText = "position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:3px;color:#fff;font-size:1.2rem;z-index:999999;box-shadow:0 4px 16px rgba(0,0,0,.45)";
-				document.body.appendChild(t);
-			}
-			t.textContent = msg;
-			t.style.background = isError ? "#b23b3b" : "#2f8f5b";
-			t.style.display = "block";
-			clearTimeout(t._hide);
-			t._hide = setTimeout(() => {
-				if (t) t.style.display = "none";
-			}, 6e3);
-			if (closeTab) setTimeout(() => safe(() => window.close()), 1800);
-		});
-	}
-	var clearMalAuth = () => {
-		[
-			"mal_token",
-			"mal_refresh_token",
-			"mal_expires_at"
-		].forEach((k) => store$1.del(k));
-	};
-	async function malTokenRequest(params) {
-		const body = new URLSearchParams({
-			client_id: MAL_CLIENT_ID,
-			...params
-		});
-		const res = await gm.request(MAL_TOKEN_URL, {
-			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			data: body.toString()
-		});
-		let json = {};
-		try {
-			json = JSON.parse(res.responseText);
-		} catch (_) {}
-		if (!json.access_token) {
-			if (params.grant_type === "refresh_token" && [
-				400,
-				401,
-				403
-			].includes(res.status)) {
-				clearMalAuth();
-				throw authError("MAL", "MAL session expired — reconnect MAL.");
-			}
-			throw new Error(json.hint || json.message || json.error || res.responseText || `HTTP ${res.status}`);
-		}
-		store$1.set("mal_token", json.access_token);
-		if (json.refresh_token) store$1.set("mal_refresh_token", json.refresh_token);
-		store$1.set("mal_expires_at", Date.now() + (Number(json.expires_in) || 3600) * 1e3);
-		return json.access_token;
-	}
-	async function exchangeMalCode(code) {
-		const token = await malTokenRequest({
-			code,
-			code_verifier: store$1.get("mal_code_verifier", ""),
-			grant_type: "authorization_code",
-			redirect_uri: MAL_REDIRECT
-		});
-		store$1.del("mal_code_verifier");
-		return token;
-	}
-	var malRefresh = null;
-	async function malEnsureToken() {
-		if (Date.now() < store$1.get("mal_expires_at", 0) - 6e4) return store$1.get("mal_token");
-		if (!malRefresh) malRefresh = (async () => {
-			const refresh = store$1.get("mal_refresh_token", null);
-			if (!refresh) throw authError("MAL", "No MAL refresh token stored — reconnect MAL.");
-			return malTokenRequest({
-				grant_type: "refresh_token",
-				refresh_token: refresh
-			});
-		})().finally(() => {
-			malRefresh = null;
-		});
-		return malRefresh;
-	}
-	function malConnect() {
-		const verifier = randomString(96);
-		store$1.set("mal_code_verifier", verifier);
-		openTab(`${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain&redirect_uri=${encodeURIComponent(MAL_REDIRECT)}`);
-		log("Opened MAL authorization in a new tab. Finish connecting there, then return to your list.");
-	}
-	function captureCredentials() {
-		if (location.hostname === "myanimelist.net") {
-			const code = new URLSearchParams(location.search).get("code");
-			if (!code || !store$1.get("mal_code_verifier")) return;
-			exchangeMalCode(code).then(() => {
-				const url = new URL(location.href);
-				url.searchParams.delete("code");
-				url.searchParams.delete("state");
-				history.replaceState(null, "", url.pathname + url.search);
-				toast("MAL connected! You can close this tab.", false, true);
-			}).catch((e) => toast("MAL connection failed: " + e.message, true));
-		}
-	}
-	var malLimiter = new RateLimiter({
-		rate: 60,
-		min: 12,
-		max: 180,
-		burst: 4,
-		adaptive: true,
-		jitter: true,
-		persistKey: "ala_mal_api_resume_at"
-	});
-	var BREAKER_THRESHOLD = 8;
-	var BREAKER_COOLDOWN_MS = 9e4;
-	var breaker = (() => {
-		let fails = 0;
-		let until = 0;
-		let trips = 0;
-		return {
-			ok() {
-				fails = 0;
-			},
-			fail() {
-				if (++fails >= BREAKER_THRESHOLD && Date.now() >= until) {
-					fails = 0;
-					trips++;
-					until = Date.now() + BREAKER_COOLDOWN_MS;
-					log(`⚠ ${BREAKER_THRESHOLD} consecutive MAL failures — pausing writes for ${BREAKER_COOLDOWN_MS / 1e3}s.`);
-				}
-			},
-			async wait(checkCancel) {
-				while (Date.now() < until) {
-					checkCancel?.();
-					await sleep(Math.min(1e3, until - Date.now()));
-				}
-			},
-			get trips() {
-				return trips;
-			},
-			reset() {
-				fails = 0;
-				until = 0;
-				trips = 0;
-			}
-		};
-	})();
-	var MalError = class extends Error {
-		status;
-		html;
-		constructor(what, res) {
-			super(`${what} ${res.status}: ${String(res.responseText || "request failed").slice(0, 200)}`);
-			this.status = res.status;
-			this.html = /^\s*</.test(res.responseText || "");
-		}
-	};
-	function parseRetryAfterMs(headers, fallback) {
-		const m = String(headers || "").match(/retry-after:\s*(\S+)/i);
-		if (!m) return fallback;
-		const secs = Number(m[1]);
-		if (Number.isFinite(secs)) return Math.max(1e3, Math.min(secs * 1e3, 12e4));
-		const date = Date.parse(m[1]);
-		return Number.isFinite(date) ? Math.max(1e3, Math.min(date - Date.now(), 12e4)) : fallback;
-	}
-	var looksLimited = (res) => res.status === 429 || res.status === 403 && /^\s*</.test(res.responseText || "");
-	var backoff = (attempt) => Math.min(3e4, 1e3 * 2 ** attempt) * (.8 + Math.random() * .4);
-	async function malRequest({ method = "GET", url, data, headers = {}, timeout = 3e4 }, checkCancel) {
-		await malLimiter.acquire(checkCancel ?? hooks.checkCancel);
-		const token = await malEnsureToken();
-		logDebug("[SYNC]", `MAL ${method} ${url}`, data ? { data } : "");
-		const res = await gm.request(url, {
-			method,
-			data,
-			timeout,
-			headers: {
-				Authorization: `Bearer ${token}`,
-				...headers
-			}
-		});
-		logDebug("[SYNC]", `MAL ${method} response: ${res.status} for ${url}`);
-		if (looksLimited(res)) malLimiter.limit(parseRetryAfterMs(res.responseHeaders, res.status === 429 ? 5e3 : 6e4));
-		else if (res.status >= 500) malLimiter.limit(2e3);
-		else if (res.status >= 200 && res.status < 300) malLimiter.success();
-		return res;
-	}
-	async function malCall(opts, retries = 4, checkCancel) {
-		const check = checkCancel ?? hooks.checkCancel;
-		let refreshed = false;
-		for (let attempt = 0;; attempt++) {
-			check?.();
-			let res;
-			try {
-				res = await malRequest(opts, check);
-			} catch (e) {
-				if (e.auth || e.cancelled || attempt >= retries) throw e;
-				await sleep(backoff(attempt));
-				continue;
-			}
-			if (res.status === 401) {
-				if (refreshed) {
-					clearMalAuth();
-					throw authError("MAL", "MAL rejected the access token — reconnect MAL.");
-				}
-				refreshed = true;
-				store$1.set("mal_expires_at", 0);
-				continue;
-			}
-			if (!looksLimited(res) && res.status < 500) return res;
-			if (attempt >= retries) return res;
-		}
-	}
-	var parseJson = (res, what) => {
-		try {
-			return JSON.parse(res.responseText || "{}");
-		} catch (_) {
-			throw new Error(`MAL returned invalid JSON for ${what}.`);
-		}
-	};
-	async function malUpdateEntry(type, malId, patch) {
-		const res = await malCall({
-			method: "PUT",
-			url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}/${malId}/my_list_status`,
-			data: new URLSearchParams(patch).toString(),
-			headers: { "Content-Type": "application/x-www-form-urlencoded" }
-		});
-		if (res.status < 200 || res.status >= 300) throw new MalError("MAL", res);
-		return res;
-	}
-	async function malDeleteEntry(type, malId) {
-		const res = await malCall({
-			method: "DELETE",
-			url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}/${malId}/my_list_status`
-		});
-		if (res.status === 404) return res;
-		if (res.status < 200 || res.status >= 300) throw new MalError("MAL delete", res);
-		return res;
-	}
-	async function malWhoAmI() {
-		const res = await malCall({ url: `${MAL_API}/users/@me` });
-		if (res.status < 200 || res.status >= 300) throw new MalError("MAL profile", res);
-		return parseJson(res, "the profile");
-	}
-	async function malFetchList(type) {
-		const MAL_LIST_PAGE_SIZE = 1e3;
-		const MAL_LIST_MAX = 1e5;
-		const anime = type === "ANIME";
-		const fields = anime ? "num_episodes,list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched,start_date,finish_date,comments}" : "num_chapters,num_volumes,list_status{status,score,num_chapters_read,num_volumes_read,is_rereading,num_times_reread,start_date,finish_date,comments}";
-		const entries = {};
-		let total = 0;
-		for (let offset = 0; offset <= MAL_LIST_MAX;) {
-			const res = await malCall({
-				url: `${MAL_API}/users/@me/${anime ? "animelist" : "mangalist"}?fields=${encodeURIComponent(fields)}&limit=${MAL_LIST_PAGE_SIZE}&offset=${offset}&nsfw=true`,
-				timeout: 6e4
-			}, 6);
-			if (res.status < 200 || res.status >= 300) throw new MalError("MAL list", res);
-			const json = parseJson(res, "the list");
-			const nodes = Array.isArray(json.data) ? json.data : [];
-			for (const row of nodes) {
-				const id = Number(row?.node?.id);
-				if (!(id > 0) || !row.list_status) continue;
-				const node = row.node;
-				if (!entries[id]) total++;
-				entries[id] = {
-					...row.list_status,
-					__malTitle: node.title || "",
-					__total: Number(anime ? node.num_episodes : node.num_chapters) || 0,
-					__totalVolumes: anime ? 0 : Number(node.num_volumes) || 0
-				};
-			}
-			if (total > MAL_LIST_MAX) throw new Error(`MAL list exceeded the ${MAL_LIST_MAX.toLocaleString()}-entry safety limit.`);
-			if (!nodes.length || !json.paging?.next) break;
-			offset += nodes.length;
-		}
-		return entries;
-	}
-	var searchCandidates = memo(async (type, q) => {
-		const params = new URLSearchParams({
-			q: q.slice(0, 64),
-			limit: "10",
-			nsfw: "true",
-			fields: "alternative_titles,start_date"
-		});
-		const res = await malCall({ url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}?${params}` }, 2);
-		if (res.status === 400) return [];
-		if (res.status < 200 || res.status >= 300) throw new MalError("MAL search", res);
-		const json = parseJson(res, "a search");
-		return (Array.isArray(json.data) ? json.data : []).map((r) => {
-			const n = r?.node || {};
-			const alt = n.alternative_titles || {};
-			return {
-				id: Number(n.id) || 0,
-				titles: [
-					n.title,
-					alt.en,
-					alt.ja,
-					...alt.synonyms || []
-				].map(strictTitle).filter(Boolean),
-				year: Number(String(n.start_date || "").slice(0, 4)) || 0
-			};
-		});
-	});
-	async function searchMalId(type, entry) {
-		for (const q of entry.queryTitles.filter((s) => s.length >= 3).slice(0, 2)) {
-			const ok = (await searchCandidates(`${type}:${q}`, type, q)).filter((c) => c.id && c.titles.some((t) => entry.titles.includes(t)) && (!c.year || !entry.startYear || Math.abs(c.year - entry.startYear) <= 1));
-			if (ok.length === 1) return ok[0].id;
-			if (ok.length > 1) {
-				const exact = ok.filter((c) => c.year && c.year === entry.startYear);
-				return exact.length === 1 ? exact[0].id : 0;
-			}
-		}
-		return 0;
-	}
-	var STANDALONE = {
-		fastLoad: {
-			name: "AniList Fast Load",
-			settingKey: "fastLoadEnabled"
-		},
-		tierLabels: {
-			name: "AniList Tier Labels",
-			settingKey: "tierLabelsEnabled"
-		}
-	};
-	var STANDALONE_IDS_LIST = Object.keys(STANDALONE);
-	var PROBE_ATTR = "data-ala-probe";
-	var builtInRunning = new Set();
-	var markBuiltIn = (id) => {
-		builtInRunning.add(id);
-	};
-	var pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-	function detectFastLoad() {
-		const w = pageWin();
-		return !!(w.__ANILIST_FAST_LOAD__ || w.__ANILIST_FAST_LOAD_V4__) && !builtInRunning.has("fastLoad");
-	}
-	async function probeTierLabels(timeoutMs = 600) {
-		if (!document.body) return false;
-		const probe = document.createElement("div");
-		probe.className = "score";
-		probe.hidden = true;
-		probe.setAttribute("score", "9");
-		probe.setAttribute(PROBE_ATTR, "1");
-		probe.textContent = "9";
-		document.body.appendChild(probe);
-		try {
-			const end = Date.now() + timeoutMs;
-			while (Date.now() < end) {
-				await sleep(50);
-				if (probe.hasAttribute("data-tier-modified")) return true;
-			}
-			return false;
-		} finally {
-			probe.remove();
-		}
-	}
-	var CACHE_MS = 3e4;
-	var cache = new Map();
-	function detectStandalone(id) {
-		const hit = cache.get(id);
-		if (hit && Date.now() - hit.at < CACHE_MS) return hit.result;
-		const result = (id === "fastLoad" ? Promise.resolve(detectFastLoad()) : probeTierLabels()).catch(() => false);
-		cache.set(id, {
-			at: Date.now(),
-			result
-		});
-		return result;
-	}
 	var KNOWN_LIST_FIELDS = [
 		"mediaId",
 		"id",
@@ -1671,2672 +1173,325 @@
 			save
 		};
 	})();
-	var TYPES = ["ANIME", "MANGA"];
-	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
-	var SETTLED_TTL_MS = 3888e6;
-	var LOCK_STALE_MS = 45e3;
-	var LOCK_HEARTBEAT_MS = 1e4;
-	var TAB_ID = randomString(10);
-	var LOCK_KEY = "sync_lock_heartbeat";
-	var progress = {
-		phase: "idle",
-		done: 0,
-		total: 0,
-		changed: 0
+	var ICONS = {
+		download: "<path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><polyline points=\"7 10 12 15 17 10\"/><line x1=\"12\" y1=\"15\" x2=\"12\" y2=\"3\"/>",
+		check: "<polyline points=\"20 6 9 17 4 12\"/>",
+		resync: "<polyline points=\"1 4 1 10 7 10\"/><path d=\"M3.51 15a9 9 0 1 0 2.13-9.36L1 10\"/>",
+		stop: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"currentColor\"/>",
+		list: "<line x1=\"8\" y1=\"6\" x2=\"21\" y2=\"6\"/><line x1=\"8\" y1=\"12\" x2=\"21\" y2=\"12\"/><line x1=\"8\" y1=\"18\" x2=\"21\" y2=\"18\"/><line x1=\"3\" y1=\"6\" x2=\"3.01\" y2=\"6\"/><line x1=\"3\" y1=\"12\" x2=\"3.01\" y2=\"12\"/><line x1=\"3\" y1=\"18\" x2=\"3.01\" y2=\"18\"/>",
+		sliders: "<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/><line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/><line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/><line x1=\"1\" y1=\"14\" x2=\"7\" y2=\"14\"/><line x1=\"9\" y1=\"8\" x2=\"15\" y2=\"8\"/><line x1=\"17\" y1=\"16\" x2=\"23\" y2=\"16\"/>",
+		close: "<line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/>",
+		edit: "<path d=\"M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z\"/>",
+		external: "<path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"/><polyline points=\"15 3 21 3 21 9\"/><line x1=\"10\" y1=\"14\" x2=\"21\" y2=\"3\"/>",
+		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
 	};
-	var syncStatus = {
-		syncing: false,
-		cancelled: false,
-		autoSyncRetryAfter: 0
-	};
-	var progressListeners = [];
-	var stateListeners = [];
-	var onProgressChange = (cb) => {
-		progressListeners.push(cb);
-	};
-	var onStateChange = (cb) => {
-		stateListeners.push(cb);
-	};
-	var notifyProgress = (force = false) => {
-		for (const cb of progressListeners) cb(force);
-	};
-	var notifyState = () => {
-		for (const cb of stateListeners) cb();
-	};
-	var markDone = (n = 1) => {
-		progress.done += n;
-		notifyProgress();
-	};
-	var checkCancel = () => {
-		if (syncStatus.cancelled) {
-			const e = new Error("Sync stopped.");
-			e.cancelled = true;
-			throw e;
-		}
-	};
-	var pruneIds = (d) => {
-		for (const k of Object.keys(d)) {
-			const r = d[k];
-			if (!r || typeof r !== "object" || !(r.m > 0) && !(Date.now() - r.t < 6048e5)) delete d[k];
-		}
-	};
-	var pruneSettled = (d) => {
-		for (const k of Object.keys(d)) {
-			const r = d[k];
-			if (!Array.isArray(r) || !(Date.now() - r[2] < SETTLED_TTL_MS)) delete d[k];
-		}
-	};
-	var makeStores = (t) => ({
-		ids: persistent(`sync_idmap_${t}`, pruneIds),
-		settled: persistent(`sync_settled_${t}`, pruneSettled)
-	});
-	var stores = {
-		ANIME: makeStores("ANIME"),
-		MANGA: makeStores("MANGA")
-	};
-	var clearCache = (c) => {
-		for (const k of Object.keys(c.data)) delete c.data[k];
-		c.save();
-	};
-	var PENDING_DELETES_KEY = "sync_pending_deletes";
-	function getPendingDeletes() {
-		return jsonGet(PENDING_DELETES_KEY, []);
-	}
-	function addPendingDelete(del) {
-		const list = getPendingDeletes().filter((p) => !(p.mediaId === del.mediaId && p.type === del.type));
-		list.push(del);
-		jsonSet(PENDING_DELETES_KEY, list);
-	}
-	function removePendingDelete(mediaId, type) {
-		jsonSet(PENDING_DELETES_KEY, getPendingDeletes().filter((p) => !(p.mediaId === mediaId && p.type === type)));
-	}
-	function resetAccountState() {
-		for (const t of TYPES) {
-			for (const k of [
-				"last_sync",
-				"last_run",
-				"last_compare"
-			]) store$1.del(`${k}_${t}`);
-			clearCache(stores[t].settled);
-		}
-		store$1.del("sync_retry_at");
-		store$1.del(PENDING_DELETES_KEY);
-	}
-	var heartbeat = null;
-	async function acquireLock() {
-		const lock = jsonGet(LOCK_KEY, null);
-		if (lock && lock.tab !== TAB_ID && Number.isFinite(lock.at) && Date.now() - lock.at < LOCK_STALE_MS) return false;
-		const beat = () => jsonSet(LOCK_KEY, {
-			at: Date.now(),
-			tab: TAB_ID
+	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
+	function addStyle(id, css) {
+		Core.ready(() => {
+			if (document.getElementById(id)) return;
+			const s = document.createElement("style");
+			s.id = id;
+			s.textContent = css;
+			(document.head || document.documentElement).appendChild(s);
 		});
-		beat();
-		await sleep(250);
-		if (jsonGet(LOCK_KEY, null)?.tab !== TAB_ID) return false;
-		heartbeat = setInterval(beat, LOCK_HEARTBEAT_MS);
-		return true;
 	}
-	function releaseLock() {
-		if (heartbeat) clearInterval(heartbeat);
-		heartbeat = null;
-		if (jsonGet(LOCK_KEY, null)?.tab === TAB_ID) store$1.del(LOCK_KEY);
-	}
-	var STATUS_MAP = {
-		ANIME: {
-			CURRENT: "watching",
-			COMPLETED: "completed",
-			PAUSED: "on_hold",
-			DROPPED: "dropped",
-			PLANNING: "plan_to_watch",
-			REPEATING: "watching"
-		},
-		MANGA: {
-			CURRENT: "reading",
-			COMPLETED: "completed",
-			PAUSED: "on_hold",
-			DROPPED: "dropped",
-			PLANNING: "plan_to_read",
-			REPEATING: "reading"
-		}
+	var mediaRoute = () => {
+		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
+		return m ? {
+			kind: m[1],
+			type: m[1].toUpperCase(),
+			id: Number(m[2])
+		} : null;
 	};
-	var PROGRESS_KEYS = [
-		"num_watched_episodes",
-		"num_chapters_read",
-		"num_volumes_read"
-	];
-	function convertScore(score100) {
-		if (!score100 || score100 <= 0) return 0;
-		const mode = Settings.get("syncScoreRounding");
-		return Math.max(1, Math.min(10, (mode === "ceil" ? Math.ceil : mode === "floor" ? Math.floor : Math.round)(Number(score100) / 10)));
-	}
-	var fuzzyToMalDate = (f) => f && f.year && f.month && f.day ? `${f.year}-${String(f.month).padStart(2, "0")}-${String(f.day).padStart(2, "0")}` : null;
-	var count = (v) => Math.max(0, Math.floor(Number(v) || 0));
-	var normText = (s) => String(s || "").replace(/\r\n?/g, "\n").trim();
-	function buildPayload(type, e) {
-		const status = STATUS_MAP[type][e.status];
-		if (!status) return null;
-		const anime = type === "ANIME";
-		const p = { status };
-		const score = convertScore(e.score);
-		if (score > 0) p.score = score;
-		p[anime ? "is_rewatching" : "is_rereading"] = e.status === "REPEATING" ? "true" : "false";
-		if (anime) p.num_watched_episodes = count(e.progress);
-		else {
-			p.num_chapters_read = count(e.progress);
-			if (count(e.progressVolumes) > 0) p.num_volumes_read = count(e.progressVolumes);
-		}
-		const start = fuzzyToMalDate(e.startedAt);
-		const finish = fuzzyToMalDate(e.completedAt);
-		if (start) p.start_date = start;
-		if (finish) p.finish_date = finish;
-		if (count(e.repeat) > 0) p[anime ? "num_times_rewatched" : "num_times_reread"] = count(e.repeat);
-		const notes = normText(e.notes);
-		if (notes) p.comments = notes.slice(0, 2e3);
-		return p;
-	}
-	var malKey = (k) => k === "num_watched_episodes" ? "num_episodes_watched" : k;
-	var normDate = (v) => v ? String(v).slice(0, 10) : null;
-	var truthy = (v) => v === true || v === 1 || String(v).toLowerCase() === "true";
-	var NUMERIC = [
-		"score",
-		"num_watched_episodes",
-		"num_chapters_read",
-		"num_volumes_read",
-		"num_times_rewatched",
-		"num_times_reread"
-	];
-	function fieldEquals(key, desired, actual) {
-		if (key === "is_rewatching" || key === "is_rereading") return truthy(actual) === truthy(desired);
-		if (key === "start_date" || key === "finish_date") return normDate(actual) === normDate(desired);
-		if (key === "comments") return normText(actual) === normText(desired);
-		if (NUMERIC.includes(key)) return Number(actual || 0) === Number(desired || 0);
-		return String(actual ?? "") === String(desired ?? "");
-	}
-	function reconcile(type, entry, mal) {
-		const desired = buildPayload(type, entry);
-		if (!desired) return null;
-		const anime = type === "ANIME";
-		const pKey = anime ? "num_watched_episodes" : "num_chapters_read";
-		const rKey = anime ? "num_times_rewatched" : "num_times_reread";
-		const m = mal || {};
-		const rewatches = Math.max(Number(desired[rKey]) || 0, Number(m[rKey]) || 0);
-		if (rewatches > 0) desired[rKey] = rewatches;
-		if (entry.status === "COMPLETED") {
-			const completedCount = (key, total) => Number(total) > 0 ? Number(total) : Math.max(Number(desired[key]) || 0, Number(m[malKey(key)]) || 0);
-			desired[pKey] = completedCount(pKey, m.__total);
-			if (!anime) {
-				const vols = completedCount("num_volumes_read", m.__totalVolumes);
-				if (vols > 0) desired.num_volumes_read = vols;
-				else delete desired.num_volumes_read;
-			}
-			if (!(desired[pKey] > 0)) delete desired[pKey];
-		}
-		if (!mal) return desired;
-		const statusEq = fieldEquals("status", desired.status, m.status) || entry.status === "REPEATING" && truthy(m[anime ? "is_rewatching" : "is_rereading"]);
-		const patch = {};
-		for (const [k, v] of Object.entries(desired)) {
-			if (k === "status") {
-				if (!statusEq) patch.status = v;
-				continue;
-			}
-			if (!statusEq && PROGRESS_KEYS.includes(k) || !fieldEquals(k, v, m[malKey(k)])) patch[k] = v;
-		}
-		return patch;
-	}
-	function fallbackPatch(type, patch, mal, tried) {
-		if (!tried.has("dates")) {
-			tried.add("dates");
-			if ("start_date" in patch || "finish_date" in patch) {
-				const out = { ...patch };
-				delete out.start_date;
-				delete out.finish_date;
-				if (Object.keys(out).length) return out;
-			}
-		}
-		if (!tried.has("cap")) {
-			tried.add("cap");
-			const caps = type === "ANIME" ? { num_watched_episodes: mal?.__total } : {
-				num_chapters_read: mal?.__total,
-				num_volumes_read: mal?.__totalVolumes
-			};
-			const out = { ...patch };
-			let changed = false;
-			for (const [k, cap] of Object.entries(caps)) if (cap > 0 && Number(out[k]) > cap) {
-				out[k] = cap;
-				changed = true;
-			}
-			if (changed) return out;
+	function findExactText(text) {
+		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+		for (let t; t = walker.nextNode();) {
+			if (t.nodeValue?.trim() !== text || !t.parentElement) continue;
+			let el = t.parentElement;
+			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent?.trim() === text) el = el.parentElement;
+			return el;
 		}
 		return null;
 	}
-	var STATUS_LABEL = {
-		watching: "Watching",
-		reading: "Reading",
-		completed: "Completed",
-		on_hold: "On hold",
-		dropped: "Dropped",
-		plan_to_watch: "Plan to watch",
-		plan_to_read: "Plan to read"
-	};
-	function describePatch(type, patch) {
-		const parts = [];
-		if ("status" in patch) parts.push(`status: ${STATUS_LABEL[patch.status] || patch.status}`);
-		if ("score" in patch) parts.push(`score: ${patch.score}/10`);
-		const progressKey = type === "ANIME" ? "num_watched_episodes" : "num_chapters_read";
-		if (progressKey in patch) parts.push(`${type === "ANIME" ? "episodes" : "chapters"}: ${patch[progressKey]}`);
-		if (type === "MANGA" && "num_volumes_read" in patch) parts.push(`volumes: ${patch.num_volumes_read}`);
-		if ("num_times_rewatched" in patch) parts.push(`rewatches: ${patch.num_times_rewatched}`);
-		if ("num_times_reread" in patch) parts.push(`rereads: ${patch.num_times_reread}`);
-		if ("start_date" in patch) parts.push(`start date: ${patch.start_date}`);
-		if ("finish_date" in patch) parts.push(`finish date: ${patch.finish_date}`);
-		if ("comments" in patch) parts.push("notes");
-		return parts.join("; ") || "MAL-normalised fields";
-	}
-	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
-	function getManualOverrides() {
-		let raw = store$1.get(PREFIX + OVERRIDES_SETTING_KEY, {});
-		if (typeof raw === "string") try {
-			raw = JSON.parse(raw);
-		} catch (_) {
-			raw = {};
-		}
-		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-		return raw;
-	}
-	function saveManualOverrides(overrides) {
-		store$1.set(PREFIX + OVERRIDES_SETTING_KEY, overrides);
-		const hiddenInput = document.querySelector(`#ala-settings-panel input[data-key="${OVERRIDES_SETTING_KEY}"]`);
-		if (hiddenInput) hiddenInput.value = JSON.stringify(overrides);
-	}
-	function getOverride(mediaId) {
-		if (!mediaId) return void 0;
-		return getManualOverrides()[String(mediaId)];
-	}
-	function setOverride(mediaId, data) {
-		if (!mediaId) return;
-		const all = { ...getManualOverrides() };
-		all[String(mediaId)] = {
-			...data,
-			updatedAt: data.updatedAt || Date.now()
+	defineFeature({
+		id: "behindDots",
+		key: "behindDotsEnabled",
+		section: "AniList Enhancements",
+		def: false,
+		legacy: ["behindDotsEnabled", "airingProgressIndicatorEnabled"],
+		title: "Airing Progress Indicator",
+		help: "Show an orange indicator when your watched episode count is behind the number of aired episodes."
+	}, () => {
+		const CLASS = "daiya-behind-dot";
+		const ORANGE = "rgb(255, 152, 0)";
+		const NO_AIRING_TTL = 216e5;
+		const AIRING_GRACE = 3e4;
+		const ERROR_RETRY = 3e5;
+		const PRUNE_AGE = 2592e6;
+		const BATCH = 25;
+		const CONCURRENCY = 4;
+		const OPTIMISTIC_TTL = 2500;
+		const QUERY = "query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }";
+		addStyle("daiya-behind-dot-css", `
+      .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
+      .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`);
+		const cacheStore = persistent("daiya-anilist-airing-cache-v5", (d) => {
+			for (const id of Object.keys(d)) if (!(Date.now() - Number(d[id]?.updated) < PRUNE_AGE)) delete d[id];
+		});
+		const cache = cacheStore.data;
+		const pending = new Set();
+		const active = new Set();
+		const timers = new Map();
+		const optimistic = new Map();
+		let running = 0;
+		const onListPage = () => location.pathname.includes("/animelist");
+		const idOf = (entry) => entry.querySelector("a[href*=\"/anime/\"]")?.getAttribute("href")?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] || null;
+		const needsFetch = (id) => {
+			const d = cache[id];
+			return !d || !Number.isFinite(d.nextCheck) || Date.now() >= d.nextCheck;
 		};
-		saveManualOverrides(all);
-	}
-	function removeOverride(mediaId) {
-		if (!mediaId) return;
-		const all = { ...getManualOverrides() };
-		delete all[String(mediaId)];
-		saveManualOverrides(all);
-	}
-	function isIgnored(mediaId) {
-		const o = getOverride(mediaId);
-		return !!o && o.malId === 0;
-	}
-	function getEffectiveMalId(mediaId, defaultMalId) {
-		const o = getOverride(mediaId);
-		if (o) return o.malId > 0 ? o.malId : null;
-		return defaultMalId && defaultMalId > 0 ? defaultMalId : null;
-	}
-	function validateOverrides(raw) {
-		let data = raw;
-		if (typeof data === "string") {
-			const trimmed = data.trim();
-			if (!trimmed) return {
-				valid: true,
-				overrides: {}
-			};
-			try {
-				data = JSON.parse(trimmed);
-			} catch (e) {
-				return {
-					valid: false,
-					error: `Invalid JSON syntax: ${e.message}`
-				};
+		const sectionIsWatching = (wrap) => clean(wrap?.querySelector(".section-name")?.textContent) === "Watching";
+		function watchingEntries() {
+			const out = [];
+			for (const wrap of document.querySelectorAll(".list-wrap")) if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll(".list-entries .entry")));
+			return out;
+		}
+		function progressOf(entry) {
+			const m = entry.querySelector(".progress")?.textContent?.match(/^\s*(\d+)/) || entry.textContent?.match(/(?:^|\s)(\d+)\s*\/\s*(?:\d+|\?)(?:\s|$)/);
+			return m ? Number(m[1]) : null;
+		}
+		function releasingDot(entry) {
+			const fast = entry.querySelector(".release-status.RELEASING");
+			if (fast) return fast;
+			for (const el of entry.querySelectorAll(".release-status, [class*='release-status']")) {
+				if (/\bRELEASING\b/i.test(typeof el.className === "string" ? el.className : "")) return el;
+				if (/^releasing$/i.test((el.getAttribute("aria-label") || el.getAttribute("title") || "").trim())) return el;
 			}
+			return null;
 		}
-		if (!data || typeof data !== "object" || Array.isArray(data)) return {
-			valid: false,
-			error: "Overrides must be a JSON object mapping AniList media IDs to override records."
-		};
-		const result = {};
-		for (const [key, val] of Object.entries(data)) {
-			const id = Number(key);
-			if (!id || id <= 0 || !Number.isInteger(id)) return {
-				valid: false,
-				error: `Invalid AniList media ID key "${key}". Keys must be positive integers.`
-			};
-			if (!val || typeof val !== "object" || Array.isArray(val)) return {
-				valid: false,
-				error: `Invalid entry for media ID ${id}: expected an object.`
-			};
-			const o = val;
-			if (typeof o.malId !== "number" || o.malId < 0 || !Number.isInteger(o.malId)) return {
-				valid: false,
-				error: `Invalid malId for media ID ${id}: must be a non-negative integer (0 for AniList-only).`
-			};
-			const typeStr = String(o.type || "ANIME").toUpperCase();
-			if (typeStr !== "ANIME" && typeStr !== "MANGA") return {
-				valid: false,
-				error: `Invalid type for media ID ${id}: must be "ANIME" or "MANGA".`
-			};
-			const entry = {
-				malId: o.malId,
-				type: typeStr,
-				title: typeof o.title === "string" && o.title.trim() ? o.title.trim() : `Media #${id}`,
-				updatedAt: typeof o.updatedAt === "number" && o.updatedAt > 0 ? o.updatedAt : Date.now()
-			};
-			if (typeof o.cover === "string" && o.cover.trim()) entry.cover = o.cover.trim();
-			result[String(id)] = entry;
-		}
-		return {
-			valid: true,
-			overrides: result
-		};
-	}
-	function importOverrides(raw, mode = "replace") {
-		const check = validateOverrides(raw);
-		if (!check.valid || !check.overrides) return {
-			success: false,
-			error: check.error || "Validation failed"
-		};
-		saveManualOverrides(mode === "merge" ? {
-			...getManualOverrides(),
-			...check.overrides
-		} : check.overrides);
-		return {
-			success: true,
-			count: Object.keys(check.overrides).length
-		};
-	}
-	var STALE_MS = 864e5;
-	var refreshing = false;
-	async function refreshStaleOverrides() {
-		if (refreshing) return;
-		const initial = getManualOverrides();
-		const keys = Object.keys(initial);
-		if (!keys.length) return;
-		const staleIds = keys.map(Number).filter((id) => id > 0 && (!initial[String(id)]?.updatedAt || Date.now() - initial[String(id)].updatedAt > STALE_MS)).sort((a, b) => (initial[String(a)]?.updatedAt || 0) - (initial[String(b)]?.updatedAt || 0));
-		if (!staleIds.length) return;
-		refreshing = true;
-		try {
-			for (let i = 0; i < staleIds.length; i += 50) {
-				const batch = staleIds.slice(i, i + 50);
-				const q = `query ($ids: [Int]) {
-        Page(page: 1, perPage: 50) {
-          media(id_in: $ids) {
-            id
-            type
-            title { userPreferred english romaji }
-            coverImage { medium }
-          }
-        }
-      }`;
-				try {
-					const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
-					const current = getManualOverrides();
-					let changed = false;
-					for (const m of list) {
-						const idStr = String(m.id);
-						if (current[idStr]) {
-							const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[idStr].title;
-							const cover = m.coverImage?.medium || current[idStr].cover;
-							const type = m.type === "MANGA" ? "MANGA" : "ANIME";
-							if (current[idStr].title !== t || current[idStr].cover !== cover || current[idStr].type !== type || !current[idStr].updatedAt) changed = true;
-							current[idStr] = {
-								...current[idStr],
-								title: t,
-								cover,
-								type,
-								updatedAt: Date.now()
-							};
-						}
-					}
-					if (changed) saveManualOverrides(current);
-				} catch (e) {
-					console.warn("[AL-Additions] Failed to refresh stale overrides batch:", e);
-					break;
+		function updateEntry(entry) {
+			if (!entry || !entry.isConnected) return null;
+			const dot = releasingDot(entry);
+			if (!dot || !sectionIsWatching(entry.closest(".list-wrap"))) return null;
+			const id = idOf(entry);
+			if (!id) return null;
+			const watched = progressOf(entry);
+			if (!Number.isFinite(watched)) {
+				dot.classList.remove(CLASS);
+				return id;
+			}
+			const opt = optimistic.get(id);
+			if (opt) {
+				if (Date.now() >= opt.expiresAt || watched !== null && watched >= opt.target) optimistic.delete(id);
+				else {
+					dot.classList.remove(CLASS);
+					return id;
 				}
 			}
-		} finally {
-			refreshing = false;
+			const data = cache[id];
+			const behind = !!data && Number.isFinite(data.aired) && watched !== null && watched < data.aired;
+			if (dot.classList.contains(CLASS) !== behind) dot.classList.toggle(CLASS, behind);
+			return id;
 		}
-	}
-	function buildTitleIndex(mal) {
-		const idx = new Map();
-		for (const [id, st] of Object.entries(mal)) {
-			const t = strictTitle(st?.__malTitle);
-			if (!t) continue;
-			idx.set(t, idx.has(t) && idx.get(t) !== Number(id) ? -1 : Number(id));
+		function scanAll() {
+			if (!onListPage()) return;
+			const stale = new Set();
+			for (const entry of watchingEntries()) {
+				const id = updateEntry(entry);
+				if (id && needsFetch(id)) stale.add(id);
+			}
+			queueIDs(stale);
 		}
-		return idx;
-	}
-	function localMatch(entry, idx) {
-		let match = null;
-		for (const t of entry.titles) {
-			const id = idx.get(t);
-			if (id == null) continue;
-			if (id === -1 || match && match !== id) return null;
-			match = id;
+		function repaint(ids) {
+			for (const entry of watchingEntries()) {
+				const id = idOf(entry);
+				if (id && ids.has(id)) updateEntry(entry);
+			}
 		}
-		return match;
-	}
-	function cachedId(type, entry) {
-		const override = getOverride(entry.mediaId);
-		if (override) return override.malId;
-		const c = stores[type].ids.data[entry.mediaId];
-		const fresh = !!c && Date.now() - c.t < 6048e5;
-		if (entry.idMal) return fresh && c.bad === entry.idMal ? 0 : entry.idMal;
-		if (c && c.m > 0) return c.m;
-		return fresh ? 0 : void 0;
-	}
-	function rememberId(type, mediaId, malId, bad) {
-		if (!mediaId) return;
-		const rec = {
-			m: malId || 0,
-			t: Date.now()
-		};
-		if (bad) rec.bad = bad;
-		stores[type].ids.data[mediaId] = rec;
-		stores[type].ids.save();
-	}
-	async function runPool(items, worker, concurrency) {
-		let i = 0;
-		let failure = null;
-		const lane = async () => {
-			while (!failure && i < items.length) {
-				const n = i++;
-				try {
-					await worker(items[n], n);
-				} catch (e) {
-					failure = failure || e;
-				}
-			}
-		};
-		await Promise.all(Array.from({ length: Math.min(concurrency, items.length) || 1 }, lane));
-		if (failure) throw failure;
-	}
-	async function resolveTargets(type, entries, mal, c) {
-		const idx = buildTitleIndex(mal);
-		const targets = [];
-		const pending = [];
-		const unmatched = [];
-		for (const entry of entries) {
-			if (!entry.mediaId || !STATUS_MAP[type][entry.status]) {
-				c.skipped++;
-				markDone();
-				continue;
-			}
-			const override = getOverride(entry.mediaId);
-			if (override) {
-				if (override.malId === 0) {
-					c.skipped++;
-					markDone();
-					continue;
-				}
-				if (override.malId > 0) {
-					targets.push({
-						entry,
-						malId: override.malId,
-						explicit: true
-					});
-					continue;
-				}
-			}
-			const id = cachedId(type, entry);
-			if (id !== void 0 && id > 0) {
-				targets.push({
-					entry,
-					malId: id,
-					explicit: id === entry.idMal
-				});
-				continue;
-			}
-			if (id === 0) {
-				c.unmatched++;
-				markDone();
-				continue;
-			}
-			const local = localMatch(entry, idx);
-			if (local && local > 0) {
-				rememberId(type, entry.mediaId, local);
-				targets.push({
-					entry,
-					malId: local,
-					explicit: false
-				});
-				continue;
-			}
-			pending.push(entry);
-		}
-		await runPool(pending, async (entry) => {
-			let id = 0;
-			try {
-				id = await searchMalId(type, entry);
-			} catch (e) {
-				if (e.auth || e.cancelled) throw e;
-				c.transient++;
-				markDone();
-				log(`${typeLabel(type)}: could not look up "${entry.title.slice(0, 45)}" on MAL: ${e.message}. Will retry on a later sync.`, "warn");
-				return;
-			}
-			rememberId(type, entry.mediaId, id);
-			if (id > 0) targets.push({
-				entry,
-				malId: id,
-				explicit: false
-			});
-			else {
-				c.unmatched++;
-				unmatched.push(entry.title);
-				markDone();
-			}
-		}, 3);
-		if (unmatched.length) log(`${typeLabel(type)}: no confident MAL match for ${unmatched.length} title(s). Skipped: ${unmatched.slice(0, 5).map((t) => `"${t.slice(0, 30)}"`).join(", ")}${unmatched.length > 5 ? `, plus ${unmatched.length - 5} more` : ""}. Use Full Resync after adding/fixing MAL entries.`, "warn");
-		return targets;
-	}
-	function dedupeTargets(type, targets, c) {
-		const best = new Map();
-		for (const t of targets) {
-			const cur = best.get(t.malId);
-			if (!cur) {
-				best.set(t.malId, t);
-				continue;
-			}
-			const better = Number(t.explicit) - Number(cur.explicit) || t.entry.updatedAt - cur.entry.updatedAt;
-			const loser = better > 0 ? cur : t;
-			if (better > 0) best.set(t.malId, t);
-			c.conflicts++;
-			markDone();
-			log(`${typeLabel(type)}: "${loser.entry.title.slice(0, 40)}" and another AniList entry resolve to MAL ID ${loser.malId}; only one can be synced, so the preferred entry wins.`, "warn");
-		}
-		return [...best.values()].sort((a, b) => b.entry.updatedAt - a.entry.updatedAt);
-	}
-	hooks.checkCancel = checkCancel;
-	var FULL_COMPARE_MS = 6048e5;
-	var BREAKER_MAX_TRIPS = 3;
-	var RETRY_AFTER_FAILURE_MS = 6e5;
-	var LIST_PATH_RE = /^\/user\/[^/]+\/(anime|manga)list/;
-	var onAniList = () => location.hostname === "anilist.co";
-	var ENTRY_FIELDS = "status score(format: POINT_100) progress progressVolumes repeat notes updatedAt startedAt { year month day } completedAt { year month day }";
-	var MEDIA_FIELDS = "id idMal startDate { year } synonyms title { userPreferred english romaji native }";
-	var toEntry = (row, media) => {
-		const t = media?.title || {};
-		return {
-			...row,
-			mediaId: Number(media?.id) || 0,
-			idMal: Number(media?.idMal) || 0,
-			title: t.userPreferred || t.romaji || t.english || String(media?.id || ""),
-			queryTitles: [...new Set([
-				t.userPreferred,
-				t.romaji,
-				t.english
-			].map((s) => String(s || "").trim()).filter(Boolean))],
-			titles: [...new Set([
-				t.userPreferred,
-				t.english,
-				t.romaji,
-				t.native,
-				...media?.synonyms || []
-			].map(strictTitle).filter(Boolean))],
-			startYear: Number(media?.startDate?.year) || 0,
-			updatedAt: Number(row.updatedAt) || 0
-		};
-	};
-	async function alFetchIncremental(userId, type, since) {
-		const q = `query ($userId: Int, $type: MediaType, $page: Int) { Page(page: $page, perPage: 50) {
-    pageInfo { hasNextPage } mediaList(userId: $userId, type: $type, sort: UPDATED_TIME_DESC) { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } }`;
-		const out = [];
-		for (let page = 1; page <= 400; page++) {
-			checkCancel();
-			const p = (await AniList.query(q, {
-				userId,
-				type,
-				page
-			}, { forceFresh: true }))?.Page;
-			let stop = false;
-			for (const row of p?.mediaList || []) {
-				if ((Number(row.updatedAt) || 0) < since) {
-					stop = true;
-					break;
-				}
-				out.push(toEntry(row, row.media));
-			}
-			if (stop || !p?.pageInfo?.hasNextPage) break;
-		}
-		return out;
-	}
-	async function alFetchAll(userId, type) {
-		const q = `query ($userId: Int, $type: MediaType, $chunk: Int, $perChunk: Int) {
-    MediaListCollection(userId: $userId, type: $type, chunk: $chunk, perChunk: $perChunk) { hasNextChunk lists { entries { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } } }`;
-		const out = [];
-		const seen = new Set();
-		for (let chunk = 1; chunk <= 100; chunk++) {
-			checkCancel();
-			const c = (await AniList.query(q, {
-				userId,
-				type,
-				chunk,
-				perChunk: 500
-			}, { forceFresh: true }))?.MediaListCollection;
-			for (const list of c?.lists || []) for (const row of list.entries || []) {
-				const e = toEntry(row, row.media);
-				if (!e.mediaId || seen.has(e.mediaId)) continue;
-				seen.add(e.mediaId);
-				out.push(e);
-			}
-			if (!c?.hasNextChunk) return out;
-		}
-		throw new Error("AniList collection exceeded the 100-chunk safety limit.");
-	}
-	var isTransient = (e) => !(e && (e.status === 400 || e.status === 404 || e.status === 403 && !e.html));
-	async function pushJob(type, { entry, malId, patch }, mal, c) {
-		const settled = stores[type].settled;
-		try {
-			await breaker.wait(checkCancel);
-			checkCancel();
-			if (breaker.trips >= BREAKER_MAX_TRIPS) {
-				const e = new Error("MAL keeps failing — stopping this run; it will retry automatically.");
-				e.abort = true;
-				throw e;
-			}
-			let sent = patch;
-			let res;
-			const tried = new Set();
-			for (;;) try {
-				res = await malUpdateEntry(type, malId, sent);
-				break;
-			} catch (e) {
-				const alt = e.status === 400 ? fallbackPatch(type, sent, mal[malId], tried) : null;
-				if (!alt) throw e;
-				const removedDates = ["start_date", "finish_date"].some((k) => k in sent && !(k in alt));
-				const cappedKeys = Object.keys(alt).filter((k) => PROGRESS_KEYS.includes(k) && Number(alt[k]) < Number(sent[k]));
-				const recovery = cappedKeys.length ? `retrying with ${cappedKeys.map((k) => `${k.replace("num_watched_episodes", "episode count").replace("num_chapters_read", "chapter count").replace("num_volumes_read", "volume count")} capped to ${alt[k]} (MAL's listed total)`).join(", ")}` : removedDates ? "retrying without the optional start/finish dates" : "retrying with a reduced update";
-				log(`${typeLabel(type)}: MAL rejected the update for "${entry.title.slice(0, 45)}" (HTTP 400); ${recovery}.`, "warn");
-				sent = alt;
-			}
-			let stored = null;
-			try {
-				stored = JSON.parse(res.responseText);
-			} catch (_) {}
-			const base = mal[malId] || {
-				__total: 0,
-				__totalVolumes: 0,
-				__malTitle: ""
+		function makeEntry(media) {
+			const next = media.nextAiringEpisode;
+			const now = Date.now();
+			const base = {
+				status: media.status || null,
+				updated: now
 			};
-			const applied = Object.fromEntries(Object.entries(sent).map(([k, v]) => [malKey(k), v]));
-			const echoed = stored && typeof stored === "object" ? stored : {};
-			mal[malId] = {
+			if (!next || !Number.isFinite(Number(next.episode))) return {
 				...base,
-				...applied,
-				...echoed
+				aired: null,
+				nextEpisode: null,
+				nextCheck: now + NO_AIRING_TTL
 			};
-			const residual = stored ? reconcile(type, entry, mal[malId]) : {};
-			if (residual && Object.keys(residual).length) {
-				settled.data[malId] = [
-					entry.updatedAt,
-					JSON.stringify(residual),
-					Date.now()
-				];
-				log(`${typeLabel(type)}: MAL saved "${entry.title.slice(0, 55)}" but did not retain ${describePatch(type, residual)}. It may be normalising or rejecting that value; unchanged values are suppressed to avoid a write loop. Full Resync clears this suppression.`, "warn");
-			} else delete settled.data[malId];
-			settled.save();
-			c.pushed++;
-			log(`${typeLabel(type)}: updated "${entry.title.slice(0, 55)}" — ${describePatch(type, sent)}.`, "success");
-			breaker.ok();
-		} catch (e) {
-			if (e.cancelled || e.auth || e.abort) throw e;
-			if (isTransient(e)) {
-				c.transient++;
-				breaker.fail();
-				log(`${typeLabel(type)}: "${entry.title.slice(0, 45)}" — temporary MAL error: ${e.message}. Will retry on the next sync.`, "warn");
-			} else {
-				c.permanent++;
-				log(`${typeLabel(type)}: "${entry.title.slice(0, 45)}" — MAL rejected this update (${e.message}). It will be skipped until the AniList entry changes or Full Resync is run.`, "warn");
-				settled.data[malId] = [
-					entry.updatedAt,
-					"dead",
-					Date.now()
-				];
-				settled.save();
-				if (e.status === 404) rememberId(type, entry.mediaId, 0, malId);
-			}
-		} finally {
-			markDone();
-		}
-	}
-	function planJobs(type, targets, mal, c) {
-		const settled = stores[type].settled.data;
-		const jobs = [];
-		for (const t of targets) {
-			checkCancel();
-			const patch = reconcile(type, t.entry, mal[t.malId]);
-			if (!patch) {
-				c.skipped++;
-				markDone();
-				continue;
-			}
-			if (!Object.keys(patch).length) {
-				c.unchanged++;
-				markDone();
-				continue;
-			}
-			const s = settled[t.malId];
-			if (s && s[0] === t.entry.updatedAt && (s[1] === "dead" || s[1] === JSON.stringify(patch))) {
-				c.settled++;
-				markDone();
-				continue;
-			}
-			progress.changed++;
-			jobs.push({
-				...t,
-				patch
-			});
-		}
-		return jobs;
-	}
-	async function syncType(type, userId, full) {
-		const label = typeLabel(type);
-		const c = {
-			pushed: 0,
-			deleted: 0,
-			unchanged: 0,
-			settled: 0,
-			skipped: 0,
-			unmatched: 0,
-			conflicts: 0,
-			transient: 0,
-			permanent: 0
-		};
-		const lastSync = Number(store$1.get(`last_sync_${type}`, 0)) || 0;
-		const fullPass = full || !lastSync || Date.now() - Number(store$1.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
-		const isExact = Settings.get("syncMode") === "exact";
-		log(`${label}: starting ${fullPass ? "full library comparison" : "incremental sync"} — fetching AniList entries and your current MAL list.`);
-		logDebug("[SYNC]", `${label}: starting sync pass:`, {
-			fullPass,
-			lastSync,
-			isExact
-		});
-		const [entries, mal] = await Promise.all([fullPass ? alFetchAll(userId, type) : alFetchIncremental(userId, type, lastSync), malFetchList(type)]);
-		const newest = entries.reduce((m, e) => Math.max(m, e.updatedAt), 0);
-		log(`${label}: found ${entries.length} AniList entr${entries.length === 1 ? "y" : "ies"} to check and ${Object.keys(mal).length} entr${Object.keys(mal).length === 1 ? "y" : "ies"} on MAL.`);
-		logDebug("[SYNC]", `${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
-		progress.total += entries.length;
-		progress.phase = "pushing";
-		notifyProgress(true);
-		if (isExact) {
-			const pending = getPendingDeletes().filter((p) => p.type === type);
-			for (const p of pending) {
-				checkCancel();
-				if (entries.some((e) => e.mediaId === p.mediaId)) {
-					removePendingDelete(p.mediaId, type);
-					log(`${label}: deletion cancelled for "${p.title}" — entry is present on AniList.`);
-					continue;
-				}
-				let malId = p.malId || cachedId(type, { mediaId: p.mediaId }) || stores[type].ids.data[p.mediaId]?.m;
-				if (!malId && mal) {
-					for (const [id, st] of Object.entries(mal)) if (st.__malTitle && p.title && strictTitle(st.__malTitle) === strictTitle(p.title)) {
-						malId = Number(id);
-						break;
-					}
-				}
-				if (malId) try {
-					await breaker.wait(checkCancel);
-					checkCancel();
-					await malDeleteEntry(type, Number(malId));
-					if (mal[malId]) delete mal[malId];
-					c.deleted++;
-					log(`${label}: deleted "${p.title}" from MAL (Exact Match).`, "success");
-				} catch (e) {
-					if (e.status === 404) {
-						if (mal[malId]) delete mal[malId];
-					} else log(`${label}: failed to delete "${p.title}" from MAL: ${e.message}`, "warn");
-				}
-				else log(`${label}: could not find MAL ID for deleted title "${p.title}".`, "warn");
-				removePendingDelete(p.mediaId, type);
-			}
-		}
-		const targets = dedupeTargets(type, await resolveTargets(type, entries, mal, c), c);
-		await runPool(planJobs(type, targets, mal, c), (job) => pushJob(type, job, mal, c), Math.max(2, Math.min(8, Math.round(malLimiter.rate / 20))));
-		if (isExact && fullPass) {
-			const targetMalIds = new Set(targets.map((t) => t.malId));
-			const orphanedMalIds = Object.keys(mal).map(Number).filter((id) => id > 0 && !targetMalIds.has(id));
-			const MAX_AUTO_DELETE_LIMIT = 10;
-			if (orphanedMalIds.length > MAX_AUTO_DELETE_LIMIT) log(`${label}: Exact Match found ${orphanedMalIds.length} MAL entries not present on AniList, exceeding the safety limit of ${MAX_AUTO_DELETE_LIMIT}. Auto-delete was skipped to protect your MAL list from potential API data loss.`, "warn");
-			else if (orphanedMalIds.length > 0) for (const orphanId of orphanedMalIds) {
-				checkCancel();
-				const orphanTitle = mal[orphanId]?.__malTitle || `MAL ID ${orphanId}`;
-				try {
-					await breaker.wait(checkCancel);
-					checkCancel();
-					await malDeleteEntry(type, orphanId);
-					delete mal[orphanId];
-					c.deleted++;
-					log(`${label}: deleted "${orphanTitle}" from MAL (not on AniList).`, "success");
-				} catch (e) {
-					if (e.status === 404) delete mal[orphanId];
-					else log(`${label}: failed to delete "${orphanTitle}" from MAL: ${e.message}`, "warn");
-				}
-			}
-		}
-		const ok = c.transient === 0;
-		if (ok) {
-			if (fullPass) {
-				store$1.set(`last_compare_${type}`, Date.now());
-				store$1.set(`last_sync_${type}`, Math.max(1, newest));
-			} else if (newest) store$1.set(`last_sync_${type}`, Math.max(newest, lastSync));
-			store$1.set(`last_run_${type}`, Math.floor(Date.now() / 1e3));
-		}
-		log(`${label}: finished — ${[
-			`${c.pushed} updated`,
-			c.deleted ? `${c.deleted} deleted` : null,
-			`${c.unchanged + c.settled} already in sync`,
-			c.unmatched && `${c.unmatched} unmatched`,
-			c.skipped && `${c.skipped} skipped`,
-			c.conflicts && `${c.conflicts} conflicts`,
-			c.permanent && `${c.permanent} rejected`,
-			c.transient && `${c.transient} failed (will retry)`
-		].filter(Boolean).join(", ")}${c.transient ? "; this type will be retried" : ""}.`, c.transient || c.permanent || c.unmatched || c.conflicts ? "warn" : "success");
-		return { ok };
-	}
-	var currentListType = () => {
-		const m = location.pathname.match(LIST_PATH_RE);
-		return m ? m[1].toUpperCase() : null;
-	};
-	async function confirmDecimalScores() {
-		if ((await tryOr(() => AniList.viewer()))?.scoreFormat !== "POINT_10_DECIMAL") return true;
-		const mode = Settings.get("syncScoreRounding");
-		return confirm(`Decimal scores detected on AniList.\n\nMAL uses whole-number scores, so your decimal scores will be converted using: ${{
-			ceil: "Ceil (always up)",
-			round: "Round (.1–.4 down, .5–.9 up)",
-			floor: "Floor (always down)"
-		}[mode]}.\n${{
-			ceil: "7.4 → 8 and 7.5 → 8",
-			round: "7.4 → 7 and 7.5 → 8",
-			floor: "7.4 → 7 and 7.5 → 7"
-		}[mode]}.\n\nThis will affect the scores written to MAL during this first sync.\n\nContinue with the first sync?`);
-	}
-	function handleAuthFailure(e) {
-		if (e.auth === "AniList") AniList.clearViewer();
-		else clearMalAuth();
-		log(`⚠ ${e.message}`);
-	}
-	async function runSync(types = [...TYPES], opts = {}) {
-		logDebug("[SYNC]", "runSync initiated for types:", types, "options:", opts);
-		if (syncStatus.syncing) return log("Sync already running.");
-		if (!onAniList()) return log("Open AniList to run a sync — it needs your AniList login.", "warn");
-		if (!AniList.hasAuth()) return log("Log in to AniList first.");
-		if (!store$1.get("mal_token")) return log("Connect MyAnimeList first.");
-		if (navigator.onLine === false) return log("You appear to be offline; sync skipped.");
-		syncStatus.syncing = true;
-		syncStatus.cancelled = false;
-		if (!await acquireLock()) {
-			syncStatus.syncing = false;
-			return log("Another tab is already syncing, skipped.");
-		}
-		breaker.reset();
-		store$1.set("sync_onboarded", true);
-		Object.assign(progress, {
-			phase: "fetching",
-			done: 0,
-			total: 0,
-			changed: 0
-		});
-		notifyState();
-		const startedAt = Date.now();
-		let allOk = false;
-		try {
-			const viewer = await AniList.viewer();
-			if (!viewer) throw authError("AniList", "AniList is not logged in.");
-			const me = await malWhoAmI();
-			const account = `${viewer.id}:${me.id}`;
-			const prev = store$1.get("sync_account", null);
-			if (prev && prev !== account) {
-				log("Connected account changed. Resetting sync watermarks and per-account suppression state.", "warn");
-				resetAccountState();
-			}
-			store$1.set("sync_account", account);
-			if (opts.full) for (const t of types) clearCache(stores[t].settled);
-			const results = await Promise.allSettled(types.map((t) => syncType(t, viewer.id, !!opts.full)));
-			const fatal = results.find((r) => r.status === "rejected" && (r.reason?.auth || r.reason?.abort));
-			for (const r of results) {
-				if (r.status !== "rejected") continue;
-				const e = r.reason || {};
-				if (e.cancelled) log("Sync stopped after the current request finished.", "warn");
-				else if (!e.auth) log(`Sync could not finish: ${e.message || e}`, "error");
-			}
-			if (fatal) {
-				if (fatal.reason.auth) handleAuthFailure(fatal.reason);
-				else log(`Sync stopped: ${fatal.reason.message}`, "error");
-			}
-			allOk = results.every((r) => r.status === "fulfilled" && r.value.ok);
-			if (allOk) {
-				store$1.del("sync_retry_at");
-				log(`Synced in ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
-			} else if (!syncStatus.cancelled) store$1.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
-		} catch (e) {
-			if (e.auth) handleAuthFailure(e);
-			else log("Sync could not finish: " + (e.message || e), "error");
-			if (!e.auth && !syncStatus.cancelled) store$1.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
-		} finally {
-			for (const t of types) {
-				stores[t].ids.save();
-				stores[t].settled.save();
-			}
-			releaseLock();
-			syncStatus.syncing = false;
-			syncStatus.cancelled = false;
-			progress.phase = "idle";
-			notifyState();
-		}
-	}
-	async function startManualSync() {
-		if (syncStatus.syncing) return;
-		const pageType = currentListType();
-		const types = pageType ? [pageType] : [...TYPES];
-		if (types.some((t) => !store$1.get(`last_sync_${t}`, 0)) && !await confirmDecimalScores()) return log("First sync cancelled.");
-		runSync(types);
-	}
-	async function fullResync() {
-		if (syncStatus.syncing) return;
-		if (!store$1.get("sync_onboarded", false) && !await confirmDecimalScores()) return log("Full resync cancelled.");
-		for (const t of TYPES) clearCache(stores[t].ids);
-		log("Full Resync started: checking the entire AniList library and clearing cached match/suppression decisions.");
-		runSync([...TYPES], { full: true });
-	}
-	function maybeAutoSync() {
-		if (!onAniList() || !Settings.get("syncEnabled") || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
-		if (!AniList.hasAuth() || !store$1.get("mal_token")) return;
-		const retryAt = Number(store$1.get("sync_retry_at", 0)) || 0;
-		if (retryAt > 0 && Date.now() < retryAt) return;
-		const dueTypes = [];
-		for (const t of TYPES) {
-			const isAnime = t === "ANIME";
-			if (!Settings.get(isAnime ? "syncAutoAnime" : "syncAutoManga")) continue;
-			const hours = Math.max(1, Number(Settings.get(isAnime ? "syncIntervalAnime" : "syncIntervalManga")) || 6);
-			const last = Number(store$1.get(`last_run_${t}`, 0)) || 0;
-			if (retryAt > 0 ? !last || Date.now() - last * 1e3 >= RETRY_AFTER_FAILURE_MS : !last || Date.now() - last * 1e3 >= hours * 36e5) dueTypes.push(t);
-		}
-		if (dueTypes.length > 0) {
-			const labels = dueTypes.map(typeLabel).join(" & ");
-			log(retryAt > 0 ? `Auto-sync (${labels}): retrying after an earlier failure…` : `Auto-sync (${labels}): interval reached or initial sync…`);
-			syncStatus.autoSyncRetryAfter = Date.now() + 3e5;
-			runSync(dueTypes);
-		} else if (retryAt > 0 && Date.now() >= retryAt) store$1.del("sync_retry_at");
-	}
-	var MODAL_CSS = `
-  #ala-pwd-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(5, 12, 20, 0.75);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
-    z-index: 100005;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-    box-sizing: border-box;
-  }
-  .ala-pwd-sheet {
-    width: 100%;
-    max-width: 420px;
-    background: rgb(var(--color-foreground, 31, 38, 49));
-    color: rgb(var(--color-text, 240, 243, 246));
-    border-radius: 10px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    animation: alaModalPop 0.15s ease-out;
-  }
-  @keyframes alaModalPop {
-    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
-    to { opacity: 1; transform: scale(1) translateY(0); }
-  }
-  .ala-pwd-desc {
-    margin: 0 0 16px;
-    font-size: 13px;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-    line-height: 1.45;
-  }
-  .ala-pwd-group {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .ala-pwd-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-  }
-  .ala-pwd-input-wrap {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: 100%;
-  }
-  .ala-pwd-field {
-    width: 100%;
-    height: 40px;
-    padding: 0 38px 0 12px;
-    border-radius: 6px;
-    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
-    background: rgb(var(--color-background, 15, 23, 42));
-    color: rgb(var(--color-text, 240, 243, 246));
-    font: inherit;
-    font-size: 14px;
-    box-sizing: border-box;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-  .ala-pwd-field:focus {
-    outline: none;
-    border-color: rgb(var(--color-blue, 61, 180, 242));
-    box-shadow: 0 0 0 2px rgba(var(--color-blue, 61, 180, 242), 0.25);
-  }
-  .ala-pwd-toggle {
-    position: absolute;
-    right: 4px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 32px;
-    height: 32px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: color 0.15s, background 0.15s;
-  }
-  .ala-pwd-toggle:hover {
-    color: rgb(var(--color-text, 240, 243, 246));
-    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.12);
-  }
-  .ala-pwd-error {
-    margin-top: 12px;
-    padding: 8px 12px;
-    border-radius: 6px;
-    background: rgba(var(--color-red, 224, 85, 85), 0.12);
-    border: 1px solid rgba(var(--color-red, 224, 85, 85), 0.3);
-    color: rgb(var(--color-red, 224, 85, 85));
-    font-size: 12px;
-    font-weight: 500;
-  }
-`;
-	var EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
-	var EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
-	function promptPasswordModal(options) {
-		return new Promise((resolve) => {
-			addStyle("ala-pwd-modal-style", MODAL_CSS);
-			const existing = document.getElementById("ala-pwd-backdrop");
-			if (existing) existing.remove();
-			const backdrop = document.createElement("div");
-			backdrop.id = "ala-pwd-backdrop";
-			backdrop.innerHTML = `
-      <div class="ala-sheet ala-pwd-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-pwd-title">
-        <header class="ala-sheet-head">
-          <h2 id="ala-pwd-title">${esc(options.title)}</h2>
-          <button class="ala-icon-btn ala-pwd-btn-close" type="button" aria-label="Close">✕</button>
-        </header>
-        <div class="ala-sheet-body">
-          ${options.description ? `<p class="ala-pwd-desc">${esc(options.description)}</p>` : ""}
-          <div class="ala-pwd-group">
-            <label for="ala-pwd-input-main" class="ala-pwd-label">Password</label>
-            <div class="ala-pwd-input-wrap">
-              <input
-                id="ala-pwd-input-main"
-                class="ala-pwd-field"
-                type="password"
-                placeholder="${esc(options.placeholder || "Enter password")}"
-                autocomplete="${options.confirm ? "new-password" : "current-password"}"
-              />
-              <button type="button" class="ala-pwd-toggle" title="Show / Hide password" aria-label="Toggle password visibility">
-                ${EYE_OPEN}
-              </button>
-            </div>
-          </div>
-          ${options.confirm ? `
-            <div class="ala-pwd-group" style="margin-top:12px">
-              <label for="ala-pwd-input-confirm" class="ala-pwd-label">Confirm Password</label>
-              <div class="ala-pwd-input-wrap">
-                <input
-                  id="ala-pwd-input-confirm"
-                  class="ala-pwd-field"
-                  type="password"
-                  placeholder="Re-enter password"
-                  autocomplete="new-password"
-                />
-              </div>
-            </div>
-          ` : ""}
-          <div class="ala-pwd-error" id="ala-pwd-err" style="display:none"></div>
-        </div>
-        <footer class="ala-sheet-foot">
-          <button class="ala-btn ala-btn--primary" id="ala-pwd-btn-submit" type="button">
-            ${esc(options.submitText || "Submit")}
-          </button>
-          <button class="ala-btn" id="ala-pwd-btn-cancel" type="button">
-            ${esc(options.cancelText || "Cancel")}
-          </button>
-        </footer>
-      </div>
-    `;
-			document.body.appendChild(backdrop);
-			const input = backdrop.querySelector("#ala-pwd-input-main");
-			const confirmInput = backdrop.querySelector("#ala-pwd-input-confirm");
-			const toggleBtn = backdrop.querySelector(".ala-pwd-toggle");
-			const errBox = backdrop.querySelector("#ala-pwd-err");
-			const submitBtn = backdrop.querySelector("#ala-pwd-btn-submit");
-			const cancelBtn = backdrop.querySelector("#ala-pwd-btn-cancel");
-			const closeBtn = backdrop.querySelector(".ala-pwd-btn-close");
-			let isVisible = false;
-			const cleanup = () => {
-				document.removeEventListener("keydown", onKeyDown);
-				backdrop.remove();
+			const timeUntil = Number(next.timeUntilAiring);
+			const airingAt = Number(next.airingAt);
+			const nextCheck = Number.isFinite(timeUntil) ? now + Math.max(0, timeUntil) * 1e3 + AIRING_GRACE : Number.isFinite(airingAt) ? airingAt * 1e3 + AIRING_GRACE : now + NO_AIRING_TTL;
+			return {
+				...base,
+				aired: Math.max(0, Math.floor(Number(next.episode)) - 1),
+				nextEpisode: Number(next.episode),
+				nextCheck
 			};
-			const cancel = () => {
-				cleanup();
-				resolve(null);
-			};
-			const submit = () => {
-				const val = input.value;
-				if (!options.allowEmpty && !val.trim()) {
-					errBox.textContent = "Password cannot be empty.";
-					errBox.style.display = "block";
-					input.focus();
-					return;
-				}
-				if (options.confirm && confirmInput) {
-					if (val && val !== confirmInput.value) {
-						errBox.textContent = "Passwords do not match.";
-						errBox.style.display = "block";
-						confirmInput.focus();
-						return;
-					}
-				}
-				cleanup();
-				resolve(val);
-			};
-			toggleBtn.addEventListener("click", () => {
-				isVisible = !isVisible;
-				const type = isVisible ? "text" : "password";
-				input.type = type;
-				if (confirmInput) confirmInput.type = type;
-				toggleBtn.innerHTML = isVisible ? EYE_OFF : EYE_OPEN;
-				toggleBtn.title = isVisible ? "Hide password" : "Show password";
-			});
-			submitBtn.addEventListener("click", submit);
-			cancelBtn.addEventListener("click", cancel);
-			closeBtn.addEventListener("click", cancel);
-			backdrop.addEventListener("click", (e) => {
-				if (e.target === backdrop) cancel();
-			});
-			const onKeyDown = (e) => {
-				if (e.key === "Escape") {
-					e.preventDefault();
-					cancel();
-				} else if (e.key === "Enter") {
-					e.preventDefault();
-					submit();
-				}
-			};
-			document.addEventListener("keydown", onKeyDown);
-			setTimeout(() => input.focus(), 50);
-		});
-	}
-	var BACKUP_FILENAME = "al-additions.settings";
-	var MAGIC_PLAIN = new Uint8Array([
-		65,
-		76,
-		65,
-		83
-	]);
-	var MAGIC_ENCRYPTED = new Uint8Array([
-		65,
-		76,
-		65,
-		69
-	]);
-	var SENSITIVE_KEYS = [
-		"mal_code_verifier",
-		"mal_token",
-		"mal_refresh_token",
-		"mal_expires_at"
-	];
-	var SESSION_CACHE_KEYS = [
-		"al_token",
-		"al_username",
-		"al_user_id",
-		"al_score_format"
-	];
-	var PBKDF2_ITERATIONS = 1e5;
-	function matchesMagic(bytes, magic) {
-		if (bytes.length < magic.length) return false;
-		for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic[i]) return false;
-		return true;
-	}
-	function base64ToUint8(b64) {
-		const binary = atob(b64.replace(/\s+/g, ""));
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-		return bytes;
-	}
-	async function deriveAesKey(password, salt) {
-		const enc = new TextEncoder();
-		const baseKey = await window.crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
-		return window.crypto.subtle.deriveKey({
-			name: "PBKDF2",
-			salt,
-			iterations: PBKDF2_ITERATIONS,
-			hash: "SHA-256"
-		}, baseKey, {
-			name: "AES-GCM",
-			length: 256
-		}, false, ["encrypt", "decrypt"]);
-	}
-	async function decryptData(cryptoData, password) {
-		const salt = base64ToUint8(cryptoData.salt);
-		const iv = base64ToUint8(cryptoData.iv);
-		const ciphertext = base64ToUint8(cryptoData.ciphertext);
-		const key = await deriveAesKey(password, salt);
-		const decryptedBuffer = await window.crypto.subtle.decrypt({
-			name: "AES-GCM",
-			iv
-		}, key, ciphertext);
-		return new TextDecoder().decode(decryptedBuffer);
-	}
-	async function compressDeflateRaw(data) {
-		const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-		const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
-		const buffer = await new Response(stream).arrayBuffer();
-		return new Uint8Array(buffer);
-	}
-	async function decompressDeflateRaw(data) {
-		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-		return await new Response(stream).text();
-	}
-	async function decompressGzip(data) {
-		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"));
-		return await new Response(stream).text();
-	}
-	async function createBackup(includeSecrets, password, overrides) {
-		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
-		const data = {};
-		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(PREFIX + r.key, r.def);
-			data[r.key] = rawVal;
 		}
-		if (includeSecrets) for (const key of SENSITIVE_KEYS) {
-			const val = store$1.get(key, void 0);
-			if (val !== void 0 && val !== null) data[key] = val;
+		function scheduleRefresh(id, at) {
+			const existing = timers.get(id);
+			if (existing) clearTimeout(existing);
+			timers.delete(id);
+			if (!Number.isFinite(at)) return;
+			const t = setTimeout(() => {
+				timers.delete(id);
+				queueIDs([id]);
+				repaint(new Set([id]));
+			}, Math.min(Math.max(0, at - Date.now()), 2147483647));
+			timers.set(id, t);
 		}
-		const plainPayload = {
-			version: 1,
-			exportedAt: Date.now(),
-			data
-		};
-		const jsonBytes = new TextEncoder().encode(JSON.stringify(plainPayload));
-		const compressedBytes = await compressDeflateRaw(jsonBytes);
-		if (password && password.trim().length > 0) {
-			const salt = window.crypto.getRandomValues(new Uint8Array(16));
-			const iv = window.crypto.getRandomValues(new Uint8Array(12));
-			const key = await deriveAesKey(password, salt);
-			const ciphertextBuffer = await window.crypto.subtle.encrypt({
-				name: "AES-GCM",
-				iv
-			}, key, compressedBytes);
-			const ciphertext = new Uint8Array(ciphertextBuffer);
-			const out = new Uint8Array(33 + ciphertext.length);
-			out.set(MAGIC_ENCRYPTED, 0);
-			out[4] = 1;
-			out.set(salt, 5);
-			out.set(iv, 21);
-			out.set(ciphertext, 33);
-			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
-			return out;
-		} else {
-			const out = new Uint8Array(5 + compressedBytes.length);
-			out.set(MAGIC_PLAIN, 0);
-			out[4] = 1;
-			out.set(compressedBytes, 5);
-			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
-			return out;
-		}
-	}
-	function createRawBackup(overrides) {
-		const data = {};
-		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(PREFIX + r.key, r.def);
-			data[r.key] = rawVal;
-		}
-		for (const key of SENSITIVE_KEYS) {
-			const val = store$1.get(key, void 0);
-			if (val !== void 0 && val !== null) data[key] = val;
-		}
-		return JSON.stringify({
-			version: 1,
-			exportedAt: Date.now(),
-			data
-		}, null, 2);
-	}
-	function downloadBackupFile(bytes, filename = BACKUP_FILENAME) {
-		const blob = new Blob([bytes], { type: "application/octet-stream" });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = filename;
-		document.body.appendChild(a);
-		a.click();
-		a.remove();
-		setTimeout(() => URL.revokeObjectURL(url), 1e3);
-	}
-	function applyVersion1Settings(data) {
-		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
-		let applied = 0;
-		let secretsApplied = 0;
-		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
-		for (const [key, rawValue] of Object.entries(data)) {
-			if (SESSION_CACHE_KEYS.includes(key)) continue;
-			if (SENSITIVE_KEYS.includes(key)) {
-				if (rawValue !== void 0 && rawValue !== null) {
-					store$1.set(key, rawValue);
-					secretsApplied++;
-				}
-				continue;
-			}
-			const settingKey = key.startsWith("ala_setting_") ? key.slice(PREFIX.length) : key;
-			const r = ROWS[settingKey];
-			if (r) {
-				const normalized = TYPES$1[r.type].normalize(rawValue, r);
-				store$1.set(PREFIX + settingKey, normalized);
-				applied++;
-			}
-		}
-		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
-		return {
-			applied,
-			secretsApplied
-		};
-	}
-	async function handleLegacyJsonBackup(jsonText, promptPassword) {
-		let payload;
-		try {
-			payload = JSON.parse(jsonText);
-		} catch {
-			throw new Error("Invalid backup file: corrupted JSON content.");
-		}
-		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
-		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
-		if (payload.encrypted === true) {
-			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
-			const password = await promptPassword("Enter password to decrypt your settings backup:");
-			if (password === null) return {
-				applied: 0,
-				secretsApplied: 0,
-				cancelled: true
-			};
-			if (!password) throw new Error("Password cannot be empty.");
-			let decryptedText;
+		async function updateBatch(ids) {
+			const returned = new Set();
 			try {
-				decryptedText = await decryptData(payload.crypto, password);
-			} catch {
-				throw new Error("Incorrect password or corrupted backup file.");
-			}
-			let data;
-			try {
-				data = JSON.parse(decryptedText);
-			} catch {
-				throw new Error("Decrypted content is not valid JSON.");
-			}
-			return applyVersion1Settings(data);
-		}
-		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
-	}
-	async function importBackup(fileInput, customPromptPassword) {
-		let bytes;
-		if (typeof fileInput === "string") bytes = new TextEncoder().encode(fileInput);
-		else bytes = fileInput;
-		if (!bytes || bytes.length === 0) throw new Error("Backup file is empty.");
-		const promptPassword = customPromptPassword || ((hint) => promptPasswordModal({
-			title: "Decrypt Settings Backup",
-			description: hint || "Enter your password to decrypt your settings backup:",
-			submitText: "Decrypt & Restore",
-			allowEmpty: false,
-			confirm: false,
-			placeholder: "Enter backup password"
-		}));
-		if (matchesMagic(bytes, MAGIC_ENCRYPTED)) {
-			if (bytes.length < 49) throw new Error("Invalid encrypted backup file: file is truncated.");
-			const version = bytes[4];
-			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
-			const password = await promptPassword("Enter password to decrypt your settings backup:");
-			if (password === null) return {
-				applied: 0,
-				secretsApplied: 0,
-				cancelled: true
-			};
-			if (!password) throw new Error("Password cannot be empty.");
-			const salt = bytes.subarray(5, 21);
-			const iv = bytes.subarray(21, 33);
-			const ciphertext = bytes.subarray(33);
-			const key = await deriveAesKey(password, salt);
-			let decryptedBuffer;
-			try {
-				decryptedBuffer = await window.crypto.subtle.decrypt({
-					name: "AES-GCM",
-					iv
-				}, key, ciphertext);
-			} catch {
-				throw new Error("Incorrect password or corrupted backup file.");
-			}
-			let jsonText;
-			try {
-				jsonText = await decompressDeflateRaw(new Uint8Array(decryptedBuffer));
-			} catch {
-				throw new Error("Corrupted decrypted data: failed to decompress.");
-			}
-			let payload;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				throw new Error("Decrypted content is not valid JSON.");
-			}
-			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
-		}
-		if (matchesMagic(bytes, MAGIC_PLAIN)) {
-			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
-			const version = bytes[4];
-			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
-			let jsonText;
-			try {
-				jsonText = await decompressDeflateRaw(bytes.subarray(5));
-			} catch {
-				throw new Error("Corrupted backup file: failed to decompress.");
-			}
-			let payload;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				throw new Error("Corrupted backup file: invalid JSON content.");
-			}
-			logDebug("[CORE]", "Imported plain binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
-		}
-		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
-			let jsonText;
-			try {
-				jsonText = await decompressGzip(bytes);
-			} catch {
-				throw new Error("Corrupted or invalid GZIP backup file.");
-			}
-			logDebug("[CORE]", "Imported legacy GZIP backup.");
-			return handleLegacyJsonBackup(jsonText, promptPassword);
-		}
-		let jsonText;
-		try {
-			jsonText = new TextDecoder().decode(bytes);
-		} catch {
-			throw new Error("Failed to decode backup file as UTF-8 text.");
-		}
-		logDebug("[CORE]", "Imported legacy JSON/text backup.");
-		return handleLegacyJsonBackup(jsonText, promptPassword);
-	}
-	async function readFileAsBytes(file) {
-		if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
-		return new Promise((resolve, reject) => {
-			const reader = new FileReader();
-			reader.onload = () => resolve(new Uint8Array(reader.result));
-			reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-			reader.readAsArrayBuffer(file);
-		});
-	}
-	var DEFAULT_TIERS = [
-		{
-			min: 95,
-			max: 100,
-			label: "S+",
-			color: "#FFD700",
-			textColor: "#000000"
-		},
-		{
-			min: 85,
-			max: 94.9,
-			label: "S",
-			color: "#ff7f00",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 75,
-			max: 84.9,
-			label: "A",
-			color: "#aa00ff",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 65,
-			max: 74.9,
-			label: "B",
-			color: "#007fff",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 55,
-			max: 64.9,
-			label: "C",
-			color: "#00aa00",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 41,
-			max: 54.9,
-			label: "D",
-			color: "#aaaaaa",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 0,
-			max: 40.9,
-			label: "F",
-			color: "#666666",
-			textColor: "#FFFFFF"
-		}
-	];
-	function getTier(rating, tiers) {
-		if (rating <= 0 || !Number.isFinite(rating)) return null;
-		for (const tier of tiers) if (rating >= tier.min && rating <= tier.max) return tier;
-		for (const tier of tiers) if (rating >= tier.min - .05 && rating <= tier.max + .05) return tier;
-		return null;
-	}
-	var NAMED_COLORS = new Set([
-		"black",
-		"white",
-		"gray",
-		"grey",
-		"silver",
-		"red",
-		"maroon",
-		"yellow",
-		"olive",
-		"lime",
-		"green",
-		"aqua",
-		"cyan",
-		"teal",
-		"blue",
-		"navy",
-		"fuchsia",
-		"magenta",
-		"purple",
-		"orange",
-		"gold",
-		"pink",
-		"brown",
-		"transparent"
-	]);
-	function isValidColor(color) {
-		if (typeof color !== "string") return false;
-		const s = color.trim();
-		if (!s) return false;
-		if (/^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return true;
-		if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
-		if (NAMED_COLORS.has(s.toLowerCase())) return true;
-		if (typeof CSS !== "undefined" && typeof CSS.supports === "function") try {
-			if (CSS.supports("color", s)) return true;
-		} catch (_) {}
-		if (typeof Option !== "undefined") try {
-			const opt = new Option();
-			opt.style.color = s;
-			return !!opt.style.color;
-		} catch (_) {}
-		return false;
-	}
-	function normalizeHexColor(color) {
-		const s = (color || "").trim();
-		const m3 = s.match(/^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/);
-		if (m3) return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`.toLowerCase();
-		if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
-		return s;
-	}
-	function validateTiers(input) {
-		if (!Array.isArray(input)) return {
-			valid: false,
-			error: "Tiers configuration must be an array."
-		};
-		if (input.length === 0) return {
-			valid: false,
-			error: "At least one tier must be defined."
-		};
-		const validated = [];
-		for (let i = 0; i < input.length; i++) {
-			const item = input[i];
-			const idx = i + 1;
-			if (!item || typeof item !== "object") return {
-				valid: false,
-				error: `Tier #${idx} is invalid (must be an object).`
-			};
-			const label = typeof item.label === "string" ? item.label.trim() : "";
-			if (!label) return {
-				valid: false,
-				error: `Tier #${idx} must have a non-empty label.`
-			};
-			if (label.length > 20) return {
-				valid: false,
-				error: `Tier "${label}" label is too long (maximum 20 characters).`
-			};
-			const min = typeof item.min === "number" ? item.min : parseFloat(item.min);
-			if (!Number.isFinite(min)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid min score (must be a number).`
-			};
-			if (min < 0 || min > 100) return {
-				valid: false,
-				error: `Tier "${label}" min score (${min}) must be between 0 and 100.`
-			};
-			const max = typeof item.max === "number" ? item.max : parseFloat(item.max);
-			if (!Number.isFinite(max)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid max score (must be a number).`
-			};
-			if (max < 0 || max > 100) return {
-				valid: false,
-				error: `Tier "${label}" max score (${max}) must be between 0 and 100.`
-			};
-			if (min > max) return {
-				valid: false,
-				error: `Tier "${label}" min score (${min}) cannot be greater than max score (${max}).`
-			};
-			const color = typeof item.color === "string" ? item.color.trim() : "";
-			if (!isValidColor(color)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid badge color: "${item.color}". Must be a valid hex or CSS color.`
-			};
-			const textColor = typeof item.textColor === "string" ? item.textColor.trim() : "";
-			if (!isValidColor(textColor)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid text color: "${item.textColor}". Must be a valid hex or CSS color.`
-			};
-			validated.push({
-				label,
-				min: Math.round(min * 100) / 100,
-				max: Math.round(max * 100) / 100,
-				color: normalizeHexColor(color),
-				textColor: normalizeHexColor(textColor)
-			});
-		}
-		return {
-			valid: true,
-			tiers: validated
-		};
-	}
-	var MODAL_ID$1 = "ala-overrides-backdrop";
-	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
-	addStyle("ala-overrides-style", `
-  #${MODAL_ID$1}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID$1} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  .ala-ov-sheet *{box-sizing:border-box}
-  .ala-ov-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  .ala-ov-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-ov-head h2{margin:0;font-size:18px;font-weight:600}
-  .ala-ov-body {flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable;}
-  .ala-ov-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-
-  .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
-  .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-  .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
-  .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
-
-  .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
-  .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
-  .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
-  .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
-  .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
-
-  .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
-  .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
-
-  .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
-  .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
-  .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
-
-  .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
-  .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
-  .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
-  .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
-  .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
-
-  .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-
-  .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
-  .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
-  .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-  .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
-  .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
-
-  .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
-  .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
-
-  .ala-ov-list{display:grid;gap:8px;min-width:0;}
-  .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
-  .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
-  .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
-  .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
-  .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
-  .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
-  .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
-  .ala-ov-item-meta a:hover{text-decoration:underline}
-  .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
-
-  .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
-
-  .ala-ov-audit-section{margin-bottom:20px}
-  .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
-
-  @media (max-width:700px){
-    #${MODAL_ID$1}{align-items:flex-end;padding:0}
-    #${MODAL_ID$1} .ala-ov-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #${QUICK_MODAL_ID}{align-items:flex-end;padding:0}
-    #${QUICK_MODAL_ID} .ala-ov-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-
-    .ala-ov-head{padding:14px 16px}
-    .ala-ov-body{padding:12px 16px}
-    .ala-ov-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
-    .ala-ov-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
-
-    .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
-    .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
-
-    .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
-    .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
-    .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
-    .ala-ov-filter-group{width:100%;flex-wrap:wrap}
-
-    .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
-    .ala-ov-item-cover{width:36px;height:48px}
-    .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
-    .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
-    .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
-    .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
-  }
-  `);
-	function extractAlId(raw) {
-		const str = String(raw || "").trim();
-		const match = str.match(/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
-		return match ? Number(match[1]) : 0;
-	}
-	function extractMalId(raw) {
-		const str = String(raw || "").trim();
-		const match = str.match(/myanimelist\.net\/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
-		return match ? Number(match[1]) : 0;
-	}
-	function matchesSearch(text, id, extraId, query) {
-		if (!query) return true;
-		const q = query.trim().toLowerCase();
-		if (!q) return true;
-		if (String(id).includes(q)) return true;
-		if (extraId != null && String(extraId).includes(q)) return true;
-		const t = (text || "").toLowerCase();
-		if (t.includes(q)) return true;
-		let qIdx = 0;
-		for (let i = 0; i < t.length && qIdx < q.length; i++) if (t[i] === q[qIdx]) qIdx++;
-		return qIdx === q.length;
-	}
-	var unmatchedMetaCache = new Map();
-	async function batchFetchUnmatchedMeta(ids) {
-		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
-		if (!needed.length) return;
-		for (let i = 0; i < needed.length; i += 50) {
-			const batch = needed.slice(i, i + 50);
-			const q = `query ($ids: [Int]) {
-      Page(page: 1, perPage: 50) {
-        media(id_in: $ids) {
-          id
-          title { userPreferred english romaji }
-          coverImage { medium }
-        }
-      }
-    }`;
-			try {
-				const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
-				for (const m of list) {
-					const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
-					unmatchedMetaCache.set(m.id, {
-						title: t,
-						cover: m.coverImage?.medium
-					});
+				const data = await AniList.query(QUERY, { ids: ids.map(Number) });
+				for (const m of data?.Page?.media || []) {
+					const id = String(m.id);
+					returned.add(id);
+					cache[id] = makeEntry(m);
+					scheduleRefresh(id, cache[id].nextCheck);
 				}
-			} catch (e) {
-				console.warn("[AL-Additions] Failed to batch fetch unmatched metadata:", e);
-				break;
-			}
-		}
-	}
-	async function openQuickOverrideModal(mediaId, mediaType = "ANIME") {
-		const existing = document.getElementById(QUICK_MODAL_ID);
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = QUICK_MODAL_ID;
-		const existingOverride = getManualOverrides()[String(mediaId)];
-		backdrop.innerHTML = `
-    <div class="ala-ov-sheet ala-ov-quick-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-qo-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-qo-modal-title">Set MAL Mapping</h2>
-        <button class="ala-icon-btn ala-qo-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div id="ala-qo-preview" class="ala-ov-preview">
-          <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
-        </div>
-
-        <div class="ala-ov-field">
-          <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
-          <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-        </div>
-
-        <div class="ala-ov-form-actions">
-          <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
-          <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
-          ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
-        </div>
-      </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-qo-close" type="button">Cancel</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const close = () => backdrop.remove();
-		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
-		});
-		const previewBox = backdrop.querySelector("#ala-qo-preview");
-		const malInput = backdrop.querySelector("#ala-qo-mal-input");
-		const saveBtn = backdrop.querySelector("#ala-qo-btn-save");
-		const ignoreBtn = backdrop.querySelector("#ala-qo-btn-ignore");
-		const removeBtn = backdrop.querySelector("#ala-qo-btn-remove");
-		if (existingOverride && existingOverride.malId > 0) malInput.value = String(existingOverride.malId);
-		let loadedTitle = existingOverride?.title || `Media #${mediaId}`;
-		let loadedCover = existingOverride?.cover;
-		let loadedType = existingOverride?.type || mediaType;
-		let detectedMalId;
-		const q = `query ($id: Int) {
-    Media(id: $id) {
-      id
-      idMal
-      type
-      title { userPreferred english romaji }
-      coverImage { medium }
-    }
-  }`;
-		try {
-			const m = (await AniList.query(q, { id: mediaId }))?.Media;
-			if (m) {
-				loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
-				loadedCover = m.coverImage?.medium || loadedCover;
-				loadedType = m.type === "MANGA" ? "MANGA" : "ANIME";
-				detectedMalId = Number(m.idMal) || void 0;
-			}
-		} catch (_) {}
-		const isIgnored = existingOverride && existingOverride.malId === 0;
-		const isCustom = existingOverride && existingOverride.malId > 0;
-		previewBox.innerHTML = `
-    ${loadedCover ? `<img class="ala-ov-preview-cover" src="${loadedCover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
-    <div class="ala-ov-preview-info">
-      <div class="ala-ov-preview-title">${loadedTitle}</div>
-      <div class="ala-ov-preview-meta">
-        <span class="ala-ov-badge ${loadedType === "MANGA" ? "ala-ov-badge--manga" : ""}">${loadedType}</span>
-        ${isIgnored ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>` : isCustom ? `<span>Overridden to MAL ID: <b>${existingOverride.malId}</b></span>` : detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
-      </div>
-    </div>
-  `;
-		if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
-		saveBtn.addEventListener("click", () => {
-			let malId = extractMalId(malInput.value);
-			if (!malId && detectedMalId) malId = detectedMalId;
-			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
-			setOverride(mediaId, {
-				malId,
-				type: loadedType,
-				title: loadedTitle,
-				cover: loadedCover
-			});
-			close();
-		});
-		ignoreBtn.addEventListener("click", () => {
-			setOverride(mediaId, {
-				malId: 0,
-				type: loadedType,
-				title: loadedTitle,
-				cover: loadedCover
-			});
-			close();
-		});
-		removeBtn?.addEventListener("click", () => {
-			removeOverride(mediaId);
-			close();
-		});
-	}
-	function openOverridesModal() {
-		const existing = document.getElementById(MODAL_ID$1);
-		if (existing) existing.remove();
-		refreshStaleOverrides().then(() => {
-			if (document.getElementById(MODAL_ID$1)) renderList();
-		});
-		const backdrop = document.createElement("div");
-		backdrop.id = MODAL_ID$1;
-		backdrop.innerHTML = `
-    <div class="ala-ov-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-ov-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-ov-modal-title">Manual Mappings & Sync Audit</h2>
-        <button class="ala-icon-btn ala-ov-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div class="ala-ov-tabs">
-          <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
-          <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
-          <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
-        </div>
-
-        <div id="ala-ov-view-overrides">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
-            <div class="ala-ov-field">
-              <label for="ala-ov-al-input">AniList Media ID or URL</label>
-              <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
-            </div>
-
-            <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
-
-            <div class="ala-ov-field">
-              <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
-              <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-            </div>
-
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
-            </div>
-          </div>
-
-          <div class="ala-ov-controls">
-            <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
-            <div class="ala-ov-filter-groups">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Status:</span>
-                <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
-                <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
-              </div>
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
-              </div>
-            </div>
-          </div>
-
-          <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
-          <div id="ala-ov-list" class="ala-ov-list"></div>
-        </div>
-
-        <div id="ala-ov-view-audit" style="display:none">
-          <div class="ala-ov-audit-section">
-            <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
-            <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
-              <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
-          </div>
-
-          <div class="ala-ov-audit-section" style="margin-top:24px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
-              <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
-            </div>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
-            <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
-              <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
-          </div>
-        </div>
-
-        <div id="ala-ov-view-json" style="display:none">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
-              View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
-            </p>
-            <div class="ala-ov-field">
-              <label for="ala-ov-json-textarea">Configuration JSON</label>
-              <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
-            </div>
-            <div id="ala-ov-json-status" class="ala-ov-status"></div>
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-btn--primary ala-ov-close" type="button">Done</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const close = () => backdrop.remove();
-		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
-		});
-		const tabs = backdrop.querySelectorAll(".ala-ov-tab");
-		const viewOverrides = backdrop.querySelector("#ala-ov-view-overrides");
-		const viewAudit = backdrop.querySelector("#ala-ov-view-audit");
-		const viewJson = backdrop.querySelector("#ala-ov-view-json");
-		tabs.forEach((t) => {
-			t.addEventListener("click", () => {
-				tabs.forEach((o) => o.classList.toggle("is-active", o === t));
-				const target = t.dataset.tab;
-				viewOverrides.style.display = target === "overrides" ? "block" : "none";
-				viewAudit.style.display = target === "audit" ? "block" : "none";
-				viewJson.style.display = target === "json" ? "block" : "none";
-				if (target === "audit") renderAudit();
-				else if (target === "overrides") renderList();
-				else if (target === "json") renderJsonView();
-			});
-		});
-		let activePreview = null;
-		let statusFilter = "all";
-		let typeFilter = "all";
-		let searchQuery = "";
-		const alInput = backdrop.querySelector("#ala-ov-al-input");
-		const malInput = backdrop.querySelector("#ala-ov-mal-input");
-		const previewBox = backdrop.querySelector("#ala-ov-preview");
-		const listContainer = backdrop.querySelector("#ala-ov-list");
-		const countLabel = backdrop.querySelector("#ala-ov-count");
-		const searchInput = backdrop.querySelector("#ala-ov-search");
-		const updatePreviewUI = (loading = false) => {
-			if (loading) {
-				previewBox.style.display = "flex";
-				previewBox.innerHTML = `<span style="font-size:12px;color:rgb(var(--color-text-lighter))">Looking up AniList entry...</span>`;
-				return;
-			}
-			if (!activePreview) {
-				previewBox.style.display = "none";
-				previewBox.innerHTML = "";
-				malInput.placeholder = "e.g. 16498 or https://myanimelist.net/anime/16498";
-				return;
-			}
-			const { type, title, cover, detectedMalId } = activePreview;
-			previewBox.style.display = "flex";
-			previewBox.innerHTML = `
-      ${cover ? `<img class="ala-ov-preview-cover" src="${cover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
-      <div class="ala-ov-preview-info">
-        <div class="ala-ov-preview-title">${title}</div>
-        <div class="ala-ov-preview-meta">
-          <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
-          ${detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
-        </div>
-      </div>
-    `;
-			if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
-		};
-		let lookupTimer = 0;
-		const doLookup = async (id) => {
-			if (!id) {
-				activePreview = null;
-				updatePreviewUI();
-				return;
-			}
-			const existing = getManualOverrides()[String(id)];
-			if (existing) {
-				activePreview = {
-					mediaId: id,
-					type: existing.type,
-					title: existing.title,
-					cover: existing.cover,
-					detectedMalId: existing.malId > 0 ? existing.malId : void 0
+			} catch (_) {}
+			const retryAt = Date.now() + ERROR_RETRY;
+			for (const id of ids) {
+				if (returned.has(id)) continue;
+				const ex = cache[id];
+				if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
+				else cache[id] = {
+					aired: null,
+					nextEpisode: null,
+					status: null,
+					nextCheck: retryAt,
+					updated: Date.now()
 				};
-				if (existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
-				updatePreviewUI();
-			} else updatePreviewUI(true);
-			const q = `query ($id: Int) {
-      Media(id: $id) {
-        id
-        idMal
-        type
-        title { userPreferred english romaji }
-        coverImage { medium }
-      }
-    }`;
-			try {
-				const res = await AniList.query(q, { id });
-				if (extractAlId(alInput.value) !== id) return;
-				const m = res?.Media;
-				if (!m) {
-					if (!existing) {
-						activePreview = null;
-						updatePreviewUI();
-					}
-					return;
-				}
-				const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
-				activePreview = {
-					mediaId: m.id,
-					type: m.type === "MANGA" ? "MANGA" : "ANIME",
-					title: t,
-					cover: m.coverImage?.medium || existing?.cover,
-					detectedMalId: Number(m.idMal) || void 0
-				};
-				updatePreviewUI();
-				if (existing && existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
-			} catch (_) {
-				if (!existing && extractAlId(alInput.value) === id) {
-					activePreview = null;
-					updatePreviewUI();
-				}
+				scheduleRefresh(id, retryAt);
 			}
+			cacheStore.save();
+			if (returned.size) repaint(returned);
+		}
+		function queueIDs(ids) {
+			for (const raw of ids) {
+				const id = String(raw);
+				if (!active.has(id)) pending.add(id);
+			}
+			while (running < CONCURRENCY && pending.size) {
+				const batch = [];
+				for (const id of pending) {
+					pending.delete(id);
+					active.add(id);
+					batch.push(id);
+					if (batch.length >= BATCH) break;
+				}
+				running++;
+				updateBatch(batch).catch((e) => console.error("[AL-Additions] airing batch", e)).finally(() => {
+					batch.forEach((id) => active.delete(id));
+					running--;
+					queueIDs([]);
+				});
+			}
+		}
+		const dirty = new Set();
+		let fullScan = false;
+		let raf = 0;
+		function flush() {
+			raf = 0;
+			if (!onListPage()) {
+				dirty.clear();
+				fullScan = false;
+				return;
+			}
+			if (fullScan) {
+				fullScan = false;
+				dirty.clear();
+				scanAll();
+				return;
+			}
+			const stale = new Set();
+			for (const entry of dirty) {
+				const id = updateEntry(entry);
+				if (id && needsFetch(id)) stale.add(id);
+			}
+			dirty.clear();
+			queueIDs(stale);
+		}
+		const mark = () => {
+			if (!raf) raf = requestAnimationFrame(flush);
 		};
-		alInput.addEventListener("input", () => {
-			clearTimeout(lookupTimer);
-			lookupTimer = setTimeout(() => {
-				const id = extractAlId(alInput.value);
-				doLookup(id);
-			}, 300);
+		const refresh = debounce(scanAll, 100);
+		Core.onBodyMutation((muts) => {
+			if (!onListPage()) return;
+			for (const m of muts) {
+				const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
+				if (own) {
+					dirty.add(own);
+					mark();
+				}
+				for (const n of Array.from(m.addedNodes)) {
+					if (n.nodeType !== 1) continue;
+					const el = n;
+					if (el.matches(".entry")) dirty.add(el);
+					else {
+						el.querySelectorAll(".entry").forEach((e) => dirty.add(e));
+						if (el.matches(".list-wrap, .section-name") || el.querySelector(".section-name")) fullScan = true;
+					}
+					mark();
+				}
+			}
 		});
-		const saveBtn = backdrop.querySelector("#ala-ov-btn-save");
-		const ignoreBtn = backdrop.querySelector("#ala-ov-btn-ignore");
-		const clearBtn = backdrop.querySelector("#ala-ov-btn-clear");
-		const clearForm = () => {
-			clearTimeout(lookupTimer);
-			alInput.value = "";
-			malInput.value = "";
-			activePreview = null;
-			updatePreviewUI();
+		Core.onNavigate(() => {
+			if (onListPage()) {
+				fullScan = true;
+				mark();
+				refresh();
+			}
+		});
+		const isIncrease = (el) => {
+			for (let n = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
+				const label = `${n.getAttribute?.("aria-label") || ""} ${n.getAttribute?.("title") || ""}`.trim().toLowerCase();
+				if (/increase|increment|add episode|add chapter|next episode|next chapter/.test(label)) return true;
+				const text = (n.textContent || "").trim();
+				if (text === "+" || text === "+1") return true;
+			}
+			return false;
 		};
-		clearBtn.addEventListener("click", clearForm);
-		saveBtn.addEventListener("click", () => {
-			const id = activePreview?.mediaId || extractAlId(alInput.value);
-			if (!id) return alert("Please enter a valid AniList ID or URL.");
-			let malId = extractMalId(malInput.value);
-			if (!malId && activePreview?.detectedMalId) malId = activePreview.detectedMalId;
-			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
-			const existing = getManualOverrides()[String(id)];
-			const title = activePreview?.title || existing?.title || `Media #${id}`;
-			const cover = activePreview?.cover || existing?.cover;
-			const type = activePreview?.type || existing?.type || "ANIME";
-			setOverride(id, {
-				malId,
-				type,
-				title,
-				cover
-			});
-			clearForm();
-			renderList();
-			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
-				const m = res?.Media;
-				if (m) {
-					const current = getManualOverrides();
-					if (current[String(id)]) {
-						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-						const c = m.coverImage?.medium || current[String(id)].cover;
-						current[String(id)] = {
-							...current[String(id)],
-							title: t,
-							cover: c,
-							type: m.type === "MANGA" ? "MANGA" : "ANIME",
-							updatedAt: Date.now()
-						};
-						saveManualOverrides(current);
-						if (document.getElementById(MODAL_ID$1)) renderList();
-					}
-				}
-			}).catch(() => {});
-		});
-		ignoreBtn.addEventListener("click", () => {
-			const id = activePreview?.mediaId || extractAlId(alInput.value);
-			if (!id) return alert("Please enter a valid AniList ID or URL.");
-			const existing = getManualOverrides()[String(id)];
-			const title = activePreview?.title || existing?.title || `Media #${id}`;
-			const cover = activePreview?.cover || existing?.cover;
-			setOverride(id, {
-				malId: 0,
-				type: activePreview?.type || existing?.type || "ANIME",
-				title,
-				cover
-			});
-			clearForm();
-			renderList();
-			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
-				const m = res?.Media;
-				if (m) {
-					const current = getManualOverrides();
-					if (current[String(id)]) {
-						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-						const c = m.coverImage?.medium || current[String(id)].cover;
-						current[String(id)] = {
-							...current[String(id)],
-							title: t,
-							cover: c,
-							type: m.type === "MANGA" ? "MANGA" : "ANIME",
-							updatedAt: Date.now()
-						};
-						saveManualOverrides(current);
-						if (document.getElementById(MODAL_ID$1)) renderList();
-					}
-				}
-			}).catch(() => {});
-		});
-		backdrop.querySelectorAll("[data-status-filter]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-status-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
-				statusFilter = c.dataset.statusFilter || "all";
-				renderList();
-			});
-		});
-		backdrop.querySelectorAll("[data-type-filter]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-type-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
-				typeFilter = c.dataset.typeFilter || "all";
-				renderList();
-			});
-		});
-		let searchTimer = 0;
-		searchInput?.addEventListener("input", () => {
-			clearTimeout(searchTimer);
-			searchTimer = setTimeout(() => {
-				searchQuery = searchInput.value.trim();
-				renderList();
-			}, 150);
-		});
-		function renderList() {
-			const all = getManualOverrides();
-			const entries = Object.entries(all).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
-			const filtered = entries.filter(([idStr, o]) => {
-				if (statusFilter === "overrides" && o.malId === 0) return false;
-				if (statusFilter === "ignored" && o.malId > 0) return false;
-				if (typeFilter !== "all" && o.type.toLowerCase() !== typeFilter.toLowerCase()) return false;
-				if (searchQuery && !matchesSearch(o.title, idStr, o.malId > 0 ? o.malId : void 0, searchQuery)) return false;
-				return true;
-			});
-			countLabel.textContent = `Configured Entries (${entries.length}${filtered.length !== entries.length ? ` — showing ${filtered.length}` : ""})`;
-			if (!filtered.length) {
-				listContainer.innerHTML = `<div class="ala-ov-empty">No entries found matching this filter.</div>`;
-				return;
-			}
-			listContainer.innerHTML = filtered.map(([idStr, o]) => {
-				const id = Number(idStr);
-				const isIgnoredEntry = o.malId === 0;
-				const alUrl = `https://anilist.co/${o.type.toLowerCase()}/${id}`;
-				const malUrl = o.malId > 0 ? `https://myanimelist.net/${o.type.toLowerCase()}/${o.malId}` : "#";
-				return `
-        <div class="ala-ov-item" data-id="${id}">
-          ${o.cover ? `<img class="ala-ov-item-cover" src="${o.cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
-          <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="${alUrl}" target="_blank" rel="noopener" title="${o.title}">${o.title}</a>
-            <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${o.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${o.type}</span>
-              <span>AniList ID: <b>${id}</b></span>
-              ${isIgnoredEntry ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>` : `<span>MAL ID: <a href="${malUrl}" target="_blank" rel="noopener"><b>${o.malId}</b></a></span>`}
-            </div>
-          </div>
-          <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${id}">Edit</button>
-            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${id}" title="Remove override">✕</button>
-          </div>
-        </div>
-      `;
-			}).join("");
-			listContainer.querySelectorAll(".ala-ov-btn-del").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					if (id) {
-						removeOverride(id);
-						if (activePreview?.mediaId === id) clearForm();
-						renderList();
-					}
+		document.addEventListener("pointerdown", (e) => {
+			if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
+			const entry = e.target.closest(".entry");
+			const dot = entry && releasingDot(entry);
+			if (!dot || !dot.classList.contains(CLASS)) return;
+			const id = idOf(entry);
+			const data = id && cache[id];
+			const watched = progressOf(entry);
+			if (data && Number.isFinite(data.aired) && Number.isFinite(watched) && watched !== null && watched + 1 >= data.aired) {
+				optimistic.set(id, {
+					target: watched + 1,
+					expiresAt: Date.now() + OPTIMISTIC_TTL
 				});
-			});
-			listContainer.querySelectorAll(".ala-ov-btn-edit").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					if (id) {
-						alInput.value = String(id);
-						doLookup(id);
-						viewOverrides.scrollTop = 0;
-					}
-				});
-			});
-		}
-		let unmatchedTypeFilter = "all";
-		let unmatchedSearchQuery = "";
-		let orphansTypeFilter = "all";
-		let orphansSearchQuery = "";
-		const unmatchedControls = backdrop.querySelector("#ala-ov-unmatched-controls");
-		const unmatchedSearchInput = backdrop.querySelector("#ala-ov-unmatched-search");
-		backdrop.querySelectorAll("[data-unmatched-type]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-unmatched-type]").forEach((o) => o.classList.toggle("is-active", o === c));
-				unmatchedTypeFilter = c.dataset.unmatchedType || "all";
-				renderUnmatchedList();
-			});
+				dot.classList.remove(CLASS);
+			}
+		}, true);
+		for (const type of [
+			"click",
+			"input",
+			"change"
+		]) document.addEventListener(type, (e) => {
+			if (e.target instanceof Element && e.target.closest(".entry")) refresh();
+		}, true);
+		window.addEventListener("focus", refresh);
+		document.addEventListener("visibilitychange", () => {
+			if (!document.hidden) refresh();
 		});
-		let unmatchedSearchTimer = 0;
-		unmatchedSearchInput?.addEventListener("input", () => {
-			clearTimeout(unmatchedSearchTimer);
-			unmatchedSearchTimer = setTimeout(() => {
-				unmatchedSearchQuery = unmatchedSearchInput.value.trim();
-				renderUnmatchedList();
-			}, 150);
-		});
-		function getRawUnmatched() {
-			const configured = getManualOverrides();
-			const unmatched = [];
-			for (const t of ["ANIME", "MANGA"]) {
-				const data = stores[t].ids.data || {};
-				for (const [idStr, rec] of Object.entries(data)) {
-					const id = Number(idStr);
-					if (id > 0 && rec && rec.m === 0 && !configured[String(id)]) unmatched.push({
-						mediaId: id,
-						type: t
-					});
-				}
-			}
-			return unmatched;
-		}
-		function renderUnmatchedList() {
-			const unmatchedBox = backdrop.querySelector("#ala-ov-audit-unmatched");
-			const raw = getRawUnmatched();
-			if (!raw.length) {
-				unmatchedControls.style.display = "none";
-				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries found. All synced titles have MAL IDs or were resolved!</div>`;
-				return;
-			}
-			unmatchedControls.style.display = "flex";
-			const filtered = raw.filter(({ mediaId, type }) => {
-				if (unmatchedTypeFilter !== "all" && type.toLowerCase() !== unmatchedTypeFilter.toLowerCase()) return false;
-				const title = unmatchedMetaCache.get(mediaId)?.title || `Media #${mediaId}`;
-				if (unmatchedSearchQuery && !matchesSearch(title, mediaId, void 0, unmatchedSearchQuery)) return false;
-				return true;
-			});
-			if (!filtered.length) {
-				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries match this filter.</div>`;
-				return;
-			}
-			unmatchedBox.innerHTML = filtered.map(({ mediaId, type }) => {
-				const meta = unmatchedMetaCache.get(mediaId);
-				const title = meta?.title || `Media #${mediaId}`;
-				const cover = meta?.cover;
-				return `
-        <div class="ala-ov-item" data-id="${mediaId}">
-          ${cover ? `<img class="ala-ov-item-cover" src="${cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
-          <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://anilist.co/${type.toLowerCase()}/${mediaId}" target="_blank" rel="noopener" title="${title}">${title}</a>
-            <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
-              <span>AniList ID: <b>${mediaId}</b></span>
-            </div>
-          </div>
-          <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${mediaId}">Set MAL ID</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${mediaId}" data-type="${type}">Ignore</button>
-          </div>
-        </div>
-      `;
-			}).join("");
-			unmatchedBox.querySelectorAll(".ala-ov-audit-set").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					tabs[0].click();
-					alInput.value = String(id);
-					doLookup(id);
-				});
-			});
-			unmatchedBox.querySelectorAll(".ala-ov-audit-ignore").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					const type = btn.dataset.type || "ANIME";
-					const meta = unmatchedMetaCache.get(id);
-					setOverride(id, {
-						malId: 0,
-						type,
-						title: meta?.title || `Media #${id}`,
-						cover: meta?.cover
-					});
-					renderUnmatchedList();
-					renderList();
-				});
-			});
-		}
-		function renderAudit() {
-			renderUnmatchedList();
-			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
-			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds).then(() => {
-				renderUnmatchedList();
-			});
-			renderOrphansList();
-		}
-		let scannedOrphans = null;
-		const orphansControls = backdrop.querySelector("#ala-ov-orphans-controls");
-		const orphansSearchInput = backdrop.querySelector("#ala-ov-orphans-search");
-		backdrop.querySelectorAll("[data-orphans-type]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-orphans-type]").forEach((o) => o.classList.toggle("is-active", o === c));
-				orphansTypeFilter = c.dataset.orphansType || "all";
-				renderOrphansList();
-			});
-		});
-		let orphansSearchTimer = 0;
-		orphansSearchInput?.addEventListener("input", () => {
-			clearTimeout(orphansSearchTimer);
-			orphansSearchTimer = setTimeout(() => {
-				orphansSearchQuery = orphansSearchInput.value.trim();
-				renderOrphansList();
-			}, 150);
-		});
-		function renderOrphansList() {
-			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
-			if (!orphansBox) return;
-			if (scannedOrphans === null) {
-				orphansControls.style.display = "none";
-				orphansBox.innerHTML = `<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
-				return;
-			}
-			if (!scannedOrphans.length) {
-				orphansControls.style.display = "none";
-				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
-				return;
-			}
-			orphansControls.style.display = "flex";
-			const filtered = scannedOrphans.filter((item) => {
-				if (orphansTypeFilter !== "all" && item.type.toLowerCase() !== orphansTypeFilter.toLowerCase()) return false;
-				if (orphansSearchQuery && !matchesSearch(item.title, item.malId, void 0, orphansSearchQuery)) return false;
-				return true;
-			});
-			if (!filtered.length) {
-				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
-				return;
-			}
-			orphansBox.innerHTML = filtered.map((item) => `
-        <div class="ala-ov-item" data-mal-id="${item.malId}">
-          <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://myanimelist.net/${item.type.toLowerCase()}/${item.malId}" target="_blank" rel="noopener" title="${item.title}">${item.title}</a>
-            <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${item.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${item.type}</span>
-              <span>MAL ID: <b>${item.malId}</b></span>
-            </div>
-          </div>
-          <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${item.malId}" data-type="${item.type}">Delete from MAL</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${item.malId}">Keep on MAL</button>
-          </div>
-        </div>
-      `).join("");
-			orphansBox.querySelectorAll(".ala-ov-btn-del-mal").forEach((btn) => {
-				btn.addEventListener("click", async () => {
-					const id = Number(btn.dataset.malId);
-					const type = btn.dataset.type || "ANIME";
-					if (!id) return;
-					if (!confirm(`Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`)) return;
-					btn.disabled = true;
-					btn.textContent = "Deleting...";
-					try {
-						await malDeleteEntry(type, id);
-						scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
-						renderOrphansList();
-					} catch (err) {
-						btn.disabled = false;
-						btn.textContent = "Delete from MAL";
-						alert(`Failed to delete from MAL: ${err?.message || err}`);
-					}
-				});
-			});
-			orphansBox.querySelectorAll(".ala-ov-btn-keep-mal").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.malId);
-					scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
-					renderOrphansList();
-				});
-			});
-		}
-		const scanOrphansBtn = backdrop.querySelector("#ala-ov-btn-scan-orphans");
-		scanOrphansBtn?.addEventListener("click", async () => {
-			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
-			scanOrphansBtn.disabled = true;
-			scanOrphansBtn.textContent = "Scanning...";
-			orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
-			try {
-				const viewer = await AniList.viewer();
-				if (!viewer) {
-					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
-					return;
-				}
-				const overrides = getManualOverrides();
-				const knownMalIds = new Set();
-				for (const t of ["ANIME", "MANGA"]) try {
-					const alEntries = await alFetchAll(viewer.id, t);
-					for (const e of alEntries) {
-						const ov = overrides[String(e.mediaId)];
-						if (ov) {
-							if (ov.malId > 0) knownMalIds.add(ov.malId);
-						} else {
-							const cached = stores[t].ids.data[e.mediaId]?.m;
-							if (cached && cached > 0) knownMalIds.add(cached);
-							else if (e.idMal > 0) knownMalIds.add(e.idMal);
-						}
-					}
-				} catch (e) {
-					console.warn(`[AL-Additions] Audit scan: failed to fetch AniList ${t}:`, e);
-				}
-				const foundOrphans = [];
-				for (const t of ["ANIME", "MANGA"]) try {
-					const malList = await malFetchList(t);
-					for (const [idStr, data] of Object.entries(malList)) {
-						const malId = Number(idStr);
-						if (malId > 0 && !knownMalIds.has(malId)) foundOrphans.push({
-							malId,
-							type: t,
-							title: data.__malTitle || `MAL #${malId}`
-						});
-					}
-				} catch (e) {
-					console.warn(`[AL-Additions] Audit scan: failed to fetch MAL ${t}:`, e);
-				}
-				scannedOrphans = foundOrphans;
-				renderOrphansList();
-			} catch (err) {
-				orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${err?.message || err}</div>`;
-			} finally {
-				scanOrphansBtn.disabled = false;
-				scanOrphansBtn.textContent = "Scan MAL";
+		setInterval(scanAll, 6e4);
+		Core.ready(() => {
+			if (onListPage()) {
+				scanAll();
+				setTimeout(scanAll, 500);
+				setTimeout(scanAll, 1500);
 			}
 		});
-		const jsonTextarea = backdrop.querySelector("#ala-ov-json-textarea");
-		const jsonStatus = backdrop.querySelector("#ala-ov-json-status");
-		const jsonSaveBtn = backdrop.querySelector("#ala-ov-btn-json-save");
-		const jsonMergeBtn = backdrop.querySelector("#ala-ov-btn-json-merge");
-		const jsonCopyBtn = backdrop.querySelector("#ala-ov-btn-json-copy");
-		const jsonResetBtn = backdrop.querySelector("#ala-ov-btn-json-reset");
-		function renderJsonView() {
-			const current = getManualOverrides();
-			jsonTextarea.value = JSON.stringify(current, null, 2);
-			jsonStatus.style.display = "none";
-		}
-		jsonCopyBtn?.addEventListener("click", async () => {
-			try {
-				await navigator.clipboard.writeText(jsonTextarea.value);
-				const prev = jsonCopyBtn.textContent;
-				jsonCopyBtn.textContent = "Copied!";
-				setTimeout(() => {
-					jsonCopyBtn.textContent = prev;
-				}, 1500);
-			} catch (_) {
-				jsonTextarea.select();
-				document.execCommand("copy");
-				const prev = jsonCopyBtn.textContent;
-				jsonCopyBtn.textContent = "Copied!";
-				setTimeout(() => {
-					jsonCopyBtn.textContent = prev;
-				}, 1500);
-			}
-		});
-		jsonResetBtn?.addEventListener("click", renderJsonView);
-		jsonSaveBtn?.addEventListener("click", () => {
-			const res = importOverrides(jsonTextarea.value, "replace");
-			if (!res.success) {
-				jsonStatus.className = "ala-ov-status ala-ov-status--error";
-				jsonStatus.textContent = res.error || "Failed to parse JSON";
-				jsonStatus.style.display = "block";
-				return;
-			}
-			jsonStatus.className = "ala-ov-status ala-ov-status--success";
-			jsonStatus.textContent = `Successfully saved ${res.count ?? 0} overrides!`;
-			jsonStatus.style.display = "block";
-			renderList();
-		});
-		jsonMergeBtn?.addEventListener("click", () => {
-			const res = importOverrides(jsonTextarea.value, "merge");
-			if (!res.success) {
-				jsonStatus.className = "ala-ov-status ala-ov-status--error";
-				jsonStatus.textContent = res.error || "Failed to parse JSON";
-				jsonStatus.style.display = "block";
-				return;
-			}
-			const current = getManualOverrides();
-			jsonStatus.className = "ala-ov-status ala-ov-status--success";
-			jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
-			jsonStatus.style.display = "block";
-			jsonTextarea.value = JSON.stringify(current, null, 2);
-			renderList();
-		});
-		renderList();
-	}
+	});
 	var DEFAULT_ANISONGS_CONFIG = {
 		active: [],
 		presets: [
@@ -4482,10 +1637,10 @@
 		const queryJp = [animeJp, theme].filter(Boolean).join(" ");
 		return template.replace(/\{title_romaji\}/gi, format(titleRomaji)).replace(/\{title_jp\}/gi, format(titleJp)).replace(/\{title_native\}/gi, format(titleJp)).replace(/\{title\}/gi, format(title)).replace(/\{artists\}/gi, format(artists)).replace(/\{artist\}/gi, format(artist)).replace(/\{anime_romaji\}/gi, format(animeRomaji)).replace(/\{anime_english\}/gi, format(animeEn)).replace(/\{anime_en\}/gi, format(animeEn)).replace(/\{anime_native\}/gi, format(animeJp)).replace(/\{anime_jp\}/gi, format(animeJp)).replace(/\{anime\}/gi, format(anime)).replace(/\{year\}/gi, format(year)).replace(/\{season\}/gi, format(season)).replace(/\{theme\}/gi, format(theme)).replace(/\{type\}/gi, format(type)).replace(/\{number\}/gi, format(number)).replace(/\{eps\}/gi, format(eps)).replace(/\{query_anime\}/gi, format(queryAnime)).replace(/\{query_jp\}/gi, format(queryJp)).replace(/\{query\}/gi, format(query));
 	}
-	var MODAL_ID = "ala-anisongs-modal-backdrop";
+	var MODAL_ID$1 = "ala-anisongs-modal-backdrop";
 	addStyle("ala-anisongs-modal-style", `
-  #${MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID} .ala-as-sheet{display:flex;flex-direction:column;width:min(660px,100%);height:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
+  #${MODAL_ID$1}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  #${MODAL_ID$1} .ala-as-sheet{display:flex;flex-direction:column;width:min(660px,100%);height:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
   .ala-as-sheet *{box-sizing:border-box}
   .ala-as-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
   .ala-as-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
@@ -4539,8 +1694,8 @@
   }
 
   @media (max-width:700px){
-    #${MODAL_ID}{align-items:flex-end;padding:0}
-    #${MODAL_ID} .ala-as-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    #${MODAL_ID$1}{align-items:flex-end;padding:0}
+    #${MODAL_ID$1} .ala-as-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
     .ala-as-head{padding:14px 16px}
     .ala-as-body{padding:12px 16px}
     .ala-as-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px));flex-direction:column-reverse;gap:8px}
@@ -4565,7 +1720,7 @@
   }
   `);
 	function openAniSongsModal(inputEl) {
-		const existing = document.getElementById(MODAL_ID);
+		const existing = document.getElementById(MODAL_ID$1);
 		if (existing) existing.remove();
 		let stateConfig;
 		try {
@@ -4576,7 +1731,7 @@
 			stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
 		}
 		const backdrop = document.createElement("div");
-		backdrop.id = MODAL_ID;
+		backdrop.id = MODAL_ID$1;
 		backdrop.innerHTML = `
     <div class="ala-as-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-as-modal-title">
       <header class="ala-as-head">
@@ -4922,792 +2077,1957 @@
 		});
 		renderUI();
 	}
-	var SECTIONS = [
-		"Sync",
-		"AniList Enhancements",
-		"External Links, Downloads & Mappings",
-		"Advanced"
+	var str = (v) => typeof v === "string" ? v.trim() : "";
+	var DIRECT_SITE_MAP = {
+		spotify: "SPOTIFY",
+		youtube: "YOUTUBE",
+		youtube_music: "YOUTUBE_MUSIC",
+		apple_music: "APPLE_MUSIC"
+	};
+	function resolveProviderLink(preset, song, groupType) {
+		const directSite = DIRECT_SITE_MAP[preset.id];
+		const directUrl = directSite && song.resources ? song.resources[directSite] : null;
+		if (directUrl) return {
+			url: directUrl,
+			isDirect: true
+		};
+		const params = extractSongParams(song, groupType);
+		return {
+			url: buildProviderUrl(preset.url, params),
+			isDirect: false
+		};
+	}
+	function pickVideo(entries) {
+		let fallback = null;
+		for (const entry of Array.isArray(entries) ? entries : []) {
+			const rawVideos = entry?.videos;
+			const videos = Array.isArray(rawVideos?.nodes) ? rawVideos.nodes : Array.isArray(rawVideos) ? rawVideos : [];
+			for (const video of videos) {
+				const link = str(video?.link);
+				if (!/^https?:\/\//i.test(link)) continue;
+				if (str(video?.source).toUpperCase() === "WEB") return link;
+				fallback = fallback || link;
+			}
+		}
+		return fallback;
+	}
+	var PERFORMER_ROLES = new Set(["PERFORMANCE", "FEATURING"]);
+	var relevanceOf = (v) => v != null && Number.isFinite(Number(v)) ? Number(v) : Number.MAX_SAFE_INTEGER;
+	function extractSongArtists(song) {
+		const mainArtists = [];
+		const featArtists = [];
+		const seen = new Set();
+		if (Array.isArray(song?.staff)) {
+			const sorted = [...song.staff].sort((a, b) => relevanceOf(a?.relevance) - relevanceOf(b?.relevance));
+			for (const s of sorted) {
+				const role = str(s?.role).toUpperCase();
+				if (role && !PERFORMER_ROLES.has(role)) continue;
+				const name = str(s?.as || s?.alias || s?.artist?.name?.main || s?.artist?.name);
+				if (!name || seen.has(name)) continue;
+				seen.add(name);
+				if (role === "FEATURING") featArtists.push(name);
+				else mainArtists.push(name);
+			}
+		} else if (Array.isArray(song?.artists)) for (const a of song.artists) {
+			const name = str(a?.name);
+			if (name && !seen.has(name)) {
+				seen.add(name);
+				mainArtists.push(name);
+			}
+		}
+		const artists = [...mainArtists, ...featArtists];
+		return {
+			artists,
+			credit: mainArtists.length && featArtists.length ? `${mainArtists.join(", ")} feat. ${featArtists.join(", ")}` : artists.join(", ")
+		};
+	}
+	function firstEpisodeNum(eps) {
+		const m = (eps || "").match(/\d+/);
+		return m ? Number(m[0]) : Number.MAX_SAFE_INTEGER;
+	}
+	function sortEpisodes(raw) {
+		const seen = new Set();
+		const parts = raw.split(",").map((p) => p.trim()).filter((p) => {
+			if (!p || seen.has(p)) return false;
+			seen.add(p);
+			return true;
+		});
+		if (parts.length <= 1) return parts[0] || "";
+		parts.sort((a, b) => firstEpisodeNum(a) - firstEpisodeNum(b) || a.localeCompare(b));
+		return parts.join(", ");
+	}
+	function formatEpsTag(eps) {
+		if (!eps) return "";
+		return `(${/[-,]/.test(eps) ? "eps" : "ep"} ${eps})`;
+	}
+	var LANGUAGE_GROUP_RE = /\b(english|dub(?:bed)?|spanish|french|german|italian|portuguese|korean|chinese|castilian|latin)\b/i;
+	function cleanGroupName(group) {
+		return group.replace(/\s+Version\b/i, "").trim();
+	}
+	var normTitle$1 = (s) => s.trim().toLowerCase();
+	function extractRawTheme(theme) {
+		const songTitle = str(theme?.song?.title?.romaji || theme?.song?.title);
+		if (!songTitle) return null;
+		const rawSeqVal = theme?.sequence != null && Number.isFinite(Number(theme.sequence)) ? Math.floor(Number(theme.sequence)) : null;
+		const rawSequence = rawSeqVal != null && rawSeqVal >= 1 ? rawSeqVal : null;
+		const sequence = rawSequence ?? 1;
+		const { artists, credit: artistCredit } = extractSongArtists(theme?.song);
+		const entries = [...Array.isArray(theme?.entries) ? theme.entries : Array.isArray(theme?.animethemeentries) ? theme.animethemeentries : []].sort((a, b) => {
+			const va = a?.version != null && Number.isFinite(Number(a.version)) ? Number(a.version) : 1;
+			const vb = b?.version != null && Number.isFinite(Number(b.version)) ? Number(b.version) : 1;
+			if (va !== vb) return va - vb;
+			return firstEpisodeNum(str(a?.episodes)) - firstEpisodeNum(str(b?.episodes));
+		}).map((e, idx) => {
+			const vNum = e?.version != null && Number.isFinite(Number(e.version)) ? Math.floor(Number(e.version)) : idx + 1;
+			const ep = sortEpisodes(str(e?.episodes));
+			const notes = str(e?.notes);
+			return {
+				version: vNum,
+				label: `v${vNum}`,
+				...ep ? { episodes: ep } : {},
+				...notes ? { notes } : {},
+				url: pickVideo([e])
+			};
+		});
+		const groupName = typeof theme?.group === "object" && theme?.group !== null ? str(theme.group.name) : str(theme?.group);
+		const type = str(theme?.type).toUpperCase() === "ED" ? "ED" : "OP";
+		const nativeTitle = str(theme?.song?.title?.native);
+		const hasJp = !!nativeTitle || /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(songTitle);
+		const resourcesList = Array.isArray(theme?.song?.resources?.nodes) ? theme.song.resources.nodes : [];
+		const resources = {};
+		for (const r of resourcesList) {
+			const site = str(r?.site).toUpperCase();
+			const link = str(r?.link);
+			if (site && link) resources[site] = link;
+		}
+		return {
+			type,
+			rawSequence,
+			sequence,
+			title: songTitle,
+			titleJp: nativeTitle || (hasJp ? songTitle : void 0),
+			artists,
+			artistCredit,
+			groupName,
+			entries,
+			resources: Object.keys(resources).length ? resources : void 0
+		};
+	}
+	function buildSongEntry(bucket, meta) {
+		const ordered = [...bucket].sort((a, b) => {
+			const ag = a.groupName ? 1 : 0;
+			const bg = b.groupName ? 1 : 0;
+			if (ag !== bg) return ag - bg;
+			return a.groupName.localeCompare(b.groupName);
+		});
+		const primary = ordered[0];
+		const merged = ordered.length > 1;
+		let versions;
+		if (!merged) versions = primary.entries;
+		else {
+			const hasLanguageSibling = ordered.some((t) => t.groupName && LANGUAGE_GROUP_RE.test(t.groupName));
+			versions = [];
+			for (const sub of ordered) {
+				const grpLabel = sub.groupName ? cleanGroupName(sub.groupName) : hasLanguageSibling ? "Japanese" : "Original";
+				const subSongDiffers = normTitle$1(sub.title) !== normTitle$1(primary.title);
+				const subEntries = sub.entries.length ? sub.entries : [{
+					version: 1,
+					label: "v1",
+					url: null
+				}];
+				const multiInSub = subEntries.length > 1;
+				for (const e of subEntries) versions.push({
+					version: e.version,
+					label: multiInSub ? `${grpLabel} v${e.version}` : grpLabel,
+					...subSongDiffers ? { songTitle: sub.title } : {},
+					...e.episodes ? { episodes: e.episodes } : {},
+					...e.notes ? { notes: e.notes } : {},
+					url: e.url
+				});
+			}
+		}
+		const multiVersion = versions.length > 1;
+		const eps = sortEpisodes(versions.map((v) => v.episodes).filter(Boolean).join(", "));
+		const epsSuffix = !multiVersion && eps ? ` ${formatEpsTag(eps)}` : "";
+		const singleGroupTag = !merged && primary.groupName ? ` (${cleanGroupName(primary.groupName)})` : "";
+		return {
+			sequence: primary.sequence,
+			title: primary.title,
+			title_romaji: primary.title,
+			title_jp: primary.titleJp,
+			artists: primary.artists,
+			type: primary.type,
+			animeName: meta.animeName,
+			animeRomaji: meta.animeRomaji,
+			animeEn: meta.animeEn,
+			animeJp: meta.animeJp,
+			year: meta.year,
+			season: meta.season,
+			eps: eps || void 0,
+			...multiVersion ? { versions } : {},
+			resources: primary.resources,
+			name: `${primary.sequence}. "${primary.title}"` + (primary.artistCredit ? ` by ${primary.artistCredit}` : "") + epsSuffix + singleGroupTag,
+			url: versions.find((v) => v.url)?.url || null
+		};
+	}
+	function groupThemes(anime, meta) {
+		const out = {
+			OP: [],
+			ED: []
+		};
+		const themeList = Array.isArray(anime?.themes) ? anime.themes : Array.isArray(anime?.animethemes) ? anime.animethemes : [];
+		const buckets = {
+			OP: new Map(),
+			ED: new Map()
+		};
+		let anonIdx = 0;
+		for (const theme of themeList) {
+			const raw = extractRawTheme(theme);
+			if (!raw) continue;
+			const map = buckets[raw.type];
+			let key;
+			if (raw.rawSequence != null) key = `seq:${raw.rawSequence}`;
+			else if (raw.groupName) {
+				const target = [...map.entries()].find(([k, items]) => k.startsWith("anon:") && normTitle$1(items[0].title) === normTitle$1(raw.title));
+				key = target ? target[0] : `anon:${anonIdx++}`;
+			} else key = `anon:${anonIdx++}`;
+			const list = map.get(key) || [];
+			list.push(raw);
+			map.set(key, list);
+		}
+		for (const type of ["OP", "ED"]) {
+			for (const bucket of buckets[type].values()) out[type].push(buildSongEntry(bucket, meta));
+			out[type].sort((a, b) => a.sequence - b.sequence || a.name.localeCompare(b.name));
+		}
+		return out;
+	}
+	var COLLAPSE_FALLBACK_MS = 260;
+	var prefersReducedMotion = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	var cancelClosingMap = new WeakMap();
+	function createCollapsibleVideo(videoUrl) {
+		const wrap = document.createElement("div");
+		wrap.className = "daiya-anisong-collapsible";
+		const inner = document.createElement("div");
+		inner.className = "daiya-anisong-collapsible-inner";
+		const pad = document.createElement("div");
+		pad.className = "daiya-anisong-video-pad";
+		const video = document.createElement("video");
+		video.controls = true;
+		video.preload = "none";
+		video.volume = .4;
+		video.src = videoUrl;
+		video.addEventListener("click", (ev) => ev.stopPropagation());
+		pad.appendChild(video);
+		inner.appendChild(pad);
+		wrap.appendChild(inner);
+		return {
+			wrap,
+			video
+		};
+	}
+	function createSongCard(song, activePresets, groupType) {
+		const el = document.createElement("div");
+		el.className = "daiya-anisong-entry";
+		const header = document.createElement("div");
+		header.className = "daiya-anisong-header";
+		const titleSpan = document.createElement("span");
+		titleSpan.className = "daiya-anisong-title";
+		titleSpan.textContent = song.name;
+		header.appendChild(titleSpan);
+		if (activePresets.length) {
+			const actions = document.createElement("div");
+			actions.className = "daiya-anisong-actions";
+			activePresets.forEach((p) => {
+				if (!p || !p.url) return;
+				const a = document.createElement("a");
+				a.className = "daiya-anisong-link";
+				const { url, isDirect } = resolveProviderLink(p, song, groupType);
+				a.href = url;
+				a.target = "_blank";
+				a.rel = "noopener";
+				a.title = isDirect ? `Listen on ${p.name}` : `Search on ${p.name}`;
+				a.addEventListener("click", (ev) => ev.stopPropagation());
+				const img = document.createElement("img");
+				img.className = "daiya-anisong-icon";
+				img.src = p.icon;
+				img.alt = p.name;
+				img.onerror = () => {
+					img.src = "https://www.google.com/s2/favicons?domain=youtube.com&sz=32";
+				};
+				a.appendChild(img);
+				actions.appendChild(a);
+			});
+			header.appendChild(actions);
+		}
+		el.appendChild(header);
+		let active = null;
+		const closingByRow = new Map();
+		function closePlayer(player) {
+			player.video.pause?.();
+			player.row?.classList.remove("is-active");
+			if (prefersReducedMotion()) {
+				player.wrap.remove();
+				return;
+			}
+			closingByRow.set(player.row, player);
+			player.wrap.classList.remove("is-open");
+			let done = false;
+			const detach = () => {
+				if (done) return false;
+				done = true;
+				clearTimeout(timer);
+				player.wrap.removeEventListener("transitionend", onEnd);
+				cancelClosingMap.delete(player.wrap);
+				if (closingByRow.get(player.row) === player) closingByRow.delete(player.row);
+				return true;
+			};
+			const finish = () => {
+				if (detach()) player.wrap.remove();
+			};
+			const onEnd = (e) => {
+				if (e.target === player.wrap && e.propertyName === "grid-template-rows") finish();
+			};
+			const timer = setTimeout(finish, COLLAPSE_FALLBACK_MS);
+			player.wrap.addEventListener("transitionend", onEnd);
+			cancelClosingMap.set(player.wrap, detach);
+		}
+		function toggleVideo(videoUrl, row) {
+			const prev = active;
+			if (prev && prev.row === row) {
+				active = null;
+				closePlayer(prev);
+				return;
+			}
+			const reduced = prefersReducedMotion();
+			const revived = closingByRow.get(row) || null;
+			let next;
+			if (revived) {
+				cancelClosingMap.get(revived.wrap)?.();
+				next = revived;
+			} else {
+				const { wrap, video } = createCollapsibleVideo(videoUrl);
+				next = {
+					wrap,
+					video,
+					row
+				};
+				if (row) row.insertAdjacentElement("afterend", next.wrap);
+				else el.appendChild(next.wrap);
+				if (!reduced) next.wrap.offsetHeight;
+			}
+			if (prev) closePlayer(prev);
+			active = next;
+			row?.classList.add("is-active");
+			next.wrap.classList.add("is-open");
+			Promise.resolve(next.video.play?.()).catch(() => {});
+		}
+		const versions = Array.isArray(song.versions) && song.versions.length > 1 ? song.versions : null;
+		if (versions) {
+			el.classList.add("has-versions");
+			const list = document.createElement("div");
+			list.className = "daiya-anisongs-versions";
+			versions.forEach((v) => {
+				const row = document.createElement("div");
+				row.className = "daiya-anisong-version";
+				const badge = document.createElement("span");
+				badge.className = "daiya-anisong-version-tag";
+				badge.textContent = v.label || (v.version != null ? `v${v.version}` : "");
+				row.appendChild(badge);
+				const metaParts = [];
+				if (v.songTitle) metaParts.push(`"${v.songTitle}"`);
+				if (v.episodes) metaParts.push(formatEpsTag(v.episodes));
+				if (v.notes) metaParts.push(`— ${v.notes}`);
+				if (metaParts.length) {
+					const info = document.createElement("span");
+					info.className = "daiya-anisong-version-meta";
+					info.textContent = metaParts.join(" ");
+					row.appendChild(info);
+				}
+				if (v.url) {
+					const verUrl = v.url;
+					row.classList.add("has-video");
+					row.setAttribute("role", "button");
+					row.tabIndex = 0;
+					row.addEventListener("click", (e) => {
+						if (e.target instanceof HTMLVideoElement) return;
+						toggleVideo(verUrl, row);
+					});
+					row.addEventListener("keydown", (e) => {
+						if (e.key === "Enter" || e.key === " ") {
+							e.preventDefault();
+							toggleVideo(verUrl, row);
+						}
+					});
+				}
+				list.appendChild(row);
+			});
+			el.appendChild(list);
+			return el;
+		}
+		const url = song.url;
+		if (!url) return el;
+		el.classList.add("has-video");
+		header.addEventListener("click", (e) => {
+			if (e.target.closest(".daiya-anisong-actions")) return;
+			if (e.target instanceof HTMLVideoElement) return;
+			toggleVideo(url, null);
+		});
+		return el;
+	}
+	var INITIAL_VISIBLE_SONGS = 5;
+	function getDocumentHeight() {
+		if (typeof document === "undefined") return 0;
+		return Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0);
+	}
+	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop) {
+		if (typeof window === "undefined" || typeof window.scrollBy !== "function") return () => {};
+		const stepScroll = () => {
+			const docShrink = Math.max(0, startDocHeight - getDocumentHeight());
+			if (docShrink <= .5) return;
+			const currentAnchorDocTop = anchor.getBoundingClientRect().top + window.scrollY;
+			const anchorShift = Math.max(0, startAnchorDocTop - currentAnchorDocTop);
+			const delta = Math.max(0, startScrollY - Math.min(docShrink, anchorShift)) - window.scrollY;
+			if (Math.abs(delta) > .5) window.scrollBy(0, delta);
+		};
+		if (prefersReducedMotion()) {
+			stepScroll();
+			return () => {};
+		}
+		let rafId = 0;
+		let active = true;
+		const stop = () => {
+			if (!active) return;
+			active = false;
+			if (rafId) cancelAnimationFrame(rafId);
+			clearTimeout(timer);
+			collapsible.removeEventListener("transitionend", onEnd);
+			window.removeEventListener("wheel", stop);
+			window.removeEventListener("touchstart", stop);
+		};
+		const onEnd = (e) => {
+			if (e.target === collapsible && e.propertyName === "grid-template-rows") {
+				stepScroll();
+				stop();
+			}
+		};
+		const tick = () => {
+			if (!active) return;
+			stepScroll();
+			rafId = requestAnimationFrame(tick);
+		};
+		const timer = setTimeout(() => {
+			stepScroll();
+			stop();
+		}, COLLAPSE_FALLBACK_MS);
+		collapsible.addEventListener("transitionend", onEnd);
+		window.addEventListener("wheel", stop, {
+			passive: true,
+			once: true
+		});
+		window.addEventListener("touchstart", stop, {
+			passive: true,
+			once: true
+		});
+		rafId = requestAnimationFrame(tick);
+		return stop;
+	}
+	function createSongGroup(title, songs, activePresets, groupType) {
+		const g = document.createElement("div");
+		g.className = "daiya-anisongs-group";
+		const h = document.createElement("h2");
+		h.textContent = title;
+		g.appendChild(h);
+		if (!songs.length) {
+			const empty = document.createElement("div");
+			empty.className = "daiya-anisongs-empty";
+			empty.textContent = "No songs to show (つ﹏<)･ﾟ｡";
+			g.appendChild(empty);
+			return g;
+		}
+		const initial = songs.slice(0, INITIAL_VISIBLE_SONGS);
+		const rest = songs.slice(INITIAL_VISIBLE_SONGS);
+		initial.forEach((s) => g.appendChild(createSongCard(s, activePresets, groupType)));
+		if (!rest.length) return g;
+		const extraWrap = document.createElement("div");
+		extraWrap.className = "daiya-anisong-collapsible daiya-anisongs-extra";
+		const extraInner = document.createElement("div");
+		extraInner.className = "daiya-anisong-collapsible-inner";
+		rest.forEach((s) => extraInner.appendChild(createSongCard(s, activePresets, groupType)));
+		extraWrap.appendChild(extraInner);
+		g.appendChild(extraWrap);
+		const btn = document.createElement("button");
+		btn.type = "button";
+		btn.className = "daiya-anisongs-toggle";
+		const showAllLabel = `Show all (${songs.length})`;
+		btn.textContent = showAllLabel;
+		btn.setAttribute("aria-expanded", "false");
+		let expanded = false;
+		let stopFollow = null;
+		btn.addEventListener("click", () => {
+			stopFollow?.();
+			stopFollow = null;
+			const startScrollY = typeof window !== "undefined" ? window.scrollY : 0;
+			const startDocHeight = getDocumentHeight();
+			const startBtnDocTop = btn.getBoundingClientRect().top + startScrollY;
+			expanded = !expanded;
+			if (!expanded) extraWrap.querySelectorAll("video").forEach((v) => v.pause?.());
+			extraWrap.classList.toggle("is-open", expanded);
+			btn.textContent = expanded ? "Show less" : showAllLabel;
+			btn.setAttribute("aria-expanded", String(expanded));
+			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop);
+		});
+		g.appendChild(btn);
+		return g;
+	}
+	function extractSongParams(song, groupType = "OP") {
+		let title = (song.title || "").trim();
+		if (!title) {
+			const m = song.name.match(/"([^"]+)"/);
+			title = m ? m[1].trim() : song.name.replace(/^\d+\.\s*/, "").trim();
+		}
+		let artist = "";
+		if (Array.isArray(song.artists) && song.artists.length) artist = song.artists.filter(Boolean).join(" ");
+		else if (typeof song.artist === "string") artist = song.artist.trim();
+		else {
+			const m = song.name.match(/ by ([^(]+)/i);
+			if (m) artist = m[1].trim();
+		}
+		const anime = (song.animeName || "").trim() || document.querySelector(".header h1")?.textContent?.trim() || document.querySelector("meta[property=\"og:title\"]")?.getAttribute("content")?.trim() || "";
+		const type = song.type === "ED" || groupType === "ED" ? "ED" : "OP";
+		const number = Number.isFinite(song.sequence) && song.sequence >= 1 ? Math.floor(song.sequence) : 1;
+		return {
+			title,
+			title_romaji: song.title_romaji || title,
+			title_jp: song.title_jp || title,
+			artist,
+			artists: Array.isArray(song.artists) && song.artists.length ? song.artists.join(", ") : artist,
+			anime,
+			anime_romaji: song.animeRomaji || anime,
+			anime_en: song.animeEn || anime,
+			anime_jp: song.animeJp || anime,
+			year: song.year,
+			season: song.season,
+			type,
+			number,
+			eps: song.eps
+		};
+	}
+	defineFeature({
+		id: "aniSongs",
+		key: "aniSongsEnabled",
+		section: "AniList Enhancements",
+		def: false,
+		legacy: [
+			"aniSongsEnabled",
+			"animeThemeSongsEnabled",
+			"anisongsEnabled"
+		],
+		title: "Anime Opening & Ending Songs",
+		help: "Show OP/ED theme songs on anime pages.",
+		options: [{
+			key: "aniSongsProviders",
+			type: "json",
+			def: DEFAULT_ANISONGS_CONFIG,
+			title: "Song Search Providers",
+			help: "Configure search shortcuts (YouTube, Spotify, etc.) and active music services.",
+			validate: validateAniSongsConfig
+		}]
+	}, () => {
+		const API = "https://rs.animethemes.moe/graphql";
+		const ROOT = "daiya-anisongs";
+		const TTL = 6048e5;
+		const EMPTY_TTL = 432e5;
+		addStyle("daiya-anisongs-style", `
+      #${ROOT}{width:100%;margin-top:30px}
+      #${ROOT} .daiya-anisongs-columns{display:flex;gap:30px;width:100%}
+      #${ROOT} .daiya-anisongs-group{flex:1 1 0;min-width:0}
+      #${ROOT} h2{margin-top:0}
+      #${ROOT} .daiya-anisong-entry{background:rgb(var(--color-foreground));border-radius:4px;padding:8px 10px;font-size:1.3rem;margin-bottom:10px;color:rgb(var(--color-text))}
+      #${ROOT} .daiya-anisong-header{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%}
+      #${ROOT} .daiya-anisong-title{flex:1 1 auto;min-width:0;word-break:break-word}
+      #${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title{cursor:pointer}
+      #${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title:hover{color:rgb(var(--color-blue));transition:color .15s}
+      #${ROOT} .daiya-anisong-actions{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+      #${ROOT} .daiya-anisong-link{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:4px;background:rgba(var(--color-text-lighter),.08);padding:3px;transition:all .15s;text-decoration:none}
+      #${ROOT} .daiya-anisong-link:hover{background:rgba(var(--color-blue),.2);transform:translateY(-1px)}
+      #${ROOT} .daiya-anisong-icon{width:16px;height:16px;object-fit:contain;display:block;border-radius:2px}
+      #${ROOT} .daiya-anisong-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden;overflow-anchor:none}
+      #${ROOT} .daiya-anisong-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
+      #${ROOT} .daiya-anisong-collapsible-inner{min-height:0;overflow:hidden}
+      #${ROOT} .daiya-anisong-video-pad{padding-top:10px}
+      #${ROOT} .daiya-anisongs-versions .daiya-anisong-video-pad{padding:4px 0 6px}
+      #${ROOT} video{display:block;width:100%;max-width:39em;aspect-ratio:16/9;background:#000;border-radius:4px;cursor:auto}
+      #${ROOT} .daiya-anisongs-versions{display:flex;flex-direction:column;margin-top:8px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.15)}
+      #${ROOT} .daiya-anisong-version{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:1.2rem;color:rgb(var(--color-text-lighter));transition:color .15s,background .15s}
+      #${ROOT} .daiya-anisongs-versions>.daiya-anisong-version~.daiya-anisong-version{margin-top:4px}
+      #${ROOT} .daiya-anisong-version-tag{font-weight:700;color:rgb(var(--color-text));white-space:nowrap}
+      #${ROOT} .daiya-anisong-version.has-video{cursor:pointer}
+      #${ROOT} .daiya-anisong-version.has-video:hover{color:rgb(var(--color-blue));background:rgba(var(--color-blue),.08)}
+      #${ROOT} .daiya-anisong-version.has-video:hover .daiya-anisong-version-tag{color:rgb(var(--color-blue))}
+      #${ROOT} .daiya-anisong-version.is-active{color:rgb(var(--color-blue));background:rgba(var(--color-blue),.14)}
+      #${ROOT} .daiya-anisong-version.is-active .daiya-anisong-version-tag{color:rgb(var(--color-blue))}
+      #${ROOT} .daiya-anisongs-toggle{display:block;width:100%;padding:7px 10px;border:0;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text-lighter));font:inherit;font-size:1.2rem;font-weight:600;cursor:pointer;text-align:center;transition:color .15s,background .15s}
+      #${ROOT} .daiya-anisongs-toggle:hover{color:rgb(var(--color-blue));background:rgba(var(--color-blue),.1)}
+      #${ROOT} .daiya-anisongs-empty{text-align:center;opacity:.7;padding:10px}
+      @media (max-width:700px){#${ROOT} .daiya-anisongs-columns{flex-direction:column;gap:10px}}
+      @media (prefers-reduced-motion:reduce){#${ROOT} .daiya-anisong-collapsible,#${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title,#${ROOT} .daiya-anisong-link,#${ROOT} .daiya-anisong-version,#${ROOT} .daiya-anisongs-toggle{transition:none!important}}`);
+		const cacheStore = persistent("daiya_anisongs_cache_v8", (d) => {
+			for (const id of Object.keys(d)) if (!(Number(d[id]?.expires) > Date.now())) delete d[id];
+		});
+		const cache = cacheStore.data;
+		const atQuery = `query ($id: [Int!]) {
+      filterAnimeByExternalSite(site: ANILIST, id: $id) {
+        title { romaji native }
+        themes {
+          type
+          sequence
+          group { name }
+          song {
+            title { romaji native }
+            staff {
+              role
+              relevance
+              alias
+              as
+              artist {
+                name { main }
+              }
+            }
+            resources {
+              nodes {
+                site
+                link
+              }
+            }
+          }
+          entries {
+            episodes
+            version
+            notes
+            videos {
+              nodes {
+                link
+                source
+                basename
+              }
+            }
+          }
+        }
+      }
+    }`;
+		const loadThemes = memo(async (id) => {
+			const hit = cache[String(id)];
+			if (hit && hit.expires > Date.now()) return hit.data;
+			const [themesRes, alRes] = await Promise.allSettled([gm.json(API, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"User-Agent": "AL-Additions"
+				},
+				data: JSON.stringify({
+					query: atQuery,
+					variables: { id: [Number(id)] }
+				})
+			}), AniList.query(`query ($id: Int) {
+        Media(id: $id) {
+          title { userPreferred english romaji native }
+          seasonYear
+          season
+        }
+      }`, { id: Number(id) })]);
+			const result = themesRes.status === "fulfilled" ? themesRes.value : null;
+			const alMedia = alRes.status === "fulfilled" ? alRes.value?.Media : null;
+			const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite) ? result.data.filterAnimeByExternalSite[0] : null;
+			const animeName = str(alMedia?.title?.userPreferred) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || document.querySelector(".header h1")?.textContent?.trim() || "";
+			const data = groupThemes(rawAnime, {
+				animeName,
+				animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
+				animeEn: str(alMedia?.title?.english) || animeName,
+				animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || "",
+				year: alMedia?.seasonYear || rawAnime?.year || "",
+				season: alMedia?.season || rawAnime?.season || ""
+			});
+			const empty = !data.OP.length && !data.ED.length;
+			cache[String(id)] = {
+				expires: Date.now() + (empty ? EMPTY_TTL : TTL),
+				data
+			};
+			cacheStore.save();
+			return data;
+		});
+		function mount(state, overview) {
+			document.getElementById(ROOT)?.remove();
+			const config = getValidAniSongsConfig();
+			const presetMap = new Map();
+			config.presets.forEach((p) => presetMap.set(p.id, p));
+			const activePresets = config.active.map((id) => presetMap.get(id)).filter(Boolean);
+			const root = document.createElement("section");
+			root.id = ROOT;
+			root.dataset.animeId = state.id;
+			const cols = document.createElement("div");
+			cols.className = "daiya-anisongs-columns";
+			cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP"), createSongGroup("Endings", state.themes.ED, activePresets, "ED"));
+			root.appendChild(cols);
+			overview.appendChild(root);
+		}
+		let cur = null;
+		let backoff = {
+			id: null,
+			until: 0
+		};
+		const animeId = () => {
+			const r = mediaRoute();
+			return r && r.kind === "anime" ? String(r.id) : null;
+		};
+		async function sync() {
+			const id = animeId();
+			if (!id) {
+				document.getElementById(ROOT)?.remove();
+				cur = null;
+				return;
+			}
+			if (cur?.id === id) return;
+			if (backoff.id === id && Date.now() < backoff.until) return;
+			document.getElementById(ROOT)?.remove();
+			const mine = {
+				id,
+				themes: null,
+				busy: true
+			};
+			cur = mine;
+			try {
+				const themes = await loadThemes(id, id);
+				if (cur !== mine) return;
+				if (!themes.OP.length && !themes.ED.length) return;
+				mine.themes = themes;
+				const overview = await Core.waitForSelector(".overview", 1e4);
+				if (cur === mine && overview && animeId() === id) mount(mine, overview);
+			} catch (err) {
+				console.error("[AL-Additions] Anisongs sync error:", err);
+				if (cur === mine) {
+					cur = null;
+					backoff = {
+						id,
+						until: Date.now() + 3e4
+					};
+				}
+			} finally {
+				mine.busy = false;
+			}
+		}
+		function repair() {
+			const id = animeId();
+			if (!id) return;
+			if (cur?.id !== id) return void sync();
+			if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
+				const overview = document.querySelector(".overview");
+				if (overview) try {
+					mount(cur, overview);
+				} catch (err) {
+					console.error("[AL-Additions] Anisongs repair error:", err);
+				}
+			}
+		}
+		Core.ready(sync);
+		Core.onNavigate(sync);
+		Core.onBodyMutation(debounce(repair, 200));
+	});
+	defineFeature({
+		id: "banner",
+		key: "bannerEnabled",
+		section: "External Links, Downloads & Mappings",
+		def: false,
+		legacy: [
+			"bannerEnabled",
+			"bannerDownloadEnabled",
+			"bannerDownloaderEnabled"
+		],
+		title: "Anime/Manga Banner Downloader",
+		help: "Add a button for downloading the AniList banner image.",
+		options: [{
+			key: "bannerProfiles",
+			type: "toggle",
+			def: false,
+			title: "User Profile Banners",
+			help: "Also show the download button on user profile banners (it is always shown on anime and manga pages)."
+		}]
+	}, () => {
+		addStyle("ala-banner-style", `
+      .banner{position:relative}
+      .ala-banner-dl{position:absolute;right:12px;bottom:12px;z-index:5;display:inline-flex;align-items:center;justify-content:center;height:34px;min-width:34px;padding:0 8px;border:0;border-radius:17px;background:transparent;color:rgba(255,255,255,.8);font-family:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;overflow:hidden;-webkit-tap-highlight-color:transparent;transition:background .15s,color .15s}
+      .ala-banner-dl[hidden]{display:none}
+      .ala-banner-ico{display:inline-flex;filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))}
+      .ala-banner-lbl{max-width:0;overflow:hidden;white-space:nowrap;transition:max-width .2s ease,margin-left .2s ease}
+      .ala-banner-dl:hover,.ala-banner-dl:focus-visible{background:rgb(var(--color-blue));color:#fff}
+      .ala-banner-dl:hover .ala-banner-ico,.ala-banner-dl:focus-visible .ala-banner-ico,.ala-banner-dl.is-done .ala-banner-ico{filter:none}
+      .ala-banner-dl:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      .ala-banner-dl.is-done,.ala-banner-dl.is-done:hover{background:rgb(var(--color-green));color:#fff}
+      .ala-banner-dl.is-done .ala-banner-lbl{max-width:130px;margin-left:7px}
+      @media (hover:hover){.ala-banner-dl:hover .ala-banner-lbl,.ala-banner-dl:focus-visible .ala-banner-lbl{max-width:130px;margin-left:7px}}
+      @media (pointer:coarse){.ala-banner-dl{right:8px;bottom:8px;height:40px;min-width:40px;border-radius:20px}}
+      @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
+		const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
+		const bannerAllowed = () => !!mediaRoute() || /^\/user\//.test(location.pathname) && Settings.get("bannerProfiles");
+		function download(onSaved) {
+			const banner = document.querySelector(".banner");
+			const url = banner && bannerAllowed() && bannerUrl(banner);
+			if (!url) return;
+			const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
+			const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
+			const fallback = () => {
+				openTab(url);
+				onSaved?.();
+			};
+			if (typeof _GM_download === "function") try {
+				_GM_download({
+					url,
+					name,
+					saveAs: false,
+					onload: () => onSaved?.(),
+					onerror: fallback
+				});
+				return;
+			} catch (_) {}
+			fallback();
+		}
+		function createButton() {
+			const btn = document.createElement("button");
+			btn.type = "button";
+			btn.className = "ala-banner-dl";
+			btn.title = "Download banner image";
+			btn.setAttribute("aria-label", "Download banner image");
+			btn.innerHTML = `<span class="ala-banner-ico">${icon("download", 18)}</span><span class="ala-banner-lbl">Download banner</span>`;
+			const ico = btn.firstElementChild;
+			const lbl = btn.lastElementChild;
+			btn.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				download(() => {
+					btn.classList.add("is-done");
+					ico.innerHTML = icon("check", 18);
+					lbl.textContent = "Saved";
+					setTimeout(() => {
+						btn.classList.remove("is-done");
+						ico.innerHTML = icon("download", 18);
+						lbl.textContent = "Download banner";
+					}, 1600);
+				});
+			});
+			return btn;
+		}
+		function scan() {
+			const banner = document.querySelector(".banner");
+			if (!banner) return;
+			let btn = banner.querySelector(".ala-banner-dl");
+			const show = bannerAllowed() && !!bannerUrl(banner);
+			if (!btn && !show) return;
+			if (!btn) {
+				btn = createButton();
+				banner.appendChild(btn);
+			}
+			btn.hidden = !show;
+		}
+		const scanSoon = debounce(scan, 150);
+		Core.ready(scan);
+		Core.onNavigate(() => setTimeout(scan, 300));
+		Core.onBodyMutation(scanSoon);
+	});
+	var STATUSES = [
+		"Completed",
+		"Planning",
+		"Current",
+		"Paused",
+		"Dropped"
 	];
-	var CSS$1 = `
-  .ala-settings-nav-section{margin-top:26px}
-  .ala-settings-nav-heading{color:rgb(var(--color-text-lighter));margin-bottom:12px}
-  .ala-settings-nav-link{display:block;padding:9px 12px;border-radius:3px;color:rgb(var(--color-text));text-decoration:none;cursor:pointer}
-  .ala-settings-nav-link:hover,.ala-settings-nav-link.is-active{background:rgb(var(--color-foreground))}
-  #ala-settings-mobile-launcher{display:none}
-
-  #ala-settings-backdrop{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #ala-settings-panel{box-sizing:border-box;display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:8px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:14px;line-height:1.4;box-shadow:0 18px 60px rgba(0,0,0,.45);overflow:hidden;outline:none;transform:translateZ(0)}
-  #ala-settings-panel *{box-sizing:border-box}
-  #ala-settings-panel :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  #ala-settings-panel h2,#ala-settings-panel h3{margin:0;font-family:inherit}
-
-  .ala-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 10px}
-  .ala-sheet-head h2{font-size:19px;font-weight:600;line-height:1.3}
-  .ala-sheet-body{flex:1 1 auto;min-height:0;padding:0 20px 8px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
-  .ala-sheet-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-status{flex:1 1 160px;color:rgb(var(--color-text-lighter));font-size:12px;transition:color .15s}
-  .ala-status.is-error{color:rgb(var(--color-red,224,85,85));font-weight:600}
-
-  #ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
-  .ala-section{border-radius:6px;background:rgb(var(--color-background));overflow:hidden}
-  .ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}
-  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;min-height:48px;cursor:pointer;user-select:none;list-style:none;transition:background .15s}
-  .ala-section-summary::-webkit-details-marker{display:none}
-  .ala-section-summary:hover{background:rgba(var(--color-text-lighter),.06)}
-  .ala-section-summary:focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:-2px}
-  .ala-section-summary .ala-section-title{margin:0!important;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
-  .ala-chevron{display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--color-text-lighter));transition:transform .22s cubic-bezier(0.4,0,0.2,1);will-change:transform}
-  .ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}
-  .ala-section-collapsible .ala-collapsible-inner{border-top:1px solid rgba(var(--color-text-lighter),.12)}
-
-  .ala-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden}
-  .ala-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
-  .ala-collapsible-inner{min-height:0;overflow:hidden}
-
-  .ala-feature+.ala-feature{border-top:1px solid rgba(var(--color-text-lighter),.12)}
-  .ala-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:12px 14px;cursor:pointer}
-  .ala-text{display:flex;flex-direction:column;gap:3px;min-width:0}
-  .ala-title{font-size:14px;color:rgb(var(--color-text))}
-  .ala-help{color:rgb(var(--color-text-lighter));font-size:12px;line-height:1.4}
-  .ala-options-collapsible{margin:0;padding:0}
-  .ala-options{margin:0 14px 12px 20px;padding-left:12px;border-left:2px solid rgba(var(--color-blue),.4)}
-  .ala-options .ala-row{min-height:48px;padding:8px 0;cursor:default}
-  .ala-options .ala-row:has(.ala-switch){cursor:pointer}
-  .ala-child-option{margin-left:8px}
-  .ala-child-option .ala-collapsible-inner{border-left:2px solid rgba(var(--color-blue),.25);padding-left:10px}
-  .ala-child-option .ala-row{min-height:44px;padding:6px 0}
-  .ala-standalone-note{margin:0 14px 12px;padding:8px 10px;border-radius:4px;border-left:3px solid rgb(var(--color-orange,255,152,0));background:rgba(var(--color-orange,255,152,0),.12);color:rgb(var(--color-text));font-size:12px;line-height:1.45}
-
-  #ala-settings-panel input[type=number],#ala-settings-panel input[type=text],#ala-settings-panel select{width:170px;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
-  #ala-settings-panel input:disabled,#ala-settings-panel select:disabled{cursor:not-allowed}
-
-  .ala-switch{position:relative;flex:0 0 auto;width:44px;height:26px}
-  .ala-switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
-  .ala-slider{position:absolute;inset:0;border-radius:999px;background:rgba(var(--color-text-lighter),.3);transition:background .15s;pointer-events:none}
-  .ala-slider:before{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .15s}
-  .ala-switch input:checked+.ala-slider{background:rgb(var(--color-blue))}
-  .ala-switch input:checked+.ala-slider:before{transform:translateX(18px)}
-  .ala-switch input:disabled{cursor:not-allowed}
-  .ala-switch input:disabled+.ala-slider{opacity:.5}
-  .ala-switch input:focus-visible+.ala-slider{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-
-  .ala-btn{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 18px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:4px;background:transparent;color:rgb(var(--color-text));font:inherit;font-size:13px;cursor:pointer}
-  .ala-btn--primary{border-color:transparent;background:rgb(var(--color-blue));color:#fff;font-weight:600}
-  .ala-btn--danger{border-color:rgba(var(--color-red,224,85,85),.35);color:rgb(var(--color-red,224,85,85))}
-  .ala-btn--danger:hover{border-color:transparent;background:rgb(var(--color-red,224,85,85));color:#fff}
-  .ala-btn:hover{filter:brightness(1.1)}
-  .ala-icon-btn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:rgb(var(--color-text-lighter));cursor:pointer}
-  .ala-icon-btn:hover{background:rgba(var(--color-text-lighter),.14);color:rgb(var(--color-text))}
-  .ala-account-row{cursor:default}
-  .ala-account-row .ala-btn{flex:0 0 auto;min-width:145px}
-  .ala-credits-content{padding:12px 14px;color:rgb(var(--color-text-lighter));font-size:12px}
-  .ala-credit{margin-top:10px}
-  .ala-credit:first-child{margin-top:0}
-  .ala-credit ul{margin:3px 0 0;padding-left:18px;list-style:disc}
-  .ala-credit a{color:rgb(var(--color-blue));text-decoration:none}
-  .ala-credit a:hover{text-decoration:underline}
-
-  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
-  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
-  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
-  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
-  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
-  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
-  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
-  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
-  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
-  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
-  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
-  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
-  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
-
-  @media (max-width:700px){
-    .ala-settings-nav-section{display:none!important}
-    #ala-settings-backdrop{align-items:flex-end;padding:0}
-    #ala-settings-panel{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
-    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    .ala-tier-table-wrap{max-height:45vh}
-    .ala-tier-table th,.ala-tier-table td{padding:4px}
-    .ala-sheet-head{padding:16px 16px 8px}
-    .ala-sheet-body{padding:0 16px 8px}
-    .ala-sheet-foot{padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
-    .ala-sheet-foot .ala-btn{flex:1 1 40%;min-height:44px}
-    .ala-status{flex-basis:100%;order:3}
-    .ala-row{min-height:60px}
-    .ala-options .ala-row{flex-direction:column;align-items:stretch;gap:8px}
-    .ala-options .ala-row:has(.ala-switch){flex-direction:row;align-items:center;justify-content:space-between}
-    .ala-account-row{flex-direction:column;align-items:stretch;gap:10px}
-    .ala-account-row .ala-btn{width:100%;min-height:42px}
-    #ala-settings-panel input[type=number],#ala-settings-panel input[type=text],#ala-settings-panel select{width:100%;height:44px;font-size:16px}
-    #ala-settings-mobile-launcher{display:inline-flex;align-items:center;gap:8px;position:fixed;left:16px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:99998;min-height:46px;padding:0 18px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgb(var(--color-blue));color:#fff;font:inherit;font-size:14px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer}
-    #ala-settings-mobile-launcher:active{transform:translateY(1px)}
-  }
-  @media (prefers-reduced-motion:reduce){.ala-slider,.ala-slider:before,.ala-collapsible,.ala-chevron{transition:none!important}}`;
-	var onSettingsPage = () => /^\/settings(\/|$)/.test(location.pathname);
-	var rowText = (title, help) => `<span class="ala-text"><span class="ala-title">${title}</span><span class="ala-help">${help}</span></span>`;
-	var optionHtml = (r) => {
-		const tag = r.type === "json" ? "div" : "label";
-		const rowHtml = `<${tag} class="ala-row">${rowText(r.title, r.help)}${TYPES$1[r.type].html(r, Settings.get(r.key))}</${tag}>`;
-		if (r.childOf) return `<div class="ala-collapsible ala-child-option ${!!Settings.get(r.childOf) ? "is-open" : ""}" data-child-for="${r.childOf}">
-      <div class="ala-collapsible-inner">
-        ${rowHtml}
-      </div>
-    </div>`;
-		return rowHtml;
-	};
-	var featureHtml = (f) => {
-		if (f.toggle.type === "json") return `<div class="ala-feature" data-feature="${f.id}">
-      <div class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES$1.json.html(f.toggle, Settings.get(f.toggle.key))}</div>
-    </div>`;
-		const isFeatureOn = !!Settings.get(f.toggle.key);
-		return `<div class="ala-feature ${isFeatureOn ? "" : "is-off"}" data-feature="${f.id}">
-    <label class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES$1.toggle.html(f.toggle, isFeatureOn)}</label>
-    ${f.options.length ? `
-      <div class="ala-collapsible ala-options-collapsible ${isFeatureOn ? "is-open" : ""}">
-        <div class="ala-collapsible-inner">
-          <div class="ala-options">${f.options.map(optionHtml).join("")}</div>
-        </div>
-      </div>` : ""}
-  </div>`;
-	};
-	function accountsHtml() {
-		const malConnected = !!store$1.get("mal_token", null);
-		return `<h3 class="ala-section-title">Connected Accounts</h3>
-  <div class="ala-section">
-    <div class="ala-row ala-account-row">
-      <span class="ala-text">
-        <span class="ala-title">MyAnimeList</span>
-        <span class="ala-help" id="ala-status-mal">${malConnected ? "Connected" : "Not connected"}</span>
-      </span>
-      <button type="button" class="ala-btn ${malConnected ? "ala-btn--danger" : "ala-btn--primary"}" id="ala-btn-mal">
-        ${malConnected ? "Disconnect" : "Connect to MAL"}
-      </button>
-    </div>
-  </div>`;
+	function normalizeStatus(raw) {
+		const s = (raw || "").trim().toLowerCase();
+		if (s.includes("plan")) return "Planning";
+		if (s.includes("complete")) return "Completed";
+		if (s.includes("current") || s.includes("watch") || s.includes("read") || s.includes("repeat")) return "Current";
+		if (s.includes("pause") || s.includes("hold")) return "Paused";
+		if (s.includes("drop")) return "Dropped";
+		return raw ? raw.trim() : "Planning";
 	}
-	function backupRestoreHtml() {
-		const isDev = !!Settings.get("devModeEnabled");
-		return `<details class="ala-section-dropdown" data-section="backup" open>
-    <summary class="ala-section-summary">
-      <span class="ala-section-title">Backup &amp; Restore</span>
-      <span class="ala-chevron">${icon("chevron", 14)}</span>
-    </summary>
-    <div class="ala-collapsible ala-section-collapsible">
-      <div class="ala-collapsible-inner">
-        <div class="ala-section">
-          <div class="ala-row ala-account-row">
-            <span class="ala-text">
-              <span class="ala-title">Export Settings</span>
-              <span class="ala-help">Download all settings as a backup file. Excludes account credentials.</span>
-            </span>
-            <button type="button" class="ala-btn" id="ala-btn-export">Export</button>
-          </div>
-          <div class="ala-row ala-account-row" style="border-top:1px solid rgba(var(--color-text-lighter),.12)">
-            <span class="ala-text">
-              <span class="ala-title">Export with Credentials</span>
-              <span class="ala-help">Include MyAnimeList tokens. A password is required.</span>
-            </span>
-            <button type="button" class="ala-btn ala-btn--danger" id="ala-btn-export-secrets">Export with Secrets</button>
-          </div>
-          <div class="ala-row ala-account-row" id="ala-row-export-raw" style="border-top:1px solid rgba(var(--color-text-lighter),.12);${isDev ? "" : "display:none;"}">
-            <span class="ala-text">
-              <span class="ala-title">Export Raw JSON</span>
-              <span class="ala-help">Export unminified raw JSON including all settings and credentials without encryption (for testing/verification).</span>
-            </span>
-            <button type="button" class="ala-btn ala-btn--danger" id="ala-btn-export-raw">Export Raw JSON</button>
-          </div>
-          <div class="ala-row ala-account-row" style="border-top:1px solid rgba(var(--color-text-lighter),.12)">
-            <span class="ala-text">
-              <span class="ala-title">Import Settings</span>
-              <span class="ala-help">Restore settings from an <code>al-additions.settings</code> file. Existing values not in the backup are kept.</span>
-            </span>
-            <button type="button" class="ala-btn ala-btn--primary" id="ala-btn-import">Import File</button>
-            <input type="file" id="ala-import-file" accept=".settings,.json,text/*" style="display:none">
-          </div>
-        </div>
-      </div>
-    </div>
-  </details>`;
+	function getEntryData(el) {
+		const cached = el._alaCompareData;
+		if (cached) return cached;
+		const title = (el.querySelector(".title a, .title")?.textContent || "").trim();
+		const scores = el.querySelectorAll(".score");
+		const yourScoreEl = el.querySelector(".score[label=\"Score\"]") || scores[0];
+		const otherScoreEl = Array.from(scores).find((s) => s !== yourScoreEl) || scores[1];
+		const yourScoreAttr = yourScoreEl?.getAttribute("score");
+		let yourScore = yourScoreAttr ? parseFloat(yourScoreAttr) : parseFloat(yourScoreEl?.textContent?.replace(/[^\d.]/g, "") || "0");
+		if (!Number.isFinite(yourScore)) yourScore = 0;
+		const otherScoreAttr = otherScoreEl?.getAttribute("score");
+		let otherScore = otherScoreAttr ? parseFloat(otherScoreAttr) : parseFloat(otherScoreEl?.textContent?.replace(/[^\d.]/g, "") || "0");
+		if (!Number.isFinite(otherScore)) otherScore = 0;
+		const statuses = el.querySelectorAll(".status");
+		const yourStatusEl = el.querySelector(".status[label=\"Your Status\"]") || statuses[0];
+		const otherStatusEl = Array.from(statuses).find((s) => s !== yourStatusEl) || statuses[1];
+		const yourStatus = normalizeStatus(yourStatusEl?.textContent || "");
+		const otherStatus = normalizeStatus(otherStatusEl?.textContent || "");
+		const data = {
+			el,
+			title,
+			yourScore,
+			otherScore,
+			yourStatus,
+			otherStatus
+		};
+		el._alaCompareData = data;
+		return data;
 	}
-	function sectionsHtml() {
-		return [...new Set([...SECTIONS, ...features.map((f) => f.section)])].map((name) => {
-			const items = features.filter((f) => f.section === name);
-			return items.length ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
-            <summary class="ala-section-summary">
-              <span class="ala-section-title">${esc(name)}</span>
-              <span class="ala-chevron">${icon("chevron", 14)}</span>
+	function compareEntries(a, b, col, dir) {
+		if (col === "title") {
+			const cmp = a.title.localeCompare(b.title, void 0, {
+				numeric: true,
+				sensitivity: "base"
+			});
+			return dir === "asc" ? cmp : -cmp;
+		}
+		const aVal = col === "yourScore" ? a.yourScore : a.otherScore;
+		const bVal = col === "yourScore" ? b.yourScore : b.otherScore;
+		if (aVal !== bVal) return dir === "asc" ? aVal - bVal : bVal - aVal;
+		return a.title.localeCompare(b.title, void 0, {
+			numeric: true,
+			sensitivity: "base"
+		});
+	}
+	defineFeature({
+		id: "compareView",
+		key: "compareViewEnabled",
+		section: "AniList Enhancements",
+		def: false,
+		title: "Compare View Improvements",
+		help: "Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown."
+	}, () => {
+		addStyle("ala-compare-style", `
+      .content.container.ala-compare-page-container {
+        padding-left: 18px !important;
+        padding-right: 18px !important;
+        max-width: calc(100% - 36px) !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+      }
+      .ala-compare-wrap {
+        display: flex;
+        gap: 20px;
+        align-items: flex-start;
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 30px;
+      }
+      .ala-compare-sidebar {
+        flex: 0 0 170px;
+        width: 170px;
+        box-sizing: border-box;
+        position: sticky;
+        top: 85px;
+        z-index: 10;
+      }
+      .ala-compare-main {
+        flex: 1 1 0%;
+        min-width: 0;
+      }
+      .ala-compare-main .compare {
+        margin-top: 0 !important;
+      }
+      .ala-compare-card {
+        background: rgb(var(--color-foreground));
+        border-radius: 6px;
+        padding: 14px 16px;
+        color: rgb(var(--color-text));
+        font-size: 1.3rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,.15);
+        box-sizing: border-box;
+      }
+      .ala-compare-card-title {
+        font-size: 1.35rem;
+        font-weight: 600;
+        margin-bottom: 12px;
+        color: rgb(var(--color-text));
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+      }
+      .ala-compare-card-title::-webkit-details-marker {
+        display: none;
+      }
+      .ala-compare-arrow-icon {
+        display: none;
+      }
+      .ala-compare-active-badge {
+        display: none;
+        font-size: 1.15rem;
+        font-weight: 400;
+        color: rgb(var(--color-text-lighter));
+        margin-left: auto;
+        margin-right: 8px;
+      }
+      .ala-compare-status-list {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+      .ala-compare-status-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        cursor: pointer;
+        user-select: none;
+        transition: color .15s ease;
+        font-size: 1.3rem;
+      }
+      .ala-compare-status-item:hover {
+        color: rgb(var(--color-blue));
+      }
+      .ala-compare-cb {
+        accent-color: rgb(var(--color-blue));
+        width: 15px;
+        height: 15px;
+        margin: 0;
+        cursor: pointer;
+      }
+      .ala-compare-cb-label {
+        flex: 1 1 auto;
+      }
+      .ala-compare-count {
+        font-size: 1.15rem;
+        color: rgb(var(--color-text-lighter));
+      }
+      .ala-compare-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(var(--color-text-lighter), .15);
+        font-size: 1.2rem;
+      }
+      .ala-compare-btn-link {
+        background: transparent;
+        border: 0;
+        padding: 0;
+        color: rgb(var(--color-text-lighter));
+        font: inherit;
+        cursor: pointer;
+        transition: color .15s ease;
+      }
+      .ala-compare-btn-link:hover {
+        color: rgb(var(--color-blue));
+      }
+      .ala-compare-dot {
+        color: rgb(var(--color-text-lighter));
+        opacity: .5;
+      }
+      .ala-compare-load-indicator {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(var(--color-text-lighter), .12);
+        font-size: 1.15rem;
+        color: rgb(var(--color-text-lighter));
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .ala-compare-spinner {
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(var(--color-text-lighter), .25);
+        border-top-color: rgb(var(--color-blue));
+        border-radius: 50%;
+        animation: ala-compare-spin .7s linear infinite;
+        flex-shrink: 0;
+        display: inline-block;
+      }
+      @keyframes ala-compare-spin {
+        to { transform: rotate(360deg); }
+      }
+      .ala-compare-empty {
+        padding: 40px 20px;
+        text-align: center;
+        color: rgb(var(--color-text-lighter));
+        font-size: 1.4rem;
+        background: rgb(var(--color-foreground));
+        border-radius: 4px;
+        margin-top: 12px;
+      }
+      .compare .entry {
+        display: flex !important;
+        align-items: stretch !important;
+      }
+      .compare .entry.ala-hidden {
+        display: none !important;
+      }
+      .compare .entry > div {
+        flex: 1 1 0% !important;
+        min-width: 0 !important;
+        box-sizing: border-box !important;
+      }
+      .compare .entry > div.title {
+        flex: 3.5 3.5 0% !important;
+        min-width: 0 !important;
+      }
+      .entry.header > div {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .entry.header > div.title {
+        justify-content: flex-start;
+      }
+      @media (max-width: 760px) {
+        .entry.header > div.status,
+        .entry .status {
+          display: none !important;
+        }
+      }
+      .ala-header-wrap {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        max-width: 100%;
+      }
+      .entry.header > div.title .ala-header-wrap {
+        justify-content: flex-start;
+      }
+      .ala-header-label {
+        line-height: 1.25;
+        text-align: center;
+        word-break: break-word;
+      }
+      .entry.header > div.title .ala-header-label {
+        text-align: left;
+      }
+      .ala-sortable-header {
+        cursor: pointer;
+        user-select: none;
+        transition: background-color .15s ease;
+        border-radius: 3px;
+      }
+      .ala-sortable-header:hover {
+        background-color: var(--ala-header-hover-bg, rgba(255, 255, 255, 0.18)) !important;
+      }
+      .ala-sort-arrow {
+        position: absolute;
+        left: 100%;
+        top: 50%;
+        transform: translateY(-50%);
+        margin-left: 4px;
+        font-size: 11px;
+        color: inherit;
+        opacity: 0.85;
+        user-select: none;
+        pointer-events: none;
+        white-space: nowrap;
+      }
+
+      @media (min-width: 851px) {
+        .ala-compare-card-title {
+          pointer-events: none;
+        }
+        .ala-compare-card > .ala-compare-content {
+          display: block !important;
+        }
+      }
+
+      @media (max-width: 850px) {
+        .content.container.ala-compare-page-container {
+          padding-left: 10px !important;
+          padding-right: 10px !important;
+          max-width: calc(100% - 20px) !important;
+        }
+        .ala-compare-wrap {
+          flex-direction: column;
+          gap: 16px;
+          margin-top: 18px;
+        }
+        .ala-compare-sidebar {
+          width: 100%;
+          flex: none;
+          position: static;
+        }
+        .ala-compare-card {
+          padding: 0;
+          overflow: hidden;
+        }
+        .ala-compare-card-title {
+          padding: 12px 14px;
+          margin-bottom: 0;
+          cursor: pointer;
+        }
+        .ala-compare-active-badge {
+          display: inline-block;
+        }
+        .ala-compare-arrow-icon {
+          display: inline-block;
+          font-size: 10px;
+          transition: transform .2s ease;
+          opacity: .7;
+        }
+        .ala-compare-card[open] .ala-compare-arrow-icon {
+          transform: rotate(180deg);
+        }
+        .ala-compare-content {
+          padding: 10px 14px 14px;
+          border-top: 1px solid rgba(var(--color-text-lighter), .12);
+        }
+        .ala-compare-status-list {
+          flex-direction: column;
+          gap: 10px;
+        }
+      }
+    `);
+		const isComparePage = () => /\/(animelist|mangalist)\/compare/i.test(location.pathname);
+		let activeSortCol = "otherScore";
+		let activeSortDir = "desc";
+		const activeStatuses = new Set(STATUSES);
+		let lastProcessedCount = -1;
+		let currentRoute = "";
+		let isLoadingAll = false;
+		let isCompareLoaded = false;
+		let loadFailed = false;
+		let isMutatingDOM = false;
+		let loadAbortState = null;
+		let resizeCleanup = null;
+		let indicatorTimer = null;
+		function getCompareVue() {
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const scrollerEl = win.document?.querySelector?.(".scroller") || document.querySelector(".scroller");
+			if (scrollerEl && scrollerEl.__vue__?.$parent) return scrollerEl.__vue__.$parent;
+			const compareEl = win.document?.querySelector?.(".compare") || document.querySelector(".compare");
+			if (compareEl && compareEl.__vue__) return compareEl.__vue__;
+			return null;
+		}
+		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+		const setRpcBlock = (fn) => {
+			pageWin.__ALFL_RPC_BLOCK__ = fn;
+		};
+		const compareBlocker = (q, vars) => isComparePage() && (/\bcompareWithAuthList\b/i.test(q || "") || Boolean(vars?.compareWithAuthList));
+		const installBlocker = () => {
+			setRpcBlock(compareBlocker);
+		};
+		function disableNativeScrollers(listContainer) {
+			(listContainer?.parentElement || listContainer || document).querySelectorAll(".scroller").forEach((el) => {
+				try {
+					const v = el.__vue__;
+					if (v) {
+						if (typeof v.check === "function") {
+							window.removeEventListener("scroll", v.check);
+							window.removeEventListener("resize", v.check);
+							v._scrollContainer?.removeEventListener?.("scroll", v.check);
+							v._scrollContainer?.removeEventListener?.("resize", v.check);
+						}
+						v.execute = () => {};
+						v.handler = () => {};
+						if (v.$parent) {
+							v.$parent.complete = true;
+							v.$parent.loading = false;
+						}
+						v.$destroy?.();
+					}
+				} catch {}
+				el.remove();
+			});
+		}
+		async function resolveCompareUsers() {
+			const type = location.pathname.toLowerCase().includes("mangalist") ? "MANGA" : "ANIME";
+			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+			const userMap = win.__ALFL_USER_MAP__;
+			let otherName;
+			let otherId;
+			const urlMatch = location.pathname.match(/\/user\/([^/]+)\/(animelist|mangalist)\/compare/i);
+			if (urlMatch) try {
+				otherName = decodeURIComponent(urlMatch[1]);
+			} catch {
+				otherName = urlMatch[1];
+			}
+			if (!otherName) {
+				const queryUser = new URLSearchParams(location.search).get("user");
+				if (queryUser) otherName = queryUser;
+			}
+			const vue = getCompareVue();
+			if (vue) {
+				if (!otherName) otherName = vue.user?.name || vue.userName || void 0;
+				if (!otherId) otherId = Number(vue.user?.id || vue.userId) || void 0;
+			}
+			if (otherName && !otherId && userMap) otherId = userMap.get(otherName.toLowerCase());
+			if (otherName && otherId) {
+				if (userMap) userMap.set(otherName.toLowerCase(), otherId);
+				if (win.__ALFL_ID_MAP__) win.__ALFL_ID_MAP__.set(otherId, otherName);
+			}
+			let viewerId = Number(store$1.get("al_user_id", 0)) || void 0;
+			let viewerName = store$1.get("al_username", null) || void 0;
+			if (!viewerId || !viewerName) {
+				const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+				if (nuxtUser) {
+					if (!viewerId && nuxtUser.id) viewerId = Number(nuxtUser.id);
+					if (!viewerName && nuxtUser.name) viewerName = String(nuxtUser.name);
+				}
+			}
+			if (!viewerId || !viewerName) {
+				const viewer = await AniList.viewer();
+				if (viewer) {
+					viewerId = viewer.id;
+					viewerName = viewer.name;
+				}
+			}
+			if (!viewerId && viewerName && userMap) viewerId = userMap.get(viewerName.toLowerCase());
+			return {
+				viewerId,
+				viewerName,
+				otherId,
+				otherName,
+				type
+			};
+		}
+		function updateHeaderHoverColor() {
+			const testEl = document.createElement("div");
+			testEl.style.color = "rgb(var(--color-blue))";
+			document.body.appendChild(testEl);
+			const computedColor = getComputedStyle(testEl).color;
+			testEl.remove();
+			const m = computedColor.match(/\d+/g);
+			let isLight = false;
+			if (m && m.length >= 3) {
+				const r = parseInt(m[0], 10);
+				const g = parseInt(m[1], 10);
+				const b = parseInt(m[2], 10);
+				isLight = (r * 299 + g * 587 + b * 114) / 1e3 > 155;
+			}
+			const hoverBg = isLight ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.18)";
+			document.documentElement.style.setProperty("--ala-header-hover-bg", hoverBg);
+		}
+		function cleanHeaderText(raw) {
+			return raw.replace(/[▲▼]/g, "").trim();
+		}
+		function renderHeaderContent(el, baseText, isActive, activeDir) {
+			const clean = cleanHeaderText(baseText);
+			let wrap = el.querySelector(".ala-header-wrap");
+			if (!wrap) {
+				wrap = document.createElement("div");
+				wrap.className = "ala-header-wrap";
+				el.innerHTML = "";
+				el.appendChild(wrap);
+			}
+			let label = wrap.querySelector(".ala-header-label");
+			if (!label) {
+				label = document.createElement("span");
+				label.className = "ala-header-label";
+				wrap.appendChild(label);
+			}
+			label.textContent = clean;
+			let arrow = wrap.querySelector(".ala-sort-arrow");
+			if (isActive) {
+				if (!arrow) {
+					arrow = document.createElement("span");
+					arrow.className = "ala-sort-arrow";
+					wrap.appendChild(arrow);
+				}
+				arrow.textContent = activeDir === "asc" ? "▲" : "▼";
+			} else arrow?.remove();
+		}
+		function updateSortArrows(titleEl, yourScoreEl, otherScoreEl, activeCol, activeDir) {
+			updateHeaderHoverColor();
+			const items = [
+				[titleEl, "title"],
+				[yourScoreEl, "yourScore"],
+				[otherScoreEl, "otherScore"]
+			];
+			for (const [el, col] of items) {
+				if (!el) continue;
+				el.classList.add("ala-sortable-header");
+				if (!el._alaBaseText) el._alaBaseText = cleanHeaderText(el.textContent || "");
+				const baseText = el._alaBaseText;
+				renderHeaderContent(el, baseText, col === activeCol, activeDir);
+			}
+		}
+		function applyFilter(listContainer, entries) {
+			let visibleCount = 0;
+			for (const el of entries) {
+				const d = getEntryData(el);
+				const show = activeStatuses.has(d.yourStatus) && activeStatuses.has(d.otherStatus);
+				el.classList.toggle("ala-hidden", !show);
+				el.style.display = "";
+				if (show) visibleCount++;
+			}
+			let emptyEl = listContainer.querySelector(".ala-compare-empty");
+			if (visibleCount === 0 && entries.length > 0) {
+				if (!emptyEl) {
+					emptyEl = document.createElement("div");
+					emptyEl.className = "ala-compare-empty";
+					emptyEl.textContent = "No entries match the selected status filters.";
+					listContainer.appendChild(emptyEl);
+				}
+				emptyEl.style.display = "";
+			} else if (emptyEl) emptyEl.style.display = "none";
+		}
+		function applySort(listContainer, entries, col, dir) {
+			if (entries.length > 0) listContainer.querySelector(".no-results")?.remove();
+			entries.sort((a, b) => {
+				return compareEntries(getEntryData(a), getEntryData(b), col, dir);
+			});
+			const frag = document.createDocumentFragment();
+			for (const el of entries) frag.appendChild(el);
+			isMutatingDOM = true;
+			listContainer.appendChild(frag);
+			const emptyEl = listContainer.querySelector(".ala-compare-empty");
+			if (emptyEl) listContainer.appendChild(emptyEl);
+			isMutatingDOM = false;
+		}
+		function updateStatusCounts(sidebar, entries) {
+			const counts = {
+				Completed: 0,
+				Planning: 0,
+				Current: 0,
+				Paused: 0,
+				Dropped: 0
+			};
+			for (const el of entries) {
+				const d = getEntryData(el);
+				const counted = new Set([d.yourStatus, d.otherStatus]);
+				for (const s of counted) if (s in counts) counts[s]++;
+			}
+			sidebar.querySelectorAll(".ala-compare-count").forEach((span) => {
+				const status = span.dataset.status;
+				if (status && status in counts) span.textContent = String(counts[status]);
+			});
+			const badge = sidebar.querySelector(".ala-compare-active-badge");
+			if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
+		}
+		function setLoadIndicator(sidebar, text) {
+			if (indicatorTimer) {
+				clearTimeout(indicatorTimer);
+				indicatorTimer = null;
+			}
+			let indicator = sidebar.querySelector("#ala-compare-load-indicator");
+			if (!text) {
+				indicator?.remove();
+				return;
+			}
+			if (!indicator) {
+				indicator = document.createElement("div");
+				indicator.id = "ala-compare-load-indicator";
+				indicator.className = "ala-compare-load-indicator";
+				indicator.innerHTML = `
+          <span class="ala-compare-spinner"></span>
+          <span class="ala-compare-load-text"></span>
+        `;
+				(sidebar.querySelector(".ala-compare-content") || sidebar.querySelector(".ala-compare-card"))?.appendChild(indicator);
+			}
+			indicator.style.display = "flex";
+			const textEl = indicator.querySelector(".ala-compare-load-text");
+			if (textEl) textEl.textContent = text;
+		}
+		function getActiveCompareContainer(fallback) {
+			return document.getElementById("ala-compare-table") || fallback || document.querySelector(".ala-compare-main .compare") || null;
+		}
+		function triggerFilterUpdate(sidebar, fallback) {
+			const badge = sidebar.querySelector(".ala-compare-active-badge");
+			if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
+			const target = getActiveCompareContainer(fallback);
+			if (!target) return;
+			applyFilter(target, Array.from(target.querySelectorAll(".entry:not(.header)")));
+		}
+		function triggerSort(col, fallback) {
+			if (activeSortCol === col) activeSortDir = activeSortDir === "asc" ? "desc" : "asc";
+			else {
+				activeSortCol = col;
+				activeSortDir = col === "title" ? "asc" : "desc";
+			}
+			const target = getActiveCompareContainer(fallback);
+			if (!target) return;
+			const currentHeader = target.querySelector(".entry.header");
+			if (currentHeader) {
+				const titleH = currentHeader.querySelector(".title");
+				const scores = currentHeader.querySelectorAll(".score");
+				updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
+			}
+			applySort(target, Array.from(target.querySelectorAll(".entry:not(.header)")), activeSortCol, activeSortDir);
+		}
+		async function loadAllEntriesViaMediaList(compareRoot, sidebar) {
+			if (isLoadingAll || isCompareLoaded || loadFailed) return;
+			isLoadingAll = true;
+			const abortState = { abort: false };
+			loadAbortState = abortState;
+			indicatorTimer = setTimeout(() => {
+				if (!abortState.abort && isComparePage()) setLoadIndicator(sidebar, "Loading full compare list...");
+			}, 250);
+			try {
+				const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers();
+				if (abortState.abort || !isComparePage()) return;
+				const viewerTarget = viewerId || viewerName;
+				const otherTarget = otherId || otherName;
+				if (!viewerTarget || !otherTarget) {
+					logDebug("[COMPARE] Missing viewer or other user for getMediaList, keeping fallback");
+					loadFailed = true;
+					return;
+				}
+				const [myListRes, otherListRes] = await Promise.all([AniList.getMediaList(viewerTarget, type, {
+					userId: viewerId,
+					userName: viewerId ? void 0 : viewerName
+				}), AniList.getMediaList(otherTarget, type, {
+					userId: otherId,
+					userName: otherId ? void 0 : otherName
+				})]);
+				if (abortState.abort || !isComparePage()) return;
+				const myMap = new Map();
+				for (const entry of myListRes.allEntries) myMap.set(entry.mediaId, entry);
+				const safeOtherName = esc(otherListRes.user?.name || otherName || "User");
+				const scopeAttr = Array.from(compareRoot.attributes).map((a) => a.name).find((n) => /^data-v-[a-f0-9]+$/i.test(n));
+				const seenMediaIds = new Set();
+				const matchedNodes = [];
+				for (const otherEntry of otherListRes.allEntries) {
+					const mediaId = otherEntry.mediaId;
+					if (seenMediaIds.has(mediaId)) continue;
+					const myEntry = myMap.get(mediaId);
+					if (!myEntry) continue;
+					seenMediaIds.add(mediaId);
+					const title = otherEntry.media?.title?.userPreferred || otherEntry.media?.title?.romaji || otherEntry.media?.title?.english || myEntry.media?.title?.userPreferred || "Unknown";
+					const yourScore = myEntry.score || 0;
+					const otherScore = otherEntry.score || 0;
+					const yourStatus = normalizeStatus(myEntry.status);
+					const otherStatus = normalizeStatus(otherEntry.status);
+					const row = document.createElement("div");
+					row.className = "entry";
+					if (scopeAttr) row.setAttribute(scopeAttr, "");
+					row.innerHTML = `
+            <div class="title"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
+              <a href="/${type.toLowerCase()}/${mediaId}/" class=""${scopeAttr ? ` ${scopeAttr}=""` : ""}></a>
+            </div>
+            <div class="score" label="Score" score="${yourScore}"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${yourScore > 0 ? yourScore : "0"}</span></div>
+            <div class="score" label="${safeOtherName}'s Score" score="${otherScore}"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${otherScore > 0 ? otherScore : "0"}</span></div>
+            <div class="status" label="Your Status"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${yourStatus}</span></div>
+            <div class="status" label="${safeOtherName}'s Status"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${otherStatus}</span></div>
+          `;
+					const link = row.querySelector(".title a");
+					if (link) link.textContent = title;
+					row._alaCompareData = {
+						el: row,
+						title,
+						yourScore,
+						otherScore,
+						yourStatus,
+						otherStatus
+					};
+					matchedNodes.push(row);
+				}
+				logDebug("[COMPARE] Matched entries via MediaListCollection:", matchedNodes.length);
+				const main = compareRoot.parentElement || document.querySelector(".ala-compare-main");
+				if (!main) return;
+				let customTable = main.querySelector("#ala-compare-table");
+				if (!customTable) {
+					customTable = document.createElement("div");
+					customTable.id = "ala-compare-table";
+					customTable.className = "compare";
+					if (scopeAttr) customTable.setAttribute(scopeAttr, "");
+					main.appendChild(customTable);
+				}
+				let customHeader = customTable.querySelector(".entry.header");
+				if (!customHeader) {
+					customHeader = document.createElement("div");
+					customHeader.className = "entry header";
+					if (scopeAttr) customHeader.setAttribute(scopeAttr, "");
+					customHeader.innerHTML = `
+            <div class="title ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
+              <div class="ala-header-wrap"><span class="ala-header-label">Title</span></div>
+            </div>
+            <div class="score ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
+              <div class="ala-header-wrap"><span class="ala-header-label">Your Score</span></div>
+            </div>
+            <div class="score ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
+              <div class="ala-header-wrap"><span class="ala-header-label">${safeOtherName}'s Score</span></div>
+            </div>
+            <div class="status"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
+              <span class="ala-header-label">Your Status</span>
+            </div>
+            <div class="status"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
+              <span class="ala-header-label">${safeOtherName}'s Status</span>
+            </div>
+          `;
+					customTable.appendChild(customHeader);
+					const titleH = customHeader.querySelector(".title");
+					const scores = customHeader.querySelectorAll(".score");
+					titleH?.addEventListener("click", () => triggerSort("title", compareRoot));
+					scores[0]?.addEventListener("click", () => triggerSort("yourScore", compareRoot));
+					scores[1]?.addEventListener("click", () => triggerSort("otherScore", compareRoot));
+				}
+				const titleH = customHeader.querySelector(".title");
+				const scores = customHeader.querySelectorAll(".score");
+				updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
+				matchedNodes.sort((a, b) => {
+					return compareEntries(getEntryData(a), getEntryData(b), activeSortCol, activeSortDir);
+				});
+				isMutatingDOM = true;
+				customTable.querySelectorAll(".entry:not(.header)").forEach((el) => el.remove());
+				const frag = document.createDocumentFragment();
+				for (const el of matchedNodes) frag.appendChild(el);
+				customTable.appendChild(frag);
+				if (matchedNodes.length === 0) {
+					let empty = customTable.querySelector(".no-results");
+					if (!empty) {
+						empty = document.createElement("div");
+						empty.className = "no-results";
+						empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
+						customTable.appendChild(empty);
+					}
+					customHeader.style.display = "none";
+				} else {
+					customTable.querySelector(".no-results")?.remove();
+					customHeader.style.display = "";
+				}
+				const emptyEl = customTable.querySelector(".ala-compare-empty");
+				if (emptyEl) customTable.appendChild(emptyEl);
+				isMutatingDOM = false;
+				compareRoot.style.display = "none";
+				disableNativeScrollers(compareRoot);
+				lastProcessedCount = matchedNodes.length;
+				isCompareLoaded = true;
+				installBlocker();
+				updateStatusCounts(sidebar, matchedNodes);
+				applyFilter(customTable, matchedNodes);
+			} catch (err) {
+				loadFailed = true;
+				setRpcBlock();
+				console.error("[AL-Additions] CompareView getMediaList error:", err);
+			} finally {
+				isLoadingAll = false;
+				loadAbortState = null;
+				setLoadIndicator(sidebar, null);
+			}
+		}
+		function cleanup() {
+			if (!isComparePage()) setRpcBlock();
+			else installBlocker();
+			if (indicatorTimer) {
+				clearTimeout(indicatorTimer);
+				indicatorTimer = null;
+			}
+			if (loadAbortState) {
+				loadAbortState.abort = true;
+				loadAbortState = null;
+			}
+			isLoadingAll = false;
+			isCompareLoaded = false;
+			loadFailed = false;
+			isMutatingDOM = false;
+			if (resizeCleanup) {
+				resizeCleanup();
+				resizeCleanup = null;
+			}
+			const customTable = document.getElementById("ala-compare-table");
+			if (customTable) customTable.remove();
+			const wrap = document.getElementById("ala-compare-wrap");
+			if (wrap) {
+				const main = wrap.querySelector(".ala-compare-main");
+				const compareRoot = main?.querySelector(".compare:not(#ala-compare-table)") || main?.firstElementChild;
+				if (compareRoot && wrap.parentElement) {
+					if (compareRoot.style) compareRoot.style.display = "";
+					wrap.parentElement.insertBefore(compareRoot, wrap);
+				}
+				wrap.remove();
+			} else {
+				const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
+				if (compareRoot) {
+					delete compareRoot.dataset.alaCompareInit;
+					compareRoot.style.display = "";
+				}
+			}
+			document.querySelectorAll(".ala-compare-page-container").forEach((el) => {
+				el.classList.remove("ala-compare-page-container");
+			});
+			document.querySelectorAll(".compare .entry.ala-hidden").forEach((el) => {
+				el.classList.remove("ala-hidden");
+			});
+			const header = document.querySelector(".compare:not(#ala-compare-table) .entry.header, .entry.header");
+			if (header) {
+				delete header._alaHeaderBound;
+				delete header.dataset.alaCompareInit;
+				header.querySelectorAll(".ala-sortable-header").forEach((el) => {
+					el.classList.remove("ala-sortable-header");
+					const baseText = el._alaBaseText;
+					if (baseText) el.textContent = cleanHeaderText(baseText);
+					delete el._alaBaseText;
+				});
+				header.querySelectorAll(".status").forEach((el) => {
+					const label = el.querySelector(".ala-header-label");
+					if (label) el.textContent = label.textContent || "";
+				});
+			}
+			lastProcessedCount = -1;
+		}
+		function setupCompareView(compareRoot, header, entries) {
+			if (header) header.querySelectorAll(".status").forEach((statusEl) => {
+				if (!statusEl.querySelector(".ala-header-label")) statusEl.innerHTML = `<span class="ala-header-label">${statusEl.textContent?.trim() || ""}</span>`;
+			});
+			const headerCells = header ? Array.from(header.children) : [];
+			const titleHeader = headerCells.length >= 3 ? header.querySelector(".title") || headerCells.find((el) => /title/i.test(el.textContent || "")) || headerCells[0] : null;
+			const yourScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => /your score/i.test(el.textContent || "")) || header.querySelector(".score:first-of-type") || headerCells[1] : null;
+			const otherScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => el !== yourScoreHeader && /score/i.test(el.textContent || "")) || header.querySelectorAll(".score")[1] || headerCells[2] : null;
+			const container = compareRoot.closest(".content.container") || compareRoot.parentElement;
+			if (container) container.classList.add("ala-compare-page-container");
+			let wrap = document.getElementById("ala-compare-wrap");
+			let sidebar = document.getElementById("ala-compare-sidebar");
+			if (!wrap || !wrap.contains(compareRoot)) {
+				wrap?.remove();
+				wrap = document.createElement("div");
+				wrap.id = "ala-compare-wrap";
+				wrap.className = "ala-compare-wrap";
+				sidebar = document.createElement("aside");
+				sidebar.id = "ala-compare-sidebar";
+				sidebar.className = "ala-compare-sidebar";
+				const main = document.createElement("div");
+				main.className = "ala-compare-main";
+				compareRoot.parentElement?.insertBefore(wrap, compareRoot);
+				wrap.appendChild(sidebar);
+				wrap.appendChild(main);
+				main.appendChild(compareRoot);
+			}
+			if (sidebar && !sidebar.querySelector(".ala-compare-card")) {
+				const isMobileScreen = window.innerWidth <= 850;
+				sidebar.innerHTML = `
+          <details class="ala-compare-card" ${isMobileScreen ? "" : "open"}>
+            <summary class="ala-compare-card-title">
+              <span>Status Filter</span>
+              <span class="ala-compare-active-badge">${activeStatuses.size}/${STATUSES.length}</span>
+              <span class="ala-compare-arrow-icon">▼</span>
             </summary>
-            <div class="ala-collapsible ala-section-collapsible">
-              <div class="ala-collapsible-inner">
-                <div class="ala-section">${items.map(featureHtml).join("")}</div>
+            <div class="ala-compare-content">
+              <div class="ala-compare-status-list">
+                ${STATUSES.map((s) => `
+                  <label class="ala-compare-status-item">
+                    <input type="checkbox" class="ala-compare-cb" data-status="${s}" ${activeStatuses.has(s) ? "checked" : ""}>
+                    <span class="ala-compare-cb-label">${s}</span>
+                    <span class="ala-compare-count" data-status="${s}">0</span>
+                  </label>`).join("")}
+              </div>
+              <div class="ala-compare-actions">
+                <button type="button" class="ala-compare-btn-link" id="ala-compare-all">Select all</button>
+                <span class="ala-compare-dot">·</span>
+                <button type="button" class="ala-compare-btn-link" id="ala-compare-none">Clear all</button>
               </div>
             </div>
-          </details>` : "";
-		}).join("");
-	}
-	function creditsDropdownHtml() {
-		return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits" open>
-    <summary class="ala-section-summary">
-      <span class="ala-section-title">Credits</span>
-      <span class="ala-chevron">${icon("chevron", 14)}</span>
-    </summary>
-    <div class="ala-collapsible ala-section-collapsible">
-      <div class="ala-collapsible-inner">
-        <div class="ala-credits-content">${creditsHtml()}</div>
-      </div>
-    </div>
-  </details>`;
-	}
-	function initDropdownAnimations(panel) {
-		panel.querySelectorAll("details.ala-section-dropdown").forEach((details) => {
-			const summary = details.querySelector(":scope > summary");
-			const collapsible = details.querySelector(":scope > .ala-collapsible");
-			if (!summary || !collapsible) return;
-			summary.addEventListener("click", (e) => {
-				e.preventDefault();
-				const isExpanded = details.classList.toggle("is-expanded");
-				collapsible.classList.toggle("is-open", isExpanded);
-			});
-		});
-	}
-	var prevOverflow = null;
-	function openTierEditor(inputEl) {
-		let tiers;
-		try {
-			const check = validateTiers(JSON.parse(inputEl.value));
-			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		} catch {
-			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		}
-		const existing = document.getElementById("ala-tier-editor-backdrop");
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = "ala-tier-editor-backdrop";
-		backdrop.innerHTML = `
-    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
-      <header class="ala-sheet-head">
-        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
-        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-sheet-body">
-        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
-        <div class="ala-tier-table-wrap">
-          <table class="ala-tier-table">
-            <thead>
-              <tr>
-                <th style="width:75px">Label</th>
-                <th style="width:70px">Min</th>
-                <th style="width:70px">Max</th>
-                <th style="width:48px">Badge</th>
-                <th style="width:48px">Text</th>
-                <th style="width:75px">Preview</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="ala-tier-tbody"></tbody>
-          </table>
-        </div>
-        <div class="ala-tier-actions">
-          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
-        </div>
-        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
-          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
-          </div>
-        </div>
-      </div>
-      <footer class="ala-sheet-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
-        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const tbody = backdrop.querySelector("#ala-tier-tbody");
-		const status = backdrop.querySelector("#ala-tier-status");
-		const setModalStatus = (msg, isError = false) => {
-			status.textContent = msg;
-			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
-		};
-		const createRowHtml = (t, idx) => {
-			const badgeColor = normalizeHexColor(t.color) || "#000000";
-			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
-			return `
-    <tr data-idx="${idx}">
-      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
-      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
-      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
-      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
-      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
-      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
-      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
-    </tr>
-  `;
-		};
-		const renderTable = (list) => {
-			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
-		};
-		const getRowsData = () => {
-			const rows = tbody.querySelectorAll("tr");
-			const result = [];
-			rows.forEach((tr) => {
-				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
-				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
-				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
-				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-				result.push({
-					label: label || "Tier",
-					min: isNaN(min) ? 0 : min,
-					max: isNaN(max) ? 100 : max,
-					color,
-					textColor
-				});
-			});
-			return result;
-		};
-		const updatePreview = (tr) => {
-			const label = tr.querySelector(".ala-t-label")?.value || "";
-			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-			const preview = tr.querySelector(".ala-t-preview");
-			if (preview) {
-				preview.textContent = label;
-				preview.style.backgroundColor = color;
-				preview.style.color = textColor;
-			}
-		};
-		tbody.addEventListener("input", (e) => {
-			const tr = e.target.closest("tr");
-			if (tr) updatePreview(tr);
-		});
-		tbody.addEventListener("click", (e) => {
-			const btn = e.target.closest(".ala-tier-del-btn");
-			if (btn) {
-				const tr = btn.closest("tr");
-				if (tr) {
-					tr.remove();
-					setModalStatus("Tier removed.");
-				}
-			}
-		});
-		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
-			const current = getRowsData();
-			current.push({
-				min: 0,
-				max: 0,
-				label: "New",
-				color: "#3db4f2",
-				textColor: "#ffffff"
-			});
-			renderTable(current);
-			setModalStatus("Added new tier.");
-		});
-		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
-			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
-			setModalStatus("Reset to default tiers.");
-		});
-		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
-		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
-		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
-			if (jsonWrap.style.display === "none") {
-				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
-				jsonWrap.style.display = "block";
-			} else jsonWrap.style.display = "none";
-		});
-		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
-			try {
-				const check = validateTiers(JSON.parse(jsonArea.value));
-				if (!check.valid || !check.tiers) {
-					setModalStatus(check.error || "Invalid tier JSON.", true);
-					return;
-				}
-				renderTable(check.tiers);
-				jsonWrap.style.display = "none";
-				setModalStatus("JSON applied successfully.");
-			} catch (e) {
-				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
-			}
-		});
-		const closeModal = () => {
-			document.removeEventListener("keydown", onKey, true);
-			backdrop.remove();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				closeModal();
-			}
-		};
-		document.addEventListener("keydown", onKey, true);
-		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
-		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) closeModal();
-		});
-		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
-			const check = validateTiers(getRowsData());
-			if (!check.valid || !check.tiers) {
-				setModalStatus(check.error || "Invalid tier configuration.", true);
-				return;
-			}
-			inputEl.value = JSON.stringify(check.tiers);
-			Settings.set("tierLabels", check.tiers);
-			closeModal();
-			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
-			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
-		});
-		renderTable(tiers);
-	}
-	function standaloneNote(id) {
-		return `<b>Standalone ${STANDALONE[id].name} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.`;
-	}
-	function showStandaloneNotes(panel, syncFeature) {
-		for (const id of STANDALONE_IDS_LIST) detectStandalone(id).then((found) => {
-			if (!panel.isConnected) return;
-			const card = panel.querySelector(`.ala-feature[data-feature="${id}"]`);
-			if (!card) return;
-			card.querySelector(".ala-standalone-note")?.remove();
-			if (!found) return;
-			const toggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
-			if (toggle) {
-				toggle.dataset.standaloneLocked = "1";
-				toggle.checked = false;
-				toggle.disabled = true;
-				syncFeature(card);
-			}
-			const note = document.createElement("div");
-			note.className = "ala-standalone-note";
-			note.setAttribute("role", "note");
-			note.innerHTML = standaloneNote(id);
-			card.querySelector(".ala-row--main")?.insertAdjacentElement("afterend", note);
-		});
-	}
-	function closePanel() {
-		const b = document.getElementById("ala-settings-backdrop");
-		if (!b) return;
-		if (b._onKey) document.removeEventListener("keydown", b._onKey);
-		if (b._onFocus) window.removeEventListener("focus", b._onFocus);
-		b.remove();
-		document.documentElement.style.overflow = prevOverflow || "";
-		prevOverflow = null;
-	}
-	function showPanel() {
-		if (document.getElementById("ala-settings-backdrop")) return;
-		const backdrop = document.createElement("div");
-		backdrop.id = "ala-settings-backdrop";
-		backdrop.innerHTML = `<div id="ala-settings-panel" role="dialog" aria-modal="true" aria-labelledby="ala-settings-title" tabindex="-1">
-    <header class="ala-sheet-head">
-      <div><h2 id="ala-settings-title">AL Additions</h2><div class="ala-help">Changes apply after the page reloads.</div></div>
-      <button class="ala-icon-btn ala-close" type="button" aria-label="Close settings">${icon("close", 20)}</button>
-    </header>
-    <div class="ala-sheet-body">
-      ${accountsHtml()}
-      ${sectionsHtml()}
-      ${backupRestoreHtml()}
-      ${creditsDropdownHtml()}
-    </div>
-    <footer class="ala-sheet-foot">
-      <button class="ala-btn ala-btn--primary ala-save" type="button">Save and reload</button>
-      <button class="ala-btn ala-reset" type="button">Reset to defaults</button>
-      <span class="ala-status" role="status"></span>
-    </footer>
-  </div>`;
-		const panel = backdrop.firstElementChild;
-		const status = panel.querySelector(".ala-status");
-		const setStatus = (msg, isError = false) => {
-			status.textContent = msg;
-			status.classList.toggle("is-error", isError);
-		};
-		const controls = () => panel.querySelectorAll("[data-key]");
-		const syncFeature = (card) => {
-			const toggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
-			if (!toggle) return;
-			const on = toggle.checked;
-			card.classList.toggle("is-off", !on);
-			const optionsCollapsible = card.querySelector(":scope > .ala-options-collapsible");
-			if (optionsCollapsible) optionsCollapsible.classList.toggle("is-open", on);
-			card.querySelectorAll(".ala-child-option").forEach((childWrap) => {
-				const parentKey = childWrap.dataset.childFor;
-				const parentInput = parentKey ? card.querySelector(`[data-key="${parentKey}"]`) : null;
-				const childOpen = on && !!parentInput?.checked;
-				childWrap.classList.toggle("is-open", childOpen);
-				childWrap.querySelectorAll("[data-key]").forEach((el) => {
-					el.disabled = !childOpen;
-				});
-			});
-			card.querySelectorAll(".ala-options [data-key]").forEach((el) => {
-				if (el.closest(".ala-child-option")) return;
-				el.disabled = !on;
-			});
-		};
-		const devRow = panel.querySelector("#ala-row-export-raw");
-		const syncDevBackupVisibility = () => {
-			if (!devRow) return;
-			const devToggle = panel.querySelector("input[data-key=\"devModeEnabled\"]");
-			const isDevOn = devToggle ? devToggle.checked : !!Settings.get("devModeEnabled");
-			devRow.style.display = isDevOn ? "" : "none";
-		};
-		panel.querySelectorAll(".ala-feature").forEach(syncFeature);
-		syncDevBackupVisibility();
-		initDropdownAnimations(panel);
-		panel.addEventListener("change", (e) => {
-			const card = e.target?.closest(".ala-feature");
-			if (card) syncFeature(card);
-			syncDevBackupVisibility();
-		});
-		panel.querySelector(".ala-save")?.addEventListener("click", () => {
-			controls().forEach((el) => {
-				const r = ROWS[el.dataset.key];
-				if (r) {
-					if (r.key === "syncManualOverrides") return;
-					if (el.dataset.standaloneLocked) return;
-					Settings.set(r.key, TYPES$1[r.type].read(el));
-				}
-			});
-			setStatus("Saved. Reloading…");
-			setTimeout(() => location.reload(), 350);
-		});
-		panel.querySelector(".ala-reset")?.addEventListener("click", () => {
-			controls().forEach((el) => {
-				const r = ROWS[el.dataset.key];
-				if (r) {
-					if (r.key === "syncManualOverrides") return;
-					if (el.dataset.standaloneLocked) return;
-					TYPES$1[r.type].write(el, r.def);
-				}
-			});
-			panel.querySelectorAll(".ala-feature").forEach(syncFeature);
-			syncDevBackupVisibility();
-			setStatus("Defaults restored. Press Save to apply them.");
-		});
-		panel.querySelector(".ala-close")?.addEventListener("click", closePanel);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) closePanel();
-		});
-		backdrop._onKey = (e) => {
-			if (e.key === "Escape") closePanel();
-		};
-		document.addEventListener("keydown", backdrop._onKey);
-		const updateAccountUI = () => {
-			const malBtn = panel.querySelector("#ala-btn-mal");
-			const malStatus = panel.querySelector("#ala-status-mal");
-			const malConnected = !!store$1.get("mal_token", null);
-			if (malBtn && malStatus) {
-				malBtn.textContent = malConnected ? "Disconnect" : "Connect to MAL";
-				malBtn.className = `ala-btn ${malConnected ? "ala-btn--danger" : "ala-btn--primary"}`;
-				malStatus.textContent = malConnected ? "Connected" : "Not connected";
-			}
-		};
-		panel.querySelector("#ala-btn-mal")?.addEventListener("click", () => {
-			if (!!store$1.get("mal_token", null)) {
-				if (confirm("Disconnect MyAnimeList? You will need to reconnect to use AniList → MAL Sync.")) {
-					clearMalAuth();
-					updateAccountUI();
-					setStatus("MyAnimeList disconnected.");
-				}
-			} else {
-				malConnect();
-				setStatus("Opened MyAnimeList authorization tab…");
-			}
-		});
-		const getPanelOverrides = () => {
-			const overrides = {};
-			controls().forEach((el) => {
-				const r = ROWS[el.dataset.key];
-				if (r) {
-					if (r.key === "syncManualOverrides") {
-						overrides[r.key] = getManualOverrides();
-						return;
+          </details>
+        `;
+				const details = sidebar.querySelector(".ala-compare-card");
+				sidebar.querySelector(".ala-compare-card-title")?.addEventListener("click", (e) => {
+					if (window.innerWidth > 850) {
+						e.preventDefault();
+						if (details) details.open = true;
 					}
-					overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES$1[r.type].read(el);
-				}
-			});
-			return overrides;
-		};
-		panel.querySelector("#ala-btn-export")?.addEventListener("click", async () => {
-			const pwd = await promptPasswordModal({
-				title: "Export Settings",
-				description: "Optional: Set a password to encrypt your backup file. Leave blank for an unencrypted backup.",
-				submitText: "Export",
-				allowEmpty: true,
-				confirm: true,
-				placeholder: "Optional encryption password"
-			});
-			if (pwd === null) return;
-			try {
-				setStatus("Generating backup…");
-				downloadBackupFile(await createBackup(false, pwd, getPanelOverrides()));
-				setStatus("Settings exported successfully.");
-			} catch (e) {
-				setStatus("Export failed: " + (e.message || e), true);
+				});
+				if (resizeCleanup) resizeCleanup();
+				let isDesktop = window.innerWidth > 850;
+				const syncDetailsOpen = () => {
+					if (!details) return;
+					const nowDesktop = window.innerWidth > 850;
+					if (nowDesktop !== isDesktop) {
+						details.open = nowDesktop;
+						isDesktop = nowDesktop;
+					}
+				};
+				window.addEventListener("resize", syncDetailsOpen);
+				resizeCleanup = () => {
+					window.removeEventListener("resize", syncDetailsOpen);
+				};
+				sidebar.querySelectorAll(".ala-compare-cb").forEach((cb) => {
+					cb.addEventListener("change", () => {
+						const st = cb.dataset.status;
+						if (cb.checked) activeStatuses.add(st);
+						else activeStatuses.delete(st);
+						triggerFilterUpdate(sidebar, compareRoot);
+					});
+				});
+				sidebar.querySelector("#ala-compare-all")?.addEventListener("click", () => {
+					for (const s of STATUSES) activeStatuses.add(s);
+					sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = true);
+					triggerFilterUpdate(sidebar, compareRoot);
+				});
+				sidebar.querySelector("#ala-compare-none")?.addEventListener("click", () => {
+					activeStatuses.clear();
+					sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = false);
+					triggerFilterUpdate(sidebar, compareRoot);
+				});
 			}
-		});
-		panel.querySelector("#ala-btn-export-secrets")?.addEventListener("click", async () => {
-			if (!confirm("⚠️ Warning: This export includes your MyAnimeList authentication credentials.\n\nAnyone with access to this file will have full access to your connected MyAnimeList account.\n\nDo you want to continue?")) return;
-			const pwd = await promptPasswordModal({
-				title: "Export Credentials (Encrypted)",
-				description: "A password is required to encrypt your credentials and protect your accounts.",
-				submitText: "Encrypt & Export",
-				allowEmpty: false,
-				confirm: true,
-				placeholder: "Choose an encryption password"
+			if (sidebar && entries.length > 0) updateStatusCounts(sidebar, entries);
+			if (header && titleHeader && yourScoreHeader && otherScoreHeader && !header._alaHeaderBound) {
+				header._alaHeaderBound = true;
+				const attachSortClick = (el, col) => {
+					if (!el) return;
+					el.addEventListener("click", () => {
+						triggerSort(col, compareRoot);
+					});
+				};
+				attachSortClick(titleHeader, "title");
+				attachSortClick(yourScoreHeader, "yourScore");
+				attachSortClick(otherScoreHeader, "otherScore");
+			}
+			if (header && titleHeader) {
+				header.dataset.alaCompareInit = "true";
+				updateSortArrows(titleHeader, yourScoreHeader, otherScoreHeader, activeSortCol, activeSortDir);
+			}
+			compareRoot.dataset.alaCompareInit = "true";
+			entries.forEach((el) => {
+				el.querySelectorAll(".score").forEach((scoreEl) => {
+					const text = scoreEl.textContent?.trim();
+					if (!text || text === "") scoreEl.textContent = "0";
+				});
 			});
-			if (pwd === null) return;
-			if (!pwd.trim()) {
-				setStatus("A password is required to export credentials.", true);
+			disableNativeScrollers(compareRoot);
+			if (entries.length > 0) {
+				applyFilter(compareRoot, entries);
+				applySort(compareRoot, entries, activeSortCol, activeSortDir);
+			}
+			installBlocker();
+			if (!isLoadingAll && !isCompareLoaded && !loadFailed && sidebar) loadAllEntriesViaMediaList(compareRoot, sidebar);
+		}
+		const checkView = debounce(() => {
+			if (isMutatingDOM) return;
+			const path = location.pathname;
+			if (!isComparePage()) {
+				if (currentRoute) {
+					cleanup();
+					currentRoute = "";
+				}
 				return;
 			}
-			try {
-				setStatus("Generating backup…");
-				downloadBackupFile(await createBackup(true, pwd, getPanelOverrides()));
-				setStatus("Settings and credentials exported successfully.");
-			} catch (e) {
-				setStatus("Export failed: " + (e.message || e), true);
+			if (path !== currentRoute) {
+				currentRoute = path;
+				activeSortCol = "otherScore";
+				activeSortDir = "desc";
+				for (const s of STATUSES) activeStatuses.add(s);
+				cleanup();
+				installBlocker();
 			}
-		});
-		panel.querySelector("#ala-btn-export-raw")?.addEventListener("click", () => {
-			try {
-				setStatus("Generating raw backup…");
-				const rawJson = createRawBackup(getPanelOverrides());
-				downloadBackupFile(new TextEncoder().encode(rawJson));
-				setStatus("Raw JSON settings exported successfully.");
-			} catch (e) {
-				setStatus("Export failed: " + (e.message || e), true);
+			if (isCompareLoaded) return;
+			const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
+			if (!compareRoot) return;
+			const header = compareRoot.querySelector(".entry.header");
+			const entries = Array.from(compareRoot.querySelectorAll(".entry:not(.header)"));
+			if (!compareRoot.dataset.alaCompareInit || !isCompareLoaded && entries.length !== lastProcessedCount) {
+				lastProcessedCount = entries.length;
+				setupCompareView(compareRoot, header, entries);
 			}
-		});
-		const fileInput = panel.querySelector("#ala-import-file");
-		panel.querySelector("#ala-btn-import")?.addEventListener("click", () => {
-			fileInput?.click();
-		});
-		fileInput?.addEventListener("change", async () => {
-			const file = fileInput.files?.[0];
-			if (!file) return;
-			try {
-				setStatus("Reading backup file…");
-				const result = await importBackup(await readFileAsBytes(file));
-				if (result.cancelled) {
-					setStatus("Import cancelled.");
-					fileInput.value = "";
-					return;
-				}
-				const parts = [`${result.applied} setting(s)`];
-				if (result.secretsApplied) parts.push(`${result.secretsApplied} credential(s)`);
-				setStatus(`Imported ${parts.join(" and ")}. Reloading…`);
-				setTimeout(() => location.reload(), 600);
-			} catch (e) {
-				setStatus("Import failed: " + (e.message || e), true);
-				fileInput.value = "";
-			}
-		});
-		panel.querySelector("#ala-btn-edit-tierLabels")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			const inputEl = panel.querySelector("input[data-key=\"tierLabels\"]");
-			if (inputEl) openTierEditor(inputEl);
-		});
-		panel.querySelector("#ala-btn-edit-syncManualOverrides")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			openOverridesModal();
-		});
-		panel.querySelector("#ala-btn-edit-aniSongsProviders")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			const inputEl = panel.querySelector("input[data-key=\"aniSongsProviders\"]");
-			if (inputEl) openAniSongsModal(inputEl);
-		});
-		const onFocus = () => {
-			updateAccountUI();
-			maybeAutoSync();
-		};
-		backdrop._onFocus = onFocus;
-		window.addEventListener("focus", onFocus);
-		prevOverflow = document.documentElement.style.overflow;
-		document.documentElement.style.overflow = "hidden";
-		document.body.appendChild(backdrop);
-		panel.focus();
-		showStandaloneNotes(panel, syncFeature);
-	}
-	function ensureLauncher() {
-		if (document.getElementById("ala-settings-mobile-launcher")) return;
-		const b = document.createElement("button");
-		b.id = "ala-settings-mobile-launcher";
-		b.type = "button";
-		b.innerHTML = `${icon("sliders", 18)}<span>AL Additions</span>`;
-		b.setAttribute("aria-label", "Open AL Additions settings");
-		b.addEventListener("click", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			showPanel();
-		});
-		document.body.appendChild(b);
-	}
-	function installSidebar() {
-		if (document.getElementById("ala-settings-nav-section")) return;
-		if (!findExactText("Profile")) return;
-		const dev = findExactText("Developer");
-		if (!dev) return;
-		let nav = dev.parentElement;
-		while (nav && nav !== document.body && nav.children.length <= 1) nav = nav.parentElement;
-		if (!nav || nav === document.body || !nav.parentElement) return;
-		const section = document.createElement("div");
-		section.id = "ala-settings-nav-section";
-		section.className = "ala-settings-nav-section";
-		section.innerHTML = "<div class=\"ala-settings-nav-heading\">AL Additions</div><a href=\"#\" class=\"ala-settings-nav-link\">Settings</a>";
-		section.querySelector("a")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			e.currentTarget.classList.add("is-active");
-			showPanel();
-		});
-		nav.parentElement.insertBefore(section, nav.nextSibling);
-	}
-	function initSettingsPage() {
-		addStyle("ala-settings-style", CSS$1);
-		const attempt = debounce(() => {
-			if (!onSettingsPage()) return;
-			installSidebar();
-			ensureLauncher();
-		}, 100);
-		Core.ready(attempt);
-		Core.onBodyMutation(() => {
-			if (onSettingsPage() && !(document.getElementById("ala-settings-nav-section") && document.getElementById("ala-settings-mobile-launcher"))) attempt();
-		});
+		}, 60);
+		installBlocker();
+		Core.ready(checkView);
 		Core.onNavigate(() => {
-			if (onSettingsPage()) return attempt();
-			closePanel();
-			document.getElementById("ala-settings-mobile-launcher")?.remove();
+			installBlocker();
+			checkView();
 		});
-	}
-	var modules = [];
-	var defineModule = (name, setting, init, hosts = ["anilist.co"], early = false) => {
-		modules.push({
-			name,
-			setting,
-			init,
-			hosts,
-			early
-		});
-	};
-	var defineFeature = (meta, init) => {
-		Settings.register(meta);
-		defineModule(meta.id, meta.alwaysRun ? null : meta.key, init, meta.hosts, meta.early);
-	};
-	function startModules(early) {
-		for (const m of modules) {
-			if (m.early !== early || !m.hosts.includes(HOST)) continue;
-			if (m.setting && !Settings.get(m.setting)) continue;
-			logDebug("[CORE]", `Initializing module "${m.name}" (early=${early})`);
-			try {
-				Promise.resolve(m.init()).catch((e) => console.error("[AL-Additions]", m.name, e));
-			} catch (e) {
-				console.error("[AL-Additions]", m.name, e);
+		Core.onBodyMutation(() => {
+			if (isComparePage() && !isMutatingDOM) {
+				installBlocker();
+				checkView();
 			}
+		});
+	});
+	defineFeature({
+		id: "devMode",
+		key: "devModeEnabled",
+		section: "Advanced",
+		def: false,
+		title: "Developer Mode",
+		help: "Enable developer diagnostics and verbose module logging in the browser console.",
+		options: [
+			{
+				key: "debugFastLoad",
+				type: "toggle",
+				def: false,
+				title: "Fast Load Debug",
+				help: "Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity."
+			},
+			{
+				key: "debugSync",
+				type: "toggle",
+				def: false,
+				title: "Sync Debug",
+				help: "Log MAL synchronization steps, queue processing, rate limits, and deletions."
+			},
+			{
+				key: "debugCompareView",
+				type: "toggle",
+				def: false,
+				title: "Compare View Debug",
+				help: "Log list comparison data loading, score diffs, sorting, and filtering passes."
+			},
+			{
+				key: "debugMediaInfo",
+				type: "toggle",
+				def: false,
+				title: "Media Info Debug",
+				help: "Log media info sidebar updates, progress steppers, and save requests."
+			},
+			{
+				key: "debugTierLabels",
+				type: "toggle",
+				def: false,
+				title: "Tier Labels Debug",
+				help: "Log scoring system detection, tier matching, and badge rendering."
+			},
+			{
+				key: "debugGeneral",
+				type: "toggle",
+				def: false,
+				title: "Core & Observer Debug",
+				help: "Log DOM observer mutations, route changes, and general script lifecycle events."
+			}
+		]
+	}, () => {});
+	var STANDALONE = {
+		fastLoad: {
+			name: "AniList Fast Load",
+			settingKey: "fastLoadEnabled"
+		},
+		tierLabels: {
+			name: "AniList Tier Labels",
+			settingKey: "tierLabelsEnabled"
 		}
+	};
+	var STANDALONE_IDS_LIST = Object.keys(STANDALONE);
+	var PROBE_ATTR$1 = "data-ala-probe";
+	var builtInRunning = new Set();
+	var markBuiltIn = (id) => {
+		builtInRunning.add(id);
+	};
+	var pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+	function detectFastLoad() {
+		const w = pageWin();
+		return !!(w.__ANILIST_FAST_LOAD__ || w.__ANILIST_FAST_LOAD_V4__) && !builtInRunning.has("fastLoad");
+	}
+	async function probeTierLabels(timeoutMs = 600) {
+		if (!document.body) return false;
+		const probe = document.createElement("div");
+		probe.className = "score";
+		probe.hidden = true;
+		probe.setAttribute("score", "9");
+		probe.setAttribute(PROBE_ATTR$1, "1");
+		probe.textContent = "9";
+		document.body.appendChild(probe);
+		try {
+			const end = Date.now() + timeoutMs;
+			while (Date.now() < end) {
+				await sleep(50);
+				if (probe.hasAttribute("data-tier-modified")) return true;
+			}
+			return false;
+		} finally {
+			probe.remove();
+		}
+	}
+	var CACHE_MS = 3e4;
+	var cache = new Map();
+	function detectStandalone(id) {
+		const hit = cache.get(id);
+		if (hit && Date.now() - hit.at < CACHE_MS) return hit.result;
+		const result = (id === "fastLoad" ? Promise.resolve(detectFastLoad()) : probeTierLabels()).catch(() => false);
+		cache.set(id, {
+			at: Date.now(),
+			result
+		});
+		return result;
 	}
 	var CFG = {
 		lazyMedia: false,
@@ -7483,332 +5803,6 @@
 		}
 	});
 	defineFeature({
-		id: "tagPercent",
-		key: "tagFilterEnabled",
-		section: "AniList Enhancements",
-		early: true,
-		def: false,
-		legacy: ["tagFilterEnabled", "browseTagRankFilterEnabled"],
-		title: "Browse Tag Rank Filter",
-		help: "Automatically apply a minimum tag-rank percentage when you search with a tag or genre.",
-		options: [{
-			key: "tagPercentage",
-			type: "number",
-			def: 50,
-			min: 1,
-			max: 100,
-			legacy: ["tagPercentage", "minimumTagRankPercentage"],
-			title: "Minimum Tag Rank",
-			help: "The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles."
-		}]
-	}, () => {
-		const PARAM = "minimumTagRank";
-		const VALUE = String(Settings.get("tagPercentage"));
-		const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
-		const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
-		let fixing = false;
-		function apply(initial) {
-			if (fixing || !isTarget()) return;
-			const u = new URL(location.href);
-			if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
-			u.searchParams.set(PARAM, VALUE);
-			fixing = true;
-			try {
-				if (initial) location.replace(u.toString());
-				else {
-					history.replaceState(history.state, document.title, u.toString());
-					window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
-				}
-			} finally {
-				fixing = false;
-			}
-		}
-		apply(true);
-		Core.onNavigate(() => apply(false));
-	});
-	defineFeature({
-		id: "removeTitle",
-		key: "linkShortenerEnabled",
-		section: "AniList Enhancements",
-		def: false,
-		legacy: [
-			"linkShortenerEnabled",
-			"shortAniListUrlsEnabled",
-			"shortAniListUrls"
-		],
-		title: "Short AniList URLs",
-		help: "Remove the title slug from AniList anime, manga, staff, and character URLs."
-	}, () => {
-		const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
-		const strip = (s) => s.replace(/^((?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/)[^/?#]+\/?(?=[?#]|$)/, "$1");
-		function fixLocation() {
-			if (!/anilist\.co\/(manga|anime|staff|character)\//.test(location.href) || !/\/\d{1,10}\/./.test(location.href)) return;
-			const cur = location.pathname + location.search + location.hash;
-			const next = strip(cur.replace(/^https:\/\/anilist\.co/, ""));
-			if (cur !== next) Core.silently(() => history.replaceState(history.state, "", next));
-		}
-		function fixLinks(nodes) {
-			for (const node of Array.from(nodes)) {
-				if (node.nodeType !== 1) continue;
-				const el = node;
-				const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
-				for (const a of links) {
-					const href = a.getAttribute("href");
-					if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
-				}
-			}
-		}
-		fixLocation();
-		Core.onNavigate(fixLocation);
-		Core.onBodyMutation((muts) => {
-			for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
-		});
-		Core.ready(() => fixLinks([document.body]));
-	});
-	defineFeature({
-		id: "banner",
-		key: "bannerEnabled",
-		section: "External Links, Downloads & Mappings",
-		def: false,
-		legacy: [
-			"bannerEnabled",
-			"bannerDownloadEnabled",
-			"bannerDownloaderEnabled"
-		],
-		title: "Anime/Manga Banner Downloader",
-		help: "Add a button for downloading the AniList banner image.",
-		options: [{
-			key: "bannerProfiles",
-			type: "toggle",
-			def: false,
-			title: "User Profile Banners",
-			help: "Also show the download button on user profile banners (it is always shown on anime and manga pages)."
-		}]
-	}, () => {
-		addStyle("ala-banner-style", `
-      .banner{position:relative}
-      .ala-banner-dl{position:absolute;right:12px;bottom:12px;z-index:5;display:inline-flex;align-items:center;justify-content:center;height:34px;min-width:34px;padding:0 8px;border:0;border-radius:17px;background:transparent;color:rgba(255,255,255,.8);font-family:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;overflow:hidden;-webkit-tap-highlight-color:transparent;transition:background .15s,color .15s}
-      .ala-banner-dl[hidden]{display:none}
-      .ala-banner-ico{display:inline-flex;filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))}
-      .ala-banner-lbl{max-width:0;overflow:hidden;white-space:nowrap;transition:max-width .2s ease,margin-left .2s ease}
-      .ala-banner-dl:hover,.ala-banner-dl:focus-visible{background:rgb(var(--color-blue));color:#fff}
-      .ala-banner-dl:hover .ala-banner-ico,.ala-banner-dl:focus-visible .ala-banner-ico,.ala-banner-dl.is-done .ala-banner-ico{filter:none}
-      .ala-banner-dl:focus-visible{outline:2px solid #fff;outline-offset:2px}
-      .ala-banner-dl.is-done,.ala-banner-dl.is-done:hover{background:rgb(var(--color-green));color:#fff}
-      .ala-banner-dl.is-done .ala-banner-lbl{max-width:130px;margin-left:7px}
-      @media (hover:hover){.ala-banner-dl:hover .ala-banner-lbl,.ala-banner-dl:focus-visible .ala-banner-lbl{max-width:130px;margin-left:7px}}
-      @media (pointer:coarse){.ala-banner-dl{right:8px;bottom:8px;height:40px;min-width:40px;border-radius:20px}}
-      @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
-		const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
-		const bannerAllowed = () => !!mediaRoute() || /^\/user\//.test(location.pathname) && Settings.get("bannerProfiles");
-		function download(onSaved) {
-			const banner = document.querySelector(".banner");
-			const url = banner && bannerAllowed() && bannerUrl(banner);
-			if (!url) return;
-			const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
-			const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
-			const fallback = () => {
-				openTab(url);
-				onSaved?.();
-			};
-			if (typeof _GM_download === "function") try {
-				_GM_download({
-					url,
-					name,
-					saveAs: false,
-					onload: () => onSaved?.(),
-					onerror: fallback
-				});
-				return;
-			} catch (_) {}
-			fallback();
-		}
-		function createButton() {
-			const btn = document.createElement("button");
-			btn.type = "button";
-			btn.className = "ala-banner-dl";
-			btn.title = "Download banner image";
-			btn.setAttribute("aria-label", "Download banner image");
-			btn.innerHTML = `<span class="ala-banner-ico">${icon("download", 18)}</span><span class="ala-banner-lbl">Download banner</span>`;
-			const ico = btn.firstElementChild;
-			const lbl = btn.lastElementChild;
-			btn.addEventListener("click", (e) => {
-				e.preventDefault();
-				e.stopPropagation();
-				download(() => {
-					btn.classList.add("is-done");
-					ico.innerHTML = icon("check", 18);
-					lbl.textContent = "Saved";
-					setTimeout(() => {
-						btn.classList.remove("is-done");
-						ico.innerHTML = icon("download", 18);
-						lbl.textContent = "Download banner";
-					}, 1600);
-				});
-			});
-			return btn;
-		}
-		function scan() {
-			const banner = document.querySelector(".banner");
-			if (!banner) return;
-			let btn = banner.querySelector(".ala-banner-dl");
-			const show = bannerAllowed() && !!bannerUrl(banner);
-			if (!btn && !show) return;
-			if (!btn) {
-				btn = createButton();
-				banner.appendChild(btn);
-			}
-			btn.hidden = !show;
-		}
-		const scanSoon = debounce(scan, 150);
-		Core.ready(scan);
-		Core.onNavigate(() => setTimeout(scan, 300));
-		Core.onBodyMutation(scanSoon);
-	});
-	defineFeature({
-		id: "nyaa",
-		key: "nyaaEnabled",
-		section: "External Links, Downloads & Mappings",
-		def: false,
-		legacy: [
-			"nyaaEnabled",
-			"malNyaaLinksEnabled",
-			"malNyaaEnabled"
-		],
-		title: "MyAnimeList & Nyaa Links",
-		help: "Show a MyAnimeList link, with Nyaa search available by Ctrl/Cmd-click on desktop or long-press on mobile.",
-		options: [{
-			key: "nyaaProviders",
-			type: "list",
-			def: ["SubsPlease", "ToonsHub"],
-			legacy: ["nyaaProviders", "nyaaSearchGroups"],
-			title: "Nyaa Search Providers",
-			help: "Comma-separated provider names to include in Nyaa searches. Defaults to SubsPlease and ToonsHub."
-		}]
-	}, () => {
-		const ID = "ala-find-on-nyaa";
-		const TITLE_SEL = ".page-content .header .content > h1";
-		const ICON = icon("external", 17);
-		addStyle("ala-nyaa-style", `#${ID},#ala-edit-mal-id{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}#${ID}{margin-left:10px}#ala-edit-mal-id{margin-left:6px;cursor:pointer}#${ID}:hover,#ala-edit-mal-id:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`);
-		const nyaaUrl = (title) => {
-			const q = title.trim().replace(/[^a-zA-Z0-9]+/g, "+").replace(/^\++|\++$/g, "");
-			const frag = Settings.get("nyaaProviders").map(encodeURIComponent).join("&text=");
-			return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
-		};
-		function attach(h1, route) {
-			const EDIT_ID = "ala-edit-mal-id";
-			const a = document.createElement("a");
-			a.id = ID;
-			a.href = "#";
-			a.title = isIgnored(route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
-			a.setAttribute("aria-label", "Open on MAL; long-press to search Nyaa");
-			a.innerHTML = ICON;
-			const titleText = () => [...h1.childNodes].filter((n) => n !== a && n?.id !== EDIT_ID).map((n) => n.textContent).join("").trim();
-			const searchNyaa = () => openTab(nyaaUrl(titleText()));
-			MediaData.get(route.id, route.type);
-			let timer = null;
-			let longPressed = false;
-			let sx = 0;
-			let sy = 0;
-			const cancel = () => {
-				if (timer) clearTimeout(timer);
-				timer = null;
-			};
-			a.addEventListener("touchstart", (e) => {
-				if (e.touches.length !== 1) return;
-				sx = e.touches[0].clientX;
-				sy = e.touches[0].clientY;
-				longPressed = false;
-				cancel();
-				timer = setTimeout(() => {
-					timer = null;
-					longPressed = true;
-					searchNyaa();
-					setTimeout(() => {
-						longPressed = false;
-					}, 800);
-				}, 550);
-			}, { passive: true });
-			a.addEventListener("touchmove", (e) => {
-				if (timer === null || !e.touches.length) return;
-				if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
-			}, { passive: true });
-			a.addEventListener("touchend", cancel, { passive: true });
-			a.addEventListener("touchcancel", cancel, { passive: true });
-			a.addEventListener("contextmenu", (e) => {
-				if (longPressed) e.preventDefault();
-			});
-			a.addEventListener("click", async (e) => {
-				e.preventDefault();
-				if (longPressed) {
-					longPressed = false;
-					e.stopPropagation();
-					return;
-				}
-				const w = window.open("about:blank", "_blank");
-				const title = titleText();
-				const nyaa = nyaaUrl(title);
-				let target = nyaa;
-				if (!e.ctrlKey && !e.metaKey) {
-					if (isIgnored(route.id)) target = nyaa;
-					else {
-						const media = await MediaData.get(route.id, route.type);
-						const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
-						if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
-						else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
-					}
-				}
-				if (w) {
-					w.opener = null;
-					w.location.href = target;
-				} else openTab(target);
-			});
-			h1.appendChild(a);
-			document.getElementById(EDIT_ID)?.remove();
-			const editBtn = document.createElement("a");
-			editBtn.id = EDIT_ID;
-			editBtn.href = "#";
-			editBtn.title = "Set or edit MyAnimeList mapping";
-			editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
-			editBtn.innerHTML = icon("edit", 16);
-			editBtn.addEventListener("click", (e) => {
-				e.preventDefault();
-				e.stopPropagation();
-				openQuickOverrideModal(route.id, route.type);
-			});
-			h1.appendChild(editBtn);
-		}
-		let token = 0;
-		let placedKey = null;
-		let placing = false;
-		async function place() {
-			const route = mediaRoute();
-			const key = route && `${route.type}:${route.id}`;
-			if (key && key === placedKey && document.getElementById(ID)) return;
-			document.getElementById(ID)?.remove();
-			document.getElementById("ala-edit-mal-id")?.remove();
-			placedKey = null;
-			if (!route) return;
-			const mine = ++token;
-			placing = true;
-			try {
-				const h1 = await Core.waitForSelector(TITLE_SEL, 8e3);
-				if (h1 && mine === token && mediaRoute()?.id === route.id && !document.getElementById(ID)) {
-					attach(h1, route);
-					placedKey = key;
-				}
-			} finally {
-				if (mine === token) placing = false;
-			}
-		}
-		const repair = debounce(() => {
-			if (placedKey && !placing && !document.getElementById(ID)) place();
-		}, 400);
-		place();
-		Core.onNavigate(place);
-		Core.onBodyMutation(repair);
-	});
-	defineFeature({
 		id: "keyframe",
 		key: "keyframeEnabled",
 		section: "External Links, Downloads & Mappings",
@@ -7911,6 +5905,42 @@
 		Core.onNavigate(place);
 		Core.onBodyMutation(repair);
 	});
+	var normTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(the|a|an)\b/g, " ").replace(/\s+/g, " ").trim();
+	var strictTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+	function titleScore(a, b) {
+		const x = normTitle(a);
+		const y = normTitle(b);
+		if (!x || !y) return 0;
+		if (x === y) return 100;
+		const wordsA = x.split(" ").filter(Boolean);
+		const wordsB = y.split(" ").filter(Boolean);
+		const setA = new Set(wordsA);
+		const setB = new Set(wordsB);
+		let common = 0;
+		for (const w of setA) if (setB.has(w)) common++;
+		const totalUnique = new Set([...wordsA, ...wordsB]).size;
+		const wordScore = totalUnique > 0 ? common / totalUnique * 100 : 0;
+		const strA = ` ${x} `;
+		const strB = ` ${y} `;
+		if (strA.includes(strB) || strB.includes(strA)) {
+			const lenRatio = Math.min(x.length, y.length) / Math.max(x.length, y.length);
+			const subScore = Math.round(60 + lenRatio * 35);
+			return Math.max(Math.round(wordScore), subScore);
+		}
+		return Math.round(wordScore);
+	}
+	function bestMatch(list, title, getTitle, min = 70) {
+		let best = null;
+		let bestScore = -1;
+		for (const item of list) {
+			const s = titleScore(title, getTitle(item));
+			if (s > bestScore) {
+				best = item;
+				bestScore = s;
+			}
+		}
+		return best && bestScore >= min ? best : null;
+	}
 	function parseLatest(value) {
 		if (value == null) return null;
 		const s = String(value).trim();
@@ -7991,7 +6021,7 @@
 			info?.title?.english
 		].filter(Boolean))];
 		for (const t of titles) {
-			const n = await tryOr(() => lookup(`${kind}:${normTitle$1(t)}`, kind, t));
+			const n = await tryOr(() => lookup(`${kind}:${normTitle(t)}`, kind, t));
 			if (n != null) return n;
 		}
 		return null;
@@ -8396,2303 +6426,3009 @@
 			if (panel()?.dataset.mode === "connect" && AniList.hasAuth()) render(true);
 		});
 	});
-	defineFeature({
-		id: "behindDots",
-		key: "behindDotsEnabled",
-		section: "AniList Enhancements",
-		def: false,
-		legacy: ["behindDotsEnabled", "airingProgressIndicatorEnabled"],
-		title: "Airing Progress Indicator",
-		help: "Show an orange indicator when your watched episode count is behind the number of aired episodes."
-	}, () => {
-		const CLASS = "daiya-behind-dot";
-		const ORANGE = "rgb(255, 152, 0)";
-		const NO_AIRING_TTL = 216e5;
-		const AIRING_GRACE = 3e4;
-		const ERROR_RETRY = 3e5;
-		const PRUNE_AGE = 2592e6;
-		const BATCH = 25;
-		const CONCURRENCY = 4;
-		const OPTIMISTIC_TTL = 2500;
-		const QUERY = "query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }";
-		addStyle("daiya-behind-dot-css", `
-      .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
-      .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`);
-		const cacheStore = persistent("daiya-anilist-airing-cache-v5", (d) => {
-			for (const id of Object.keys(d)) if (!(Date.now() - Number(d[id]?.updated) < PRUNE_AGE)) delete d[id];
-		});
-		const cache = cacheStore.data;
-		const pending = new Set();
-		const active = new Set();
-		const timers = new Map();
-		const optimistic = new Map();
-		let running = 0;
-		const onListPage = () => location.pathname.includes("/animelist");
-		const idOf = (entry) => entry.querySelector("a[href*=\"/anime/\"]")?.getAttribute("href")?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] || null;
-		const needsFetch = (id) => {
-			const d = cache[id];
-			return !d || !Number.isFinite(d.nextCheck) || Date.now() >= d.nextCheck;
+	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
+	function getManualOverrides() {
+		let raw = store$1.get(PREFIX + OVERRIDES_SETTING_KEY, {});
+		if (typeof raw === "string") try {
+			raw = JSON.parse(raw);
+		} catch (_) {
+			raw = {};
+		}
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+		return raw;
+	}
+	function saveManualOverrides(overrides) {
+		store$1.set(PREFIX + OVERRIDES_SETTING_KEY, overrides);
+		const hiddenInput = document.querySelector(`#ala-settings-panel input[data-key="${OVERRIDES_SETTING_KEY}"]`);
+		if (hiddenInput) hiddenInput.value = JSON.stringify(overrides);
+	}
+	function getOverride(mediaId) {
+		if (!mediaId) return void 0;
+		return getManualOverrides()[String(mediaId)];
+	}
+	function setOverride(mediaId, data) {
+		if (!mediaId) return;
+		const all = { ...getManualOverrides() };
+		all[String(mediaId)] = {
+			...data,
+			updatedAt: data.updatedAt || Date.now()
 		};
-		const sectionIsWatching = (wrap) => clean(wrap?.querySelector(".section-name")?.textContent) === "Watching";
-		function watchingEntries() {
-			const out = [];
-			for (const wrap of document.querySelectorAll(".list-wrap")) if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll(".list-entries .entry")));
-			return out;
-		}
-		function progressOf(entry) {
-			const m = entry.querySelector(".progress")?.textContent?.match(/^\s*(\d+)/) || entry.textContent?.match(/(?:^|\s)(\d+)\s*\/\s*(?:\d+|\?)(?:\s|$)/);
-			return m ? Number(m[1]) : null;
-		}
-		function releasingDot(entry) {
-			const fast = entry.querySelector(".release-status.RELEASING");
-			if (fast) return fast;
-			for (const el of entry.querySelectorAll(".release-status, [class*='release-status']")) {
-				if (/\bRELEASING\b/i.test(typeof el.className === "string" ? el.className : "")) return el;
-				if (/^releasing$/i.test((el.getAttribute("aria-label") || el.getAttribute("title") || "").trim())) return el;
-			}
-			return null;
-		}
-		function updateEntry(entry) {
-			if (!entry || !entry.isConnected) return null;
-			const dot = releasingDot(entry);
-			if (!dot || !sectionIsWatching(entry.closest(".list-wrap"))) return null;
-			const id = idOf(entry);
-			if (!id) return null;
-			const watched = progressOf(entry);
-			if (!Number.isFinite(watched)) {
-				dot.classList.remove(CLASS);
-				return id;
-			}
-			const opt = optimistic.get(id);
-			if (opt) {
-				if (Date.now() >= opt.expiresAt || watched !== null && watched >= opt.target) optimistic.delete(id);
-				else {
-					dot.classList.remove(CLASS);
-					return id;
-				}
-			}
-			const data = cache[id];
-			const behind = !!data && Number.isFinite(data.aired) && watched !== null && watched < data.aired;
-			if (dot.classList.contains(CLASS) !== behind) dot.classList.toggle(CLASS, behind);
-			return id;
-		}
-		function scanAll() {
-			if (!onListPage()) return;
-			const stale = new Set();
-			for (const entry of watchingEntries()) {
-				const id = updateEntry(entry);
-				if (id && needsFetch(id)) stale.add(id);
-			}
-			queueIDs(stale);
-		}
-		function repaint(ids) {
-			for (const entry of watchingEntries()) {
-				const id = idOf(entry);
-				if (id && ids.has(id)) updateEntry(entry);
-			}
-		}
-		function makeEntry(media) {
-			const next = media.nextAiringEpisode;
-			const now = Date.now();
-			const base = {
-				status: media.status || null,
-				updated: now
+		saveManualOverrides(all);
+	}
+	function removeOverride(mediaId) {
+		if (!mediaId) return;
+		const all = { ...getManualOverrides() };
+		delete all[String(mediaId)];
+		saveManualOverrides(all);
+	}
+	function isIgnored(mediaId) {
+		const o = getOverride(mediaId);
+		return !!o && o.malId === 0;
+	}
+	function getEffectiveMalId(mediaId, defaultMalId) {
+		const o = getOverride(mediaId);
+		if (o) return o.malId > 0 ? o.malId : null;
+		return defaultMalId && defaultMalId > 0 ? defaultMalId : null;
+	}
+	function validateOverrides(raw) {
+		let data = raw;
+		if (typeof data === "string") {
+			const trimmed = data.trim();
+			if (!trimmed) return {
+				valid: true,
+				overrides: {}
 			};
-			if (!next || !Number.isFinite(Number(next.episode))) return {
-				...base,
-				aired: null,
-				nextEpisode: null,
-				nextCheck: now + NO_AIRING_TTL
-			};
-			const timeUntil = Number(next.timeUntilAiring);
-			const airingAt = Number(next.airingAt);
-			const nextCheck = Number.isFinite(timeUntil) ? now + Math.max(0, timeUntil) * 1e3 + AIRING_GRACE : Number.isFinite(airingAt) ? airingAt * 1e3 + AIRING_GRACE : now + NO_AIRING_TTL;
-			return {
-				...base,
-				aired: Math.max(0, Math.floor(Number(next.episode)) - 1),
-				nextEpisode: Number(next.episode),
-				nextCheck
-			};
-		}
-		function scheduleRefresh(id, at) {
-			const existing = timers.get(id);
-			if (existing) clearTimeout(existing);
-			timers.delete(id);
-			if (!Number.isFinite(at)) return;
-			const t = setTimeout(() => {
-				timers.delete(id);
-				queueIDs([id]);
-				repaint(new Set([id]));
-			}, Math.min(Math.max(0, at - Date.now()), 2147483647));
-			timers.set(id, t);
-		}
-		async function updateBatch(ids) {
-			const returned = new Set();
 			try {
-				const data = await AniList.query(QUERY, { ids: ids.map(Number) });
-				for (const m of data?.Page?.media || []) {
-					const id = String(m.id);
-					returned.add(id);
-					cache[id] = makeEntry(m);
-					scheduleRefresh(id, cache[id].nextCheck);
-				}
-			} catch (_) {}
-			const retryAt = Date.now() + ERROR_RETRY;
-			for (const id of ids) {
-				if (returned.has(id)) continue;
-				const ex = cache[id];
-				if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
-				else cache[id] = {
-					aired: null,
-					nextEpisode: null,
-					status: null,
-					nextCheck: retryAt,
-					updated: Date.now()
+				data = JSON.parse(trimmed);
+			} catch (e) {
+				return {
+					valid: false,
+					error: `Invalid JSON syntax: ${e.message}`
 				};
-				scheduleRefresh(id, retryAt);
-			}
-			cacheStore.save();
-			if (returned.size) repaint(returned);
-		}
-		function queueIDs(ids) {
-			for (const raw of ids) {
-				const id = String(raw);
-				if (!active.has(id)) pending.add(id);
-			}
-			while (running < CONCURRENCY && pending.size) {
-				const batch = [];
-				for (const id of pending) {
-					pending.delete(id);
-					active.add(id);
-					batch.push(id);
-					if (batch.length >= BATCH) break;
-				}
-				running++;
-				updateBatch(batch).catch((e) => console.error("[AL-Additions] airing batch", e)).finally(() => {
-					batch.forEach((id) => active.delete(id));
-					running--;
-					queueIDs([]);
-				});
 			}
 		}
-		const dirty = new Set();
-		let fullScan = false;
-		let raf = 0;
-		function flush() {
-			raf = 0;
-			if (!onListPage()) {
-				dirty.clear();
-				fullScan = false;
-				return;
-			}
-			if (fullScan) {
-				fullScan = false;
-				dirty.clear();
-				scanAll();
-				return;
-			}
-			const stale = new Set();
-			for (const entry of dirty) {
-				const id = updateEntry(entry);
-				if (id && needsFetch(id)) stale.add(id);
-			}
-			dirty.clear();
-			queueIDs(stale);
-		}
-		const mark = () => {
-			if (!raf) raf = requestAnimationFrame(flush);
+		if (!data || typeof data !== "object" || Array.isArray(data)) return {
+			valid: false,
+			error: "Overrides must be a JSON object mapping AniList media IDs to override records."
 		};
-		const refresh = debounce(scanAll, 100);
-		Core.onBodyMutation((muts) => {
-			if (!onListPage()) return;
-			for (const m of muts) {
-				const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
-				if (own) {
-					dirty.add(own);
-					mark();
-				}
-				for (const n of Array.from(m.addedNodes)) {
-					if (n.nodeType !== 1) continue;
-					const el = n;
-					if (el.matches(".entry")) dirty.add(el);
-					else {
-						el.querySelectorAll(".entry").forEach((e) => dirty.add(e));
-						if (el.matches(".list-wrap, .section-name") || el.querySelector(".section-name")) fullScan = true;
+		const result = {};
+		for (const [key, val] of Object.entries(data)) {
+			const id = Number(key);
+			if (!id || id <= 0 || !Number.isInteger(id)) return {
+				valid: false,
+				error: `Invalid AniList media ID key "${key}". Keys must be positive integers.`
+			};
+			if (!val || typeof val !== "object" || Array.isArray(val)) return {
+				valid: false,
+				error: `Invalid entry for media ID ${id}: expected an object.`
+			};
+			const o = val;
+			if (typeof o.malId !== "number" || o.malId < 0 || !Number.isInteger(o.malId)) return {
+				valid: false,
+				error: `Invalid malId for media ID ${id}: must be a non-negative integer (0 for AniList-only).`
+			};
+			const typeStr = String(o.type || "ANIME").toUpperCase();
+			if (typeStr !== "ANIME" && typeStr !== "MANGA") return {
+				valid: false,
+				error: `Invalid type for media ID ${id}: must be "ANIME" or "MANGA".`
+			};
+			const entry = {
+				malId: o.malId,
+				type: typeStr,
+				title: typeof o.title === "string" && o.title.trim() ? o.title.trim() : `Media #${id}`,
+				updatedAt: typeof o.updatedAt === "number" && o.updatedAt > 0 ? o.updatedAt : Date.now()
+			};
+			if (typeof o.cover === "string" && o.cover.trim()) entry.cover = o.cover.trim();
+			result[String(id)] = entry;
+		}
+		return {
+			valid: true,
+			overrides: result
+		};
+	}
+	function importOverrides(raw, mode = "replace") {
+		const check = validateOverrides(raw);
+		if (!check.valid || !check.overrides) return {
+			success: false,
+			error: check.error || "Validation failed"
+		};
+		saveManualOverrides(mode === "merge" ? {
+			...getManualOverrides(),
+			...check.overrides
+		} : check.overrides);
+		return {
+			success: true,
+			count: Object.keys(check.overrides).length
+		};
+	}
+	var STALE_MS = 864e5;
+	var refreshing = false;
+	async function refreshStaleOverrides() {
+		if (refreshing) return;
+		const initial = getManualOverrides();
+		const keys = Object.keys(initial);
+		if (!keys.length) return;
+		const staleIds = keys.map(Number).filter((id) => id > 0 && (!initial[String(id)]?.updatedAt || Date.now() - initial[String(id)].updatedAt > STALE_MS)).sort((a, b) => (initial[String(a)]?.updatedAt || 0) - (initial[String(b)]?.updatedAt || 0));
+		if (!staleIds.length) return;
+		refreshing = true;
+		try {
+			for (let i = 0; i < staleIds.length; i += 50) {
+				const batch = staleIds.slice(i, i + 50);
+				const q = `query ($ids: [Int]) {
+        Page(page: 1, perPage: 50) {
+          media(id_in: $ids) {
+            id
+            type
+            title { userPreferred english romaji }
+            coverImage { medium }
+          }
+        }
+      }`;
+				try {
+					const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
+					const current = getManualOverrides();
+					let changed = false;
+					for (const m of list) {
+						const idStr = String(m.id);
+						if (current[idStr]) {
+							const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[idStr].title;
+							const cover = m.coverImage?.medium || current[idStr].cover;
+							const type = m.type === "MANGA" ? "MANGA" : "ANIME";
+							if (current[idStr].title !== t || current[idStr].cover !== cover || current[idStr].type !== type || !current[idStr].updatedAt) changed = true;
+							current[idStr] = {
+								...current[idStr],
+								title: t,
+								cover,
+								type,
+								updatedAt: Date.now()
+							};
+						}
 					}
-					mark();
+					if (changed) saveManualOverrides(current);
+				} catch (e) {
+					console.warn("[AL-Additions] Failed to refresh stale overrides batch:", e);
+					break;
 				}
 			}
+		} finally {
+			refreshing = false;
+		}
+	}
+	var MAL_AUTH_URL = "https://myanimelist.net/v1/oauth2/authorize";
+	var MAL_TOKEN_URL = "https://myanimelist.net/v1/oauth2/token";
+	var MAL_API = "https://api.myanimelist.net/v2";
+	var MAL_REDIRECT = "https://myanimelist.net/";
+	var MAL_CLIENT_ID = "f8197fe8cb24188073de4c0227307edf";
+	var hooks = {};
+	var logLines = [];
+	var lastNotice = "";
+	function log(msg, level = "info") {
+		const time = new Date().toLocaleTimeString([], {
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit"
 		});
-		Core.onNavigate(() => {
-			if (onListPage()) {
-				fullScan = true;
-				mark();
-				refresh();
-			}
-		});
-		const isIncrease = (el) => {
-			for (let n = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
-				const label = `${n.getAttribute?.("aria-label") || ""} ${n.getAttribute?.("title") || ""}`.trim().toLowerCase();
-				if (/increase|increment|add episode|add chapter|next episode|next chapter/.test(label)) return true;
-				const text = (n.textContent || "").trim();
-				if (text === "+" || text === "+1") return true;
-			}
-			return false;
-		};
-		document.addEventListener("pointerdown", (e) => {
-			if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
-			const entry = e.target.closest(".entry");
-			const dot = entry && releasingDot(entry);
-			if (!dot || !dot.classList.contains(CLASS)) return;
-			const id = idOf(entry);
-			const data = id && cache[id];
-			const watched = progressOf(entry);
-			if (data && Number.isFinite(data.aired) && Number.isFinite(watched) && watched !== null && watched + 1 >= data.aired) {
-				optimistic.set(id, {
-					target: watched + 1,
-					expiresAt: Date.now() + OPTIMISTIC_TTL
-				});
-				dot.classList.remove(CLASS);
-			}
-		}, true);
-		for (const type of [
-			"click",
-			"input",
-			"change"
-		]) document.addEventListener(type, (e) => {
-			if (e.target instanceof Element && e.target.closest(".entry")) refresh();
-		}, true);
-		window.addEventListener("focus", refresh);
-		document.addEventListener("visibilitychange", () => {
-			if (!document.hidden) refresh();
-		});
-		setInterval(scanAll, 6e4);
+		const marker = level === "error" ? "ERROR" : level === "warn" ? "WARN " : level === "success" ? "OK   " : "INFO ";
+		logLines.unshift(`${time}  ${marker} ${String(msg)}`);
+		logLines = logLines.slice(0, 60);
+		console[level === "error" ? "error" : level === "warn" ? "warn" : "log"]("[AL→MAL Sync]", msg);
+		lastNotice = String(msg);
+		const box = document.getElementById("almal-log");
+		const hint = document.getElementById("almal-hint");
+		if (box) box.textContent = logLines.join("\n");
+		if (hint) hint.textContent = lastNotice;
+	}
+	function toast(msg, isError, closeTab) {
+		log(msg);
 		Core.ready(() => {
-			if (onListPage()) {
-				scanAll();
-				setTimeout(scanAll, 500);
-				setTimeout(scanAll, 1500);
+			let t = document.getElementById("almal-toast");
+			if (!t) {
+				t = document.createElement("div");
+				t.id = "almal-toast";
+				t.style.cssText = "position:fixed;top:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:3px;color:#fff;font-size:1.2rem;z-index:999999;box-shadow:0 4px 16px rgba(0,0,0,.45)";
+				document.body.appendChild(t);
 			}
+			t.textContent = msg;
+			t.style.background = isError ? "#b23b3b" : "#2f8f5b";
+			t.style.display = "block";
+			clearTimeout(t._hide);
+			t._hide = setTimeout(() => {
+				if (t) t.style.display = "none";
+			}, 6e3);
+			if (closeTab) setTimeout(() => safe(() => window.close()), 1800);
+		});
+	}
+	var clearMalAuth = () => {
+		[
+			"mal_token",
+			"mal_refresh_token",
+			"mal_expires_at"
+		].forEach((k) => store$1.del(k));
+	};
+	async function malTokenRequest(params) {
+		const body = new URLSearchParams({
+			client_id: MAL_CLIENT_ID,
+			...params
+		});
+		const res = await gm.request(MAL_TOKEN_URL, {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			data: body.toString()
+		});
+		let json = {};
+		try {
+			json = JSON.parse(res.responseText);
+		} catch (_) {}
+		if (!json.access_token) {
+			if (params.grant_type === "refresh_token" && [
+				400,
+				401,
+				403
+			].includes(res.status)) {
+				clearMalAuth();
+				throw authError("MAL", "MAL session expired — reconnect MAL.");
+			}
+			throw new Error(json.hint || json.message || json.error || res.responseText || `HTTP ${res.status}`);
+		}
+		store$1.set("mal_token", json.access_token);
+		if (json.refresh_token) store$1.set("mal_refresh_token", json.refresh_token);
+		store$1.set("mal_expires_at", Date.now() + (Number(json.expires_in) || 3600) * 1e3);
+		return json.access_token;
+	}
+	async function exchangeMalCode(code) {
+		const token = await malTokenRequest({
+			code,
+			code_verifier: store$1.get("mal_code_verifier", ""),
+			grant_type: "authorization_code",
+			redirect_uri: MAL_REDIRECT
+		});
+		store$1.del("mal_code_verifier");
+		return token;
+	}
+	var malRefresh = null;
+	async function malEnsureToken() {
+		if (Date.now() < store$1.get("mal_expires_at", 0) - 6e4) return store$1.get("mal_token");
+		if (!malRefresh) malRefresh = (async () => {
+			const refresh = store$1.get("mal_refresh_token", null);
+			if (!refresh) throw authError("MAL", "No MAL refresh token stored — reconnect MAL.");
+			return malTokenRequest({
+				grant_type: "refresh_token",
+				refresh_token: refresh
+			});
+		})().finally(() => {
+			malRefresh = null;
+		});
+		return malRefresh;
+	}
+	function malConnect() {
+		const verifier = randomString(96);
+		store$1.set("mal_code_verifier", verifier);
+		openTab(`${MAL_AUTH_URL}?response_type=code&client_id=${encodeURIComponent(MAL_CLIENT_ID)}&code_challenge=${encodeURIComponent(verifier)}&code_challenge_method=plain&redirect_uri=${encodeURIComponent(MAL_REDIRECT)}`);
+		log("Opened MAL authorization in a new tab. Finish connecting there, then return to your list.");
+	}
+	function captureCredentials() {
+		if (location.hostname === "myanimelist.net") {
+			const code = new URLSearchParams(location.search).get("code");
+			if (!code || !store$1.get("mal_code_verifier")) return;
+			exchangeMalCode(code).then(() => {
+				const url = new URL(location.href);
+				url.searchParams.delete("code");
+				url.searchParams.delete("state");
+				history.replaceState(null, "", url.pathname + url.search);
+				toast("MAL connected! You can close this tab.", false, true);
+			}).catch((e) => toast("MAL connection failed: " + e.message, true));
+		}
+	}
+	var malLimiter = new RateLimiter({
+		rate: 60,
+		min: 12,
+		max: 180,
+		burst: 4,
+		adaptive: true,
+		jitter: true,
+		persistKey: "ala_mal_api_resume_at"
+	});
+	var BREAKER_THRESHOLD = 8;
+	var BREAKER_COOLDOWN_MS = 9e4;
+	var breaker = (() => {
+		let fails = 0;
+		let until = 0;
+		let trips = 0;
+		return {
+			ok() {
+				fails = 0;
+			},
+			fail() {
+				if (++fails >= BREAKER_THRESHOLD && Date.now() >= until) {
+					fails = 0;
+					trips++;
+					until = Date.now() + BREAKER_COOLDOWN_MS;
+					log(`⚠ ${BREAKER_THRESHOLD} consecutive MAL failures — pausing writes for ${BREAKER_COOLDOWN_MS / 1e3}s.`);
+				}
+			},
+			async wait(checkCancel) {
+				while (Date.now() < until) {
+					checkCancel?.();
+					await sleep(Math.min(1e3, until - Date.now()));
+				}
+			},
+			get trips() {
+				return trips;
+			},
+			reset() {
+				fails = 0;
+				until = 0;
+				trips = 0;
+			}
+		};
+	})();
+	var MalError = class extends Error {
+		status;
+		html;
+		constructor(what, res) {
+			super(`${what} ${res.status}: ${String(res.responseText || "request failed").slice(0, 200)}`);
+			this.status = res.status;
+			this.html = /^\s*</.test(res.responseText || "");
+		}
+	};
+	function parseRetryAfterMs(headers, fallback) {
+		const m = String(headers || "").match(/retry-after:\s*(\S+)/i);
+		if (!m) return fallback;
+		const secs = Number(m[1]);
+		if (Number.isFinite(secs)) return Math.max(1e3, Math.min(secs * 1e3, 12e4));
+		const date = Date.parse(m[1]);
+		return Number.isFinite(date) ? Math.max(1e3, Math.min(date - Date.now(), 12e4)) : fallback;
+	}
+	var looksLimited = (res) => res.status === 429 || res.status === 403 && /^\s*</.test(res.responseText || "");
+	var backoff = (attempt) => Math.min(3e4, 1e3 * 2 ** attempt) * (.8 + Math.random() * .4);
+	async function malRequest({ method = "GET", url, data, headers = {}, timeout = 3e4 }, checkCancel) {
+		await malLimiter.acquire(checkCancel ?? hooks.checkCancel);
+		const token = await malEnsureToken();
+		logDebug("[SYNC]", `MAL ${method} ${url}`, data ? { data } : "");
+		const res = await gm.request(url, {
+			method,
+			data,
+			timeout,
+			headers: {
+				Authorization: `Bearer ${token}`,
+				...headers
+			}
+		});
+		logDebug("[SYNC]", `MAL ${method} response: ${res.status} for ${url}`);
+		if (looksLimited(res)) malLimiter.limit(parseRetryAfterMs(res.responseHeaders, res.status === 429 ? 5e3 : 6e4));
+		else if (res.status >= 500) malLimiter.limit(2e3);
+		else if (res.status >= 200 && res.status < 300) malLimiter.success();
+		return res;
+	}
+	async function malCall(opts, retries = 4, checkCancel) {
+		const check = checkCancel ?? hooks.checkCancel;
+		let refreshed = false;
+		for (let attempt = 0;; attempt++) {
+			check?.();
+			let res;
+			try {
+				res = await malRequest(opts, check);
+			} catch (e) {
+				if (e.auth || e.cancelled || attempt >= retries) throw e;
+				await sleep(backoff(attempt));
+				continue;
+			}
+			if (res.status === 401) {
+				if (refreshed) {
+					clearMalAuth();
+					throw authError("MAL", "MAL rejected the access token — reconnect MAL.");
+				}
+				refreshed = true;
+				store$1.set("mal_expires_at", 0);
+				continue;
+			}
+			if (!looksLimited(res) && res.status < 500) return res;
+			if (attempt >= retries) return res;
+		}
+	}
+	var parseJson = (res, what) => {
+		try {
+			return JSON.parse(res.responseText || "{}");
+		} catch (_) {
+			throw new Error(`MAL returned invalid JSON for ${what}.`);
+		}
+	};
+	async function malUpdateEntry(type, malId, patch) {
+		const res = await malCall({
+			method: "PUT",
+			url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}/${malId}/my_list_status`,
+			data: new URLSearchParams(patch).toString(),
+			headers: { "Content-Type": "application/x-www-form-urlencoded" }
+		});
+		if (res.status < 200 || res.status >= 300) throw new MalError("MAL", res);
+		return res;
+	}
+	async function malDeleteEntry(type, malId) {
+		const res = await malCall({
+			method: "DELETE",
+			url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}/${malId}/my_list_status`
+		});
+		if (res.status === 404) return res;
+		if (res.status < 200 || res.status >= 300) throw new MalError("MAL delete", res);
+		return res;
+	}
+	async function malWhoAmI() {
+		const res = await malCall({ url: `${MAL_API}/users/@me` });
+		if (res.status < 200 || res.status >= 300) throw new MalError("MAL profile", res);
+		return parseJson(res, "the profile");
+	}
+	async function malFetchList(type) {
+		const MAL_LIST_PAGE_SIZE = 1e3;
+		const MAL_LIST_MAX = 1e5;
+		const anime = type === "ANIME";
+		const fields = anime ? "num_episodes,list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched,start_date,finish_date,comments}" : "num_chapters,num_volumes,list_status{status,score,num_chapters_read,num_volumes_read,is_rereading,num_times_reread,start_date,finish_date,comments}";
+		const entries = {};
+		let total = 0;
+		for (let offset = 0; offset <= MAL_LIST_MAX;) {
+			const res = await malCall({
+				url: `${MAL_API}/users/@me/${anime ? "animelist" : "mangalist"}?fields=${encodeURIComponent(fields)}&limit=${MAL_LIST_PAGE_SIZE}&offset=${offset}&nsfw=true`,
+				timeout: 6e4
+			}, 6);
+			if (res.status < 200 || res.status >= 300) throw new MalError("MAL list", res);
+			const json = parseJson(res, "the list");
+			const nodes = Array.isArray(json.data) ? json.data : [];
+			for (const row of nodes) {
+				const id = Number(row?.node?.id);
+				if (!(id > 0) || !row.list_status) continue;
+				const node = row.node;
+				if (!entries[id]) total++;
+				entries[id] = {
+					...row.list_status,
+					__malTitle: node.title || "",
+					__total: Number(anime ? node.num_episodes : node.num_chapters) || 0,
+					__totalVolumes: anime ? 0 : Number(node.num_volumes) || 0
+				};
+			}
+			if (total > MAL_LIST_MAX) throw new Error(`MAL list exceeded the ${MAL_LIST_MAX.toLocaleString()}-entry safety limit.`);
+			if (!nodes.length || !json.paging?.next) break;
+			offset += nodes.length;
+		}
+		return entries;
+	}
+	var searchCandidates = memo(async (type, q) => {
+		const params = new URLSearchParams({
+			q: q.slice(0, 64),
+			limit: "10",
+			nsfw: "true",
+			fields: "alternative_titles,start_date"
+		});
+		const res = await malCall({ url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}?${params}` }, 2);
+		if (res.status === 400) return [];
+		if (res.status < 200 || res.status >= 300) throw new MalError("MAL search", res);
+		const json = parseJson(res, "a search");
+		return (Array.isArray(json.data) ? json.data : []).map((r) => {
+			const n = r?.node || {};
+			const alt = n.alternative_titles || {};
+			return {
+				id: Number(n.id) || 0,
+				titles: [
+					n.title,
+					alt.en,
+					alt.ja,
+					...alt.synonyms || []
+				].map(strictTitle).filter(Boolean),
+				year: Number(String(n.start_date || "").slice(0, 4)) || 0
+			};
 		});
 	});
-	var str = (v) => typeof v === "string" ? v.trim() : "";
-	var DIRECT_SITE_MAP = {
-		spotify: "SPOTIFY",
-		youtube: "YOUTUBE",
-		youtube_music: "YOUTUBE_MUSIC",
-		apple_music: "APPLE_MUSIC"
+	async function searchMalId(type, entry) {
+		for (const q of entry.queryTitles.filter((s) => s.length >= 3).slice(0, 2)) {
+			const ok = (await searchCandidates(`${type}:${q}`, type, q)).filter((c) => c.id && c.titles.some((t) => entry.titles.includes(t)) && (!c.year || !entry.startYear || Math.abs(c.year - entry.startYear) <= 1));
+			if (ok.length === 1) return ok[0].id;
+			if (ok.length > 1) {
+				const exact = ok.filter((c) => c.year && c.year === entry.startYear);
+				return exact.length === 1 ? exact[0].id : 0;
+			}
+		}
+		return 0;
+	}
+	var TYPES = ["ANIME", "MANGA"];
+	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
+	var SETTLED_TTL_MS = 3888e6;
+	var LOCK_STALE_MS = 45e3;
+	var LOCK_HEARTBEAT_MS = 1e4;
+	var TAB_ID = randomString(10);
+	var LOCK_KEY = "sync_lock_heartbeat";
+	var progress = {
+		phase: "idle",
+		done: 0,
+		total: 0,
+		changed: 0
 	};
-	function resolveProviderLink(preset, song, groupType) {
-		const directSite = DIRECT_SITE_MAP[preset.id];
-		const directUrl = directSite && song.resources ? song.resources[directSite] : null;
-		if (directUrl) return {
-			url: directUrl,
-			isDirect: true
-		};
-		const params = extractSongParams(song, groupType);
-		return {
-			url: buildProviderUrl(preset.url, params),
-			isDirect: false
-		};
-	}
-	function pickVideo(entries) {
-		let fallback = null;
-		for (const entry of Array.isArray(entries) ? entries : []) {
-			const rawVideos = entry?.videos;
-			const videos = Array.isArray(rawVideos?.nodes) ? rawVideos.nodes : Array.isArray(rawVideos) ? rawVideos : [];
-			for (const video of videos) {
-				const link = str(video?.link);
-				if (!/^https?:\/\//i.test(link)) continue;
-				if (str(video?.source).toUpperCase() === "WEB") return link;
-				fallback = fallback || link;
-			}
+	var syncStatus = {
+		syncing: false,
+		cancelled: false,
+		autoSyncRetryAfter: 0
+	};
+	var progressListeners = [];
+	var stateListeners = [];
+	var onProgressChange = (cb) => {
+		progressListeners.push(cb);
+	};
+	var onStateChange = (cb) => {
+		stateListeners.push(cb);
+	};
+	var notifyProgress = (force = false) => {
+		for (const cb of progressListeners) cb(force);
+	};
+	var notifyState = () => {
+		for (const cb of stateListeners) cb();
+	};
+	var markDone = (n = 1) => {
+		progress.done += n;
+		notifyProgress();
+	};
+	var checkCancel = () => {
+		if (syncStatus.cancelled) {
+			const e = new Error("Sync stopped.");
+			e.cancelled = true;
+			throw e;
 		}
-		return fallback;
-	}
-	var PERFORMER_ROLES = new Set(["PERFORMANCE", "FEATURING"]);
-	var relevanceOf = (v) => v != null && Number.isFinite(Number(v)) ? Number(v) : Number.MAX_SAFE_INTEGER;
-	function extractSongArtists(song) {
-		const mainArtists = [];
-		const featArtists = [];
-		const seen = new Set();
-		if (Array.isArray(song?.staff)) {
-			const sorted = [...song.staff].sort((a, b) => relevanceOf(a?.relevance) - relevanceOf(b?.relevance));
-			for (const s of sorted) {
-				const role = str(s?.role).toUpperCase();
-				if (role && !PERFORMER_ROLES.has(role)) continue;
-				const name = str(s?.as || s?.alias || s?.artist?.name?.main || s?.artist?.name);
-				if (!name || seen.has(name)) continue;
-				seen.add(name);
-				if (role === "FEATURING") featArtists.push(name);
-				else mainArtists.push(name);
-			}
-		} else if (Array.isArray(song?.artists)) for (const a of song.artists) {
-			const name = str(a?.name);
-			if (name && !seen.has(name)) {
-				seen.add(name);
-				mainArtists.push(name);
-			}
+	};
+	var pruneIds = (d) => {
+		for (const k of Object.keys(d)) {
+			const r = d[k];
+			if (!r || typeof r !== "object" || !(r.m > 0) && !(Date.now() - r.t < 6048e5)) delete d[k];
 		}
-		const artists = [...mainArtists, ...featArtists];
-		return {
-			artists,
-			credit: mainArtists.length && featArtists.length ? `${mainArtists.join(", ")} feat. ${featArtists.join(", ")}` : artists.join(", ")
-		};
-	}
-	function firstEpisodeNum(eps) {
-		const m = (eps || "").match(/\d+/);
-		return m ? Number(m[0]) : Number.MAX_SAFE_INTEGER;
-	}
-	function sortEpisodes(raw) {
-		const seen = new Set();
-		const parts = raw.split(",").map((p) => p.trim()).filter((p) => {
-			if (!p || seen.has(p)) return false;
-			seen.add(p);
-			return true;
-		});
-		if (parts.length <= 1) return parts[0] || "";
-		parts.sort((a, b) => firstEpisodeNum(a) - firstEpisodeNum(b) || a.localeCompare(b));
-		return parts.join(", ");
-	}
-	function formatEpsTag(eps) {
-		if (!eps) return "";
-		return `(${/[-,]/.test(eps) ? "eps" : "ep"} ${eps})`;
-	}
-	var LANGUAGE_GROUP_RE = /\b(english|dub(?:bed)?|spanish|french|german|italian|portuguese|korean|chinese|castilian|latin)\b/i;
-	function cleanGroupName(group) {
-		return group.replace(/\s+Version\b/i, "").trim();
-	}
-	var normTitle = (s) => s.trim().toLowerCase();
-	function extractRawTheme(theme) {
-		const songTitle = str(theme?.song?.title?.romaji || theme?.song?.title);
-		if (!songTitle) return null;
-		const rawSeqVal = theme?.sequence != null && Number.isFinite(Number(theme.sequence)) ? Math.floor(Number(theme.sequence)) : null;
-		const rawSequence = rawSeqVal != null && rawSeqVal >= 1 ? rawSeqVal : null;
-		const sequence = rawSequence ?? 1;
-		const { artists, credit: artistCredit } = extractSongArtists(theme?.song);
-		const entries = [...Array.isArray(theme?.entries) ? theme.entries : Array.isArray(theme?.animethemeentries) ? theme.animethemeentries : []].sort((a, b) => {
-			const va = a?.version != null && Number.isFinite(Number(a.version)) ? Number(a.version) : 1;
-			const vb = b?.version != null && Number.isFinite(Number(b.version)) ? Number(b.version) : 1;
-			if (va !== vb) return va - vb;
-			return firstEpisodeNum(str(a?.episodes)) - firstEpisodeNum(str(b?.episodes));
-		}).map((e, idx) => {
-			const vNum = e?.version != null && Number.isFinite(Number(e.version)) ? Math.floor(Number(e.version)) : idx + 1;
-			const ep = sortEpisodes(str(e?.episodes));
-			const notes = str(e?.notes);
-			return {
-				version: vNum,
-				label: `v${vNum}`,
-				...ep ? { episodes: ep } : {},
-				...notes ? { notes } : {},
-				url: pickVideo([e])
-			};
-		});
-		const groupName = typeof theme?.group === "object" && theme?.group !== null ? str(theme.group.name) : str(theme?.group);
-		const type = str(theme?.type).toUpperCase() === "ED" ? "ED" : "OP";
-		const nativeTitle = str(theme?.song?.title?.native);
-		const hasJp = !!nativeTitle || /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(songTitle);
-		const resourcesList = Array.isArray(theme?.song?.resources?.nodes) ? theme.song.resources.nodes : [];
-		const resources = {};
-		for (const r of resourcesList) {
-			const site = str(r?.site).toUpperCase();
-			const link = str(r?.link);
-			if (site && link) resources[site] = link;
+	};
+	var pruneSettled = (d) => {
+		for (const k of Object.keys(d)) {
+			const r = d[k];
+			if (!Array.isArray(r) || !(Date.now() - r[2] < SETTLED_TTL_MS)) delete d[k];
 		}
-		return {
-			type,
-			rawSequence,
-			sequence,
-			title: songTitle,
-			titleJp: nativeTitle || (hasJp ? songTitle : void 0),
-			artists,
-			artistCredit,
-			groupName,
-			entries,
-			resources: Object.keys(resources).length ? resources : void 0
-		};
+	};
+	var makeStores = (t) => ({
+		ids: persistent(`sync_idmap_${t}`, pruneIds),
+		settled: persistent(`sync_settled_${t}`, pruneSettled)
+	});
+	var stores = {
+		ANIME: makeStores("ANIME"),
+		MANGA: makeStores("MANGA")
+	};
+	var clearCache = (c) => {
+		for (const k of Object.keys(c.data)) delete c.data[k];
+		c.save();
+	};
+	var PENDING_DELETES_KEY = "sync_pending_deletes";
+	function getPendingDeletes() {
+		return jsonGet(PENDING_DELETES_KEY, []);
 	}
-	function buildSongEntry(bucket, meta) {
-		const ordered = [...bucket].sort((a, b) => {
-			const ag = a.groupName ? 1 : 0;
-			const bg = b.groupName ? 1 : 0;
-			if (ag !== bg) return ag - bg;
-			return a.groupName.localeCompare(b.groupName);
+	function addPendingDelete(del) {
+		const list = getPendingDeletes().filter((p) => !(p.mediaId === del.mediaId && p.type === del.type));
+		list.push(del);
+		jsonSet(PENDING_DELETES_KEY, list);
+	}
+	function removePendingDelete(mediaId, type) {
+		jsonSet(PENDING_DELETES_KEY, getPendingDeletes().filter((p) => !(p.mediaId === mediaId && p.type === type)));
+	}
+	function resetAccountState() {
+		for (const t of TYPES) {
+			for (const k of [
+				"last_sync",
+				"last_run",
+				"last_compare"
+			]) store$1.del(`${k}_${t}`);
+			clearCache(stores[t].settled);
+		}
+		store$1.del("sync_retry_at");
+		store$1.del(PENDING_DELETES_KEY);
+	}
+	var heartbeat = null;
+	async function acquireLock() {
+		const lock = jsonGet(LOCK_KEY, null);
+		if (lock && lock.tab !== TAB_ID && Number.isFinite(lock.at) && Date.now() - lock.at < LOCK_STALE_MS) return false;
+		const beat = () => jsonSet(LOCK_KEY, {
+			at: Date.now(),
+			tab: TAB_ID
 		});
-		const primary = ordered[0];
-		const merged = ordered.length > 1;
-		let versions;
-		if (!merged) versions = primary.entries;
+		beat();
+		await sleep(250);
+		if (jsonGet(LOCK_KEY, null)?.tab !== TAB_ID) return false;
+		heartbeat = setInterval(beat, LOCK_HEARTBEAT_MS);
+		return true;
+	}
+	function releaseLock() {
+		if (heartbeat) clearInterval(heartbeat);
+		heartbeat = null;
+		if (jsonGet(LOCK_KEY, null)?.tab === TAB_ID) store$1.del(LOCK_KEY);
+	}
+	var STATUS_MAP = {
+		ANIME: {
+			CURRENT: "watching",
+			COMPLETED: "completed",
+			PAUSED: "on_hold",
+			DROPPED: "dropped",
+			PLANNING: "plan_to_watch",
+			REPEATING: "watching"
+		},
+		MANGA: {
+			CURRENT: "reading",
+			COMPLETED: "completed",
+			PAUSED: "on_hold",
+			DROPPED: "dropped",
+			PLANNING: "plan_to_read",
+			REPEATING: "reading"
+		}
+	};
+	var PROGRESS_KEYS = [
+		"num_watched_episodes",
+		"num_chapters_read",
+		"num_volumes_read"
+	];
+	function convertScore(score100) {
+		if (!score100 || score100 <= 0) return 0;
+		const mode = Settings.get("syncScoreRounding");
+		return Math.max(1, Math.min(10, (mode === "ceil" ? Math.ceil : mode === "floor" ? Math.floor : Math.round)(Number(score100) / 10)));
+	}
+	var fuzzyToMalDate = (f) => f && f.year && f.month && f.day ? `${f.year}-${String(f.month).padStart(2, "0")}-${String(f.day).padStart(2, "0")}` : null;
+	var count = (v) => Math.max(0, Math.floor(Number(v) || 0));
+	var normText = (s) => String(s || "").replace(/\r\n?/g, "\n").trim();
+	function buildPayload(type, e) {
+		const status = STATUS_MAP[type][e.status];
+		if (!status) return null;
+		const anime = type === "ANIME";
+		const p = { status };
+		const score = convertScore(e.score);
+		if (score > 0) p.score = score;
+		p[anime ? "is_rewatching" : "is_rereading"] = e.status === "REPEATING" ? "true" : "false";
+		if (anime) p.num_watched_episodes = count(e.progress);
 		else {
-			const hasLanguageSibling = ordered.some((t) => t.groupName && LANGUAGE_GROUP_RE.test(t.groupName));
-			versions = [];
-			for (const sub of ordered) {
-				const grpLabel = sub.groupName ? cleanGroupName(sub.groupName) : hasLanguageSibling ? "Japanese" : "Original";
-				const subSongDiffers = normTitle(sub.title) !== normTitle(primary.title);
-				const subEntries = sub.entries.length ? sub.entries : [{
-					version: 1,
-					label: "v1",
-					url: null
-				}];
-				const multiInSub = subEntries.length > 1;
-				for (const e of subEntries) versions.push({
-					version: e.version,
-					label: multiInSub ? `${grpLabel} v${e.version}` : grpLabel,
-					...subSongDiffers ? { songTitle: sub.title } : {},
-					...e.episodes ? { episodes: e.episodes } : {},
-					...e.notes ? { notes: e.notes } : {},
-					url: e.url
-				});
+			p.num_chapters_read = count(e.progress);
+			if (count(e.progressVolumes) > 0) p.num_volumes_read = count(e.progressVolumes);
+		}
+		const start = fuzzyToMalDate(e.startedAt);
+		const finish = fuzzyToMalDate(e.completedAt);
+		if (start) p.start_date = start;
+		if (finish) p.finish_date = finish;
+		if (count(e.repeat) > 0) p[anime ? "num_times_rewatched" : "num_times_reread"] = count(e.repeat);
+		const notes = normText(e.notes);
+		if (notes) p.comments = notes.slice(0, 2e3);
+		return p;
+	}
+	var malKey = (k) => k === "num_watched_episodes" ? "num_episodes_watched" : k;
+	var normDate = (v) => v ? String(v).slice(0, 10) : null;
+	var truthy = (v) => v === true || v === 1 || String(v).toLowerCase() === "true";
+	var NUMERIC = [
+		"score",
+		"num_watched_episodes",
+		"num_chapters_read",
+		"num_volumes_read",
+		"num_times_rewatched",
+		"num_times_reread"
+	];
+	function fieldEquals(key, desired, actual) {
+		if (key === "is_rewatching" || key === "is_rereading") return truthy(actual) === truthy(desired);
+		if (key === "start_date" || key === "finish_date") return normDate(actual) === normDate(desired);
+		if (key === "comments") return normText(actual) === normText(desired);
+		if (NUMERIC.includes(key)) return Number(actual || 0) === Number(desired || 0);
+		return String(actual ?? "") === String(desired ?? "");
+	}
+	function reconcile(type, entry, mal) {
+		const desired = buildPayload(type, entry);
+		if (!desired) return null;
+		const anime = type === "ANIME";
+		const pKey = anime ? "num_watched_episodes" : "num_chapters_read";
+		const rKey = anime ? "num_times_rewatched" : "num_times_reread";
+		const m = mal || {};
+		const rewatches = Math.max(Number(desired[rKey]) || 0, Number(m[rKey]) || 0);
+		if (rewatches > 0) desired[rKey] = rewatches;
+		if (entry.status === "COMPLETED") {
+			const completedCount = (key, total) => Number(total) > 0 ? Number(total) : Math.max(Number(desired[key]) || 0, Number(m[malKey(key)]) || 0);
+			desired[pKey] = completedCount(pKey, m.__total);
+			if (!anime) {
+				const vols = completedCount("num_volumes_read", m.__totalVolumes);
+				if (vols > 0) desired.num_volumes_read = vols;
+				else delete desired.num_volumes_read;
+			}
+			if (!(desired[pKey] > 0)) delete desired[pKey];
+		}
+		if (!mal) return desired;
+		const statusEq = fieldEquals("status", desired.status, m.status) || entry.status === "REPEATING" && truthy(m[anime ? "is_rewatching" : "is_rereading"]);
+		const patch = {};
+		for (const [k, v] of Object.entries(desired)) {
+			if (k === "status") {
+				if (!statusEq) patch.status = v;
+				continue;
+			}
+			if (!statusEq && PROGRESS_KEYS.includes(k) || !fieldEquals(k, v, m[malKey(k)])) patch[k] = v;
+		}
+		return patch;
+	}
+	function fallbackPatch(type, patch, mal, tried) {
+		if (!tried.has("dates")) {
+			tried.add("dates");
+			if ("start_date" in patch || "finish_date" in patch) {
+				const out = { ...patch };
+				delete out.start_date;
+				delete out.finish_date;
+				if (Object.keys(out).length) return out;
 			}
 		}
-		const multiVersion = versions.length > 1;
-		const eps = sortEpisodes(versions.map((v) => v.episodes).filter(Boolean).join(", "));
-		const epsSuffix = !multiVersion && eps ? ` ${formatEpsTag(eps)}` : "";
-		const singleGroupTag = !merged && primary.groupName ? ` (${cleanGroupName(primary.groupName)})` : "";
-		return {
-			sequence: primary.sequence,
-			title: primary.title,
-			title_romaji: primary.title,
-			title_jp: primary.titleJp,
-			artists: primary.artists,
-			type: primary.type,
-			animeName: meta.animeName,
-			animeRomaji: meta.animeRomaji,
-			animeEn: meta.animeEn,
-			animeJp: meta.animeJp,
-			year: meta.year,
-			season: meta.season,
-			eps: eps || void 0,
-			...multiVersion ? { versions } : {},
-			resources: primary.resources,
-			name: `${primary.sequence}. "${primary.title}"` + (primary.artistCredit ? ` by ${primary.artistCredit}` : "") + epsSuffix + singleGroupTag,
-			url: versions.find((v) => v.url)?.url || null
-		};
-	}
-	function groupThemes(anime, meta) {
-		const out = {
-			OP: [],
-			ED: []
-		};
-		const themeList = Array.isArray(anime?.themes) ? anime.themes : Array.isArray(anime?.animethemes) ? anime.animethemes : [];
-		const buckets = {
-			OP: new Map(),
-			ED: new Map()
-		};
-		let anonIdx = 0;
-		for (const theme of themeList) {
-			const raw = extractRawTheme(theme);
-			if (!raw) continue;
-			const map = buckets[raw.type];
-			let key;
-			if (raw.rawSequence != null) key = `seq:${raw.rawSequence}`;
-			else if (raw.groupName) {
-				const target = [...map.entries()].find(([k, items]) => k.startsWith("anon:") && normTitle(items[0].title) === normTitle(raw.title));
-				key = target ? target[0] : `anon:${anonIdx++}`;
-			} else key = `anon:${anonIdx++}`;
-			const list = map.get(key) || [];
-			list.push(raw);
-			map.set(key, list);
+		if (!tried.has("cap")) {
+			tried.add("cap");
+			const caps = type === "ANIME" ? { num_watched_episodes: mal?.__total } : {
+				num_chapters_read: mal?.__total,
+				num_volumes_read: mal?.__totalVolumes
+			};
+			const out = { ...patch };
+			let changed = false;
+			for (const [k, cap] of Object.entries(caps)) if (cap > 0 && Number(out[k]) > cap) {
+				out[k] = cap;
+				changed = true;
+			}
+			if (changed) return out;
 		}
-		for (const type of ["OP", "ED"]) {
-			for (const bucket of buckets[type].values()) out[type].push(buildSongEntry(bucket, meta));
-			out[type].sort((a, b) => a.sequence - b.sequence || a.name.localeCompare(b.name));
+		return null;
+	}
+	var STATUS_LABEL = {
+		watching: "Watching",
+		reading: "Reading",
+		completed: "Completed",
+		on_hold: "On hold",
+		dropped: "Dropped",
+		plan_to_watch: "Plan to watch",
+		plan_to_read: "Plan to read"
+	};
+	function describePatch(type, patch) {
+		const parts = [];
+		if ("status" in patch) parts.push(`status: ${STATUS_LABEL[patch.status] || patch.status}`);
+		if ("score" in patch) parts.push(`score: ${patch.score}/10`);
+		const progressKey = type === "ANIME" ? "num_watched_episodes" : "num_chapters_read";
+		if (progressKey in patch) parts.push(`${type === "ANIME" ? "episodes" : "chapters"}: ${patch[progressKey]}`);
+		if (type === "MANGA" && "num_volumes_read" in patch) parts.push(`volumes: ${patch.num_volumes_read}`);
+		if ("num_times_rewatched" in patch) parts.push(`rewatches: ${patch.num_times_rewatched}`);
+		if ("num_times_reread" in patch) parts.push(`rereads: ${patch.num_times_reread}`);
+		if ("start_date" in patch) parts.push(`start date: ${patch.start_date}`);
+		if ("finish_date" in patch) parts.push(`finish date: ${patch.finish_date}`);
+		if ("comments" in patch) parts.push("notes");
+		return parts.join("; ") || "MAL-normalised fields";
+	}
+	function buildTitleIndex(mal) {
+		const idx = new Map();
+		for (const [id, st] of Object.entries(mal)) {
+			const t = strictTitle(st?.__malTitle);
+			if (!t) continue;
+			idx.set(t, idx.has(t) && idx.get(t) !== Number(id) ? -1 : Number(id));
+		}
+		return idx;
+	}
+	function localMatch(entry, idx) {
+		let match = null;
+		for (const t of entry.titles) {
+			const id = idx.get(t);
+			if (id == null) continue;
+			if (id === -1 || match && match !== id) return null;
+			match = id;
+		}
+		return match;
+	}
+	function cachedId(type, entry) {
+		const override = getOverride(entry.mediaId);
+		if (override) return override.malId;
+		const c = stores[type].ids.data[entry.mediaId];
+		const fresh = !!c && Date.now() - c.t < 6048e5;
+		if (entry.idMal) return fresh && c.bad === entry.idMal ? 0 : entry.idMal;
+		if (c && c.m > 0) return c.m;
+		return fresh ? 0 : void 0;
+	}
+	function rememberId(type, mediaId, malId, bad) {
+		if (!mediaId) return;
+		const rec = {
+			m: malId || 0,
+			t: Date.now()
+		};
+		if (bad) rec.bad = bad;
+		stores[type].ids.data[mediaId] = rec;
+		stores[type].ids.save();
+	}
+	async function runPool(items, worker, concurrency) {
+		let i = 0;
+		let failure = null;
+		const lane = async () => {
+			while (!failure && i < items.length) {
+				const n = i++;
+				try {
+					await worker(items[n], n);
+				} catch (e) {
+					failure = failure || e;
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(concurrency, items.length) || 1 }, lane));
+		if (failure) throw failure;
+	}
+	async function resolveTargets(type, entries, mal, c) {
+		const idx = buildTitleIndex(mal);
+		const targets = [];
+		const pending = [];
+		const unmatched = [];
+		for (const entry of entries) {
+			if (!entry.mediaId || !STATUS_MAP[type][entry.status]) {
+				c.skipped++;
+				markDone();
+				continue;
+			}
+			const override = getOverride(entry.mediaId);
+			if (override) {
+				if (override.malId === 0) {
+					c.skipped++;
+					markDone();
+					continue;
+				}
+				if (override.malId > 0) {
+					targets.push({
+						entry,
+						malId: override.malId,
+						explicit: true
+					});
+					continue;
+				}
+			}
+			const id = cachedId(type, entry);
+			if (id !== void 0 && id > 0) {
+				targets.push({
+					entry,
+					malId: id,
+					explicit: id === entry.idMal
+				});
+				continue;
+			}
+			if (id === 0) {
+				c.unmatched++;
+				markDone();
+				continue;
+			}
+			const local = localMatch(entry, idx);
+			if (local && local > 0) {
+				rememberId(type, entry.mediaId, local);
+				targets.push({
+					entry,
+					malId: local,
+					explicit: false
+				});
+				continue;
+			}
+			pending.push(entry);
+		}
+		await runPool(pending, async (entry) => {
+			let id = 0;
+			try {
+				id = await searchMalId(type, entry);
+			} catch (e) {
+				if (e.auth || e.cancelled) throw e;
+				c.transient++;
+				markDone();
+				log(`${typeLabel(type)}: could not look up "${entry.title.slice(0, 45)}" on MAL: ${e.message}. Will retry on a later sync.`, "warn");
+				return;
+			}
+			rememberId(type, entry.mediaId, id);
+			if (id > 0) targets.push({
+				entry,
+				malId: id,
+				explicit: false
+			});
+			else {
+				c.unmatched++;
+				unmatched.push(entry.title);
+				markDone();
+			}
+		}, 3);
+		if (unmatched.length) log(`${typeLabel(type)}: no confident MAL match for ${unmatched.length} title(s). Skipped: ${unmatched.slice(0, 5).map((t) => `"${t.slice(0, 30)}"`).join(", ")}${unmatched.length > 5 ? `, plus ${unmatched.length - 5} more` : ""}. Use Full Resync after adding/fixing MAL entries.`, "warn");
+		return targets;
+	}
+	function dedupeTargets(type, targets, c) {
+		const best = new Map();
+		for (const t of targets) {
+			const cur = best.get(t.malId);
+			if (!cur) {
+				best.set(t.malId, t);
+				continue;
+			}
+			const better = Number(t.explicit) - Number(cur.explicit) || t.entry.updatedAt - cur.entry.updatedAt;
+			const loser = better > 0 ? cur : t;
+			if (better > 0) best.set(t.malId, t);
+			c.conflicts++;
+			markDone();
+			log(`${typeLabel(type)}: "${loser.entry.title.slice(0, 40)}" and another AniList entry resolve to MAL ID ${loser.malId}; only one can be synced, so the preferred entry wins.`, "warn");
+		}
+		return [...best.values()].sort((a, b) => b.entry.updatedAt - a.entry.updatedAt);
+	}
+	hooks.checkCancel = checkCancel;
+	var FULL_COMPARE_MS = 6048e5;
+	var BREAKER_MAX_TRIPS = 3;
+	var RETRY_AFTER_FAILURE_MS = 6e5;
+	var LIST_PATH_RE = /^\/user\/[^/]+\/(anime|manga)list/;
+	var onAniList = () => location.hostname === "anilist.co";
+	var ENTRY_FIELDS = "status score(format: POINT_100) progress progressVolumes repeat notes updatedAt startedAt { year month day } completedAt { year month day }";
+	var MEDIA_FIELDS = "id idMal startDate { year } synonyms title { userPreferred english romaji native }";
+	var toEntry = (row, media) => {
+		const t = media?.title || {};
+		return {
+			...row,
+			mediaId: Number(media?.id) || 0,
+			idMal: Number(media?.idMal) || 0,
+			title: t.userPreferred || t.romaji || t.english || String(media?.id || ""),
+			queryTitles: [...new Set([
+				t.userPreferred,
+				t.romaji,
+				t.english
+			].map((s) => String(s || "").trim()).filter(Boolean))],
+			titles: [...new Set([
+				t.userPreferred,
+				t.english,
+				t.romaji,
+				t.native,
+				...media?.synonyms || []
+			].map(strictTitle).filter(Boolean))],
+			startYear: Number(media?.startDate?.year) || 0,
+			updatedAt: Number(row.updatedAt) || 0
+		};
+	};
+	async function alFetchIncremental(userId, type, since) {
+		const q = `query ($userId: Int, $type: MediaType, $page: Int) { Page(page: $page, perPage: 50) {
+    pageInfo { hasNextPage } mediaList(userId: $userId, type: $type, sort: UPDATED_TIME_DESC) { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } }`;
+		const out = [];
+		for (let page = 1; page <= 400; page++) {
+			checkCancel();
+			const p = (await AniList.query(q, {
+				userId,
+				type,
+				page
+			}, { forceFresh: true }))?.Page;
+			let stop = false;
+			for (const row of p?.mediaList || []) {
+				if ((Number(row.updatedAt) || 0) < since) {
+					stop = true;
+					break;
+				}
+				out.push(toEntry(row, row.media));
+			}
+			if (stop || !p?.pageInfo?.hasNextPage) break;
 		}
 		return out;
 	}
-	var COLLAPSE_FALLBACK_MS = 260;
-	var prefersReducedMotion = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-	var cancelClosingMap = new WeakMap();
-	function createCollapsibleVideo(videoUrl) {
-		const wrap = document.createElement("div");
-		wrap.className = "daiya-anisong-collapsible";
-		const inner = document.createElement("div");
-		inner.className = "daiya-anisong-collapsible-inner";
-		const pad = document.createElement("div");
-		pad.className = "daiya-anisong-video-pad";
-		const video = document.createElement("video");
-		video.controls = true;
-		video.preload = "none";
-		video.volume = .4;
-		video.src = videoUrl;
-		video.addEventListener("click", (ev) => ev.stopPropagation());
-		pad.appendChild(video);
-		inner.appendChild(pad);
-		wrap.appendChild(inner);
-		return {
-			wrap,
-			video
-		};
+	async function alFetchAll(userId, type) {
+		const q = `query ($userId: Int, $type: MediaType, $chunk: Int, $perChunk: Int) {
+    MediaListCollection(userId: $userId, type: $type, chunk: $chunk, perChunk: $perChunk) { hasNextChunk lists { entries { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } } }`;
+		const out = [];
+		const seen = new Set();
+		for (let chunk = 1; chunk <= 100; chunk++) {
+			checkCancel();
+			const c = (await AniList.query(q, {
+				userId,
+				type,
+				chunk,
+				perChunk: 500
+			}, { forceFresh: true }))?.MediaListCollection;
+			for (const list of c?.lists || []) for (const row of list.entries || []) {
+				const e = toEntry(row, row.media);
+				if (!e.mediaId || seen.has(e.mediaId)) continue;
+				seen.add(e.mediaId);
+				out.push(e);
+			}
+			if (!c?.hasNextChunk) return out;
+		}
+		throw new Error("AniList collection exceeded the 100-chunk safety limit.");
 	}
-	function createSongCard(song, activePresets, groupType) {
-		const el = document.createElement("div");
-		el.className = "daiya-anisong-entry";
-		const header = document.createElement("div");
-		header.className = "daiya-anisong-header";
-		const titleSpan = document.createElement("span");
-		titleSpan.className = "daiya-anisong-title";
-		titleSpan.textContent = song.name;
-		header.appendChild(titleSpan);
-		if (activePresets.length) {
-			const actions = document.createElement("div");
-			actions.className = "daiya-anisong-actions";
-			activePresets.forEach((p) => {
-				if (!p || !p.url) return;
-				const a = document.createElement("a");
-				a.className = "daiya-anisong-link";
-				const { url, isDirect } = resolveProviderLink(p, song, groupType);
-				a.href = url;
-				a.target = "_blank";
-				a.rel = "noopener";
-				a.title = isDirect ? `Listen on ${p.name}` : `Search on ${p.name}`;
-				a.addEventListener("click", (ev) => ev.stopPropagation());
-				const img = document.createElement("img");
-				img.className = "daiya-anisong-icon";
-				img.src = p.icon;
-				img.alt = p.name;
-				img.onerror = () => {
-					img.src = "https://www.google.com/s2/favicons?domain=youtube.com&sz=32";
-				};
-				a.appendChild(img);
-				actions.appendChild(a);
-			});
-			header.appendChild(actions);
-		}
-		el.appendChild(header);
-		let active = null;
-		const closingByRow = new Map();
-		function closePlayer(player) {
-			player.video.pause?.();
-			player.row?.classList.remove("is-active");
-			if (prefersReducedMotion()) {
-				player.wrap.remove();
-				return;
+	var isTransient = (e) => !(e && (e.status === 400 || e.status === 404 || e.status === 403 && !e.html));
+	async function pushJob(type, { entry, malId, patch }, mal, c) {
+		const settled = stores[type].settled;
+		try {
+			await breaker.wait(checkCancel);
+			checkCancel();
+			if (breaker.trips >= BREAKER_MAX_TRIPS) {
+				const e = new Error("MAL keeps failing — stopping this run; it will retry automatically.");
+				e.abort = true;
+				throw e;
 			}
-			closingByRow.set(player.row, player);
-			player.wrap.classList.remove("is-open");
-			let done = false;
-			const detach = () => {
-				if (done) return false;
-				done = true;
-				clearTimeout(timer);
-				player.wrap.removeEventListener("transitionend", onEnd);
-				cancelClosingMap.delete(player.wrap);
-				if (closingByRow.get(player.row) === player) closingByRow.delete(player.row);
-				return true;
-			};
-			const finish = () => {
-				if (detach()) player.wrap.remove();
-			};
-			const onEnd = (e) => {
-				if (e.target === player.wrap && e.propertyName === "grid-template-rows") finish();
-			};
-			const timer = setTimeout(finish, COLLAPSE_FALLBACK_MS);
-			player.wrap.addEventListener("transitionend", onEnd);
-			cancelClosingMap.set(player.wrap, detach);
-		}
-		function toggleVideo(videoUrl, row) {
-			const prev = active;
-			if (prev && prev.row === row) {
-				active = null;
-				closePlayer(prev);
-				return;
+			let sent = patch;
+			let res;
+			const tried = new Set();
+			for (;;) try {
+				res = await malUpdateEntry(type, malId, sent);
+				break;
+			} catch (e) {
+				const alt = e.status === 400 ? fallbackPatch(type, sent, mal[malId], tried) : null;
+				if (!alt) throw e;
+				const removedDates = ["start_date", "finish_date"].some((k) => k in sent && !(k in alt));
+				const cappedKeys = Object.keys(alt).filter((k) => PROGRESS_KEYS.includes(k) && Number(alt[k]) < Number(sent[k]));
+				const recovery = cappedKeys.length ? `retrying with ${cappedKeys.map((k) => `${k.replace("num_watched_episodes", "episode count").replace("num_chapters_read", "chapter count").replace("num_volumes_read", "volume count")} capped to ${alt[k]} (MAL's listed total)`).join(", ")}` : removedDates ? "retrying without the optional start/finish dates" : "retrying with a reduced update";
+				log(`${typeLabel(type)}: MAL rejected the update for "${entry.title.slice(0, 45)}" (HTTP 400); ${recovery}.`, "warn");
+				sent = alt;
 			}
-			const reduced = prefersReducedMotion();
-			const revived = closingByRow.get(row) || null;
-			let next;
-			if (revived) {
-				cancelClosingMap.get(revived.wrap)?.();
-				next = revived;
+			let stored = null;
+			try {
+				stored = JSON.parse(res.responseText);
+			} catch (_) {}
+			const base = mal[malId] || {
+				__total: 0,
+				__totalVolumes: 0,
+				__malTitle: ""
+			};
+			const applied = Object.fromEntries(Object.entries(sent).map(([k, v]) => [malKey(k), v]));
+			const echoed = stored && typeof stored === "object" ? stored : {};
+			mal[malId] = {
+				...base,
+				...applied,
+				...echoed
+			};
+			const residual = stored ? reconcile(type, entry, mal[malId]) : {};
+			if (residual && Object.keys(residual).length) {
+				settled.data[malId] = [
+					entry.updatedAt,
+					JSON.stringify(residual),
+					Date.now()
+				];
+				log(`${typeLabel(type)}: MAL saved "${entry.title.slice(0, 55)}" but did not retain ${describePatch(type, residual)}. It may be normalising or rejecting that value; unchanged values are suppressed to avoid a write loop. Full Resync clears this suppression.`, "warn");
+			} else delete settled.data[malId];
+			settled.save();
+			c.pushed++;
+			log(`${typeLabel(type)}: updated "${entry.title.slice(0, 55)}" — ${describePatch(type, sent)}.`, "success");
+			breaker.ok();
+		} catch (e) {
+			if (e.cancelled || e.auth || e.abort) throw e;
+			if (isTransient(e)) {
+				c.transient++;
+				breaker.fail();
+				log(`${typeLabel(type)}: "${entry.title.slice(0, 45)}" — temporary MAL error: ${e.message}. Will retry on the next sync.`, "warn");
 			} else {
-				const { wrap, video } = createCollapsibleVideo(videoUrl);
-				next = {
-					wrap,
-					video,
-					row
-				};
-				if (row) row.insertAdjacentElement("afterend", next.wrap);
-				else el.appendChild(next.wrap);
-				if (!reduced) next.wrap.offsetHeight;
+				c.permanent++;
+				log(`${typeLabel(type)}: "${entry.title.slice(0, 45)}" — MAL rejected this update (${e.message}). It will be skipped until the AniList entry changes or Full Resync is run.`, "warn");
+				settled.data[malId] = [
+					entry.updatedAt,
+					"dead",
+					Date.now()
+				];
+				settled.save();
+				if (e.status === 404) rememberId(type, entry.mediaId, 0, malId);
 			}
-			if (prev) closePlayer(prev);
-			active = next;
-			row?.classList.add("is-active");
-			next.wrap.classList.add("is-open");
-			Promise.resolve(next.video.play?.()).catch(() => {});
+		} finally {
+			markDone();
 		}
-		const versions = Array.isArray(song.versions) && song.versions.length > 1 ? song.versions : null;
-		if (versions) {
-			el.classList.add("has-versions");
-			const list = document.createElement("div");
-			list.className = "daiya-anisongs-versions";
-			versions.forEach((v) => {
-				const row = document.createElement("div");
-				row.className = "daiya-anisong-version";
-				const badge = document.createElement("span");
-				badge.className = "daiya-anisong-version-tag";
-				badge.textContent = v.label || (v.version != null ? `v${v.version}` : "");
-				row.appendChild(badge);
-				const metaParts = [];
-				if (v.songTitle) metaParts.push(`"${v.songTitle}"`);
-				if (v.episodes) metaParts.push(formatEpsTag(v.episodes));
-				if (v.notes) metaParts.push(`— ${v.notes}`);
-				if (metaParts.length) {
-					const info = document.createElement("span");
-					info.className = "daiya-anisong-version-meta";
-					info.textContent = metaParts.join(" ");
-					row.appendChild(info);
-				}
-				if (v.url) {
-					const verUrl = v.url;
-					row.classList.add("has-video");
-					row.setAttribute("role", "button");
-					row.tabIndex = 0;
-					row.addEventListener("click", (e) => {
-						if (e.target instanceof HTMLVideoElement) return;
-						toggleVideo(verUrl, row);
-					});
-					row.addEventListener("keydown", (e) => {
-						if (e.key === "Enter" || e.key === " ") {
-							e.preventDefault();
-							toggleVideo(verUrl, row);
-						}
-					});
-				}
-				list.appendChild(row);
+	}
+	function planJobs(type, targets, mal, c) {
+		const settled = stores[type].settled.data;
+		const jobs = [];
+		for (const t of targets) {
+			checkCancel();
+			const patch = reconcile(type, t.entry, mal[t.malId]);
+			if (!patch) {
+				c.skipped++;
+				markDone();
+				continue;
+			}
+			if (!Object.keys(patch).length) {
+				c.unchanged++;
+				markDone();
+				continue;
+			}
+			const s = settled[t.malId];
+			if (s && s[0] === t.entry.updatedAt && (s[1] === "dead" || s[1] === JSON.stringify(patch))) {
+				c.settled++;
+				markDone();
+				continue;
+			}
+			progress.changed++;
+			jobs.push({
+				...t,
+				patch
 			});
-			el.appendChild(list);
-			return el;
 		}
-		const url = song.url;
-		if (!url) return el;
-		el.classList.add("has-video");
-		header.addEventListener("click", (e) => {
-			if (e.target.closest(".daiya-anisong-actions")) return;
-			if (e.target instanceof HTMLVideoElement) return;
-			toggleVideo(url, null);
+		return jobs;
+	}
+	async function syncType(type, userId, full) {
+		const label = typeLabel(type);
+		const c = {
+			pushed: 0,
+			deleted: 0,
+			unchanged: 0,
+			settled: 0,
+			skipped: 0,
+			unmatched: 0,
+			conflicts: 0,
+			transient: 0,
+			permanent: 0
+		};
+		const lastSync = Number(store$1.get(`last_sync_${type}`, 0)) || 0;
+		const fullPass = full || !lastSync || Date.now() - Number(store$1.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
+		const isExact = Settings.get("syncMode") === "exact";
+		log(`${label}: starting ${fullPass ? "full library comparison" : "incremental sync"} — fetching AniList entries and your current MAL list.`);
+		logDebug("[SYNC]", `${label}: starting sync pass:`, {
+			fullPass,
+			lastSync,
+			isExact
 		});
-		return el;
-	}
-	var INITIAL_VISIBLE_SONGS = 5;
-	function getDocumentHeight() {
-		if (typeof document === "undefined") return 0;
-		return Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0);
-	}
-	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop) {
-		if (typeof window === "undefined" || typeof window.scrollBy !== "function") return () => {};
-		const stepScroll = () => {
-			const docShrink = Math.max(0, startDocHeight - getDocumentHeight());
-			if (docShrink <= .5) return;
-			const currentAnchorDocTop = anchor.getBoundingClientRect().top + window.scrollY;
-			const anchorShift = Math.max(0, startAnchorDocTop - currentAnchorDocTop);
-			const delta = Math.max(0, startScrollY - Math.min(docShrink, anchorShift)) - window.scrollY;
-			if (Math.abs(delta) > .5) window.scrollBy(0, delta);
-		};
-		if (prefersReducedMotion()) {
-			stepScroll();
-			return () => {};
-		}
-		let rafId = 0;
-		let active = true;
-		const stop = () => {
-			if (!active) return;
-			active = false;
-			if (rafId) cancelAnimationFrame(rafId);
-			clearTimeout(timer);
-			collapsible.removeEventListener("transitionend", onEnd);
-			window.removeEventListener("wheel", stop);
-			window.removeEventListener("touchstart", stop);
-		};
-		const onEnd = (e) => {
-			if (e.target === collapsible && e.propertyName === "grid-template-rows") {
-				stepScroll();
-				stop();
+		const [entries, mal] = await Promise.all([fullPass ? alFetchAll(userId, type) : alFetchIncremental(userId, type, lastSync), malFetchList(type)]);
+		const newest = entries.reduce((m, e) => Math.max(m, e.updatedAt), 0);
+		log(`${label}: found ${entries.length} AniList entr${entries.length === 1 ? "y" : "ies"} to check and ${Object.keys(mal).length} entr${Object.keys(mal).length === 1 ? "y" : "ies"} on MAL.`);
+		logDebug("[SYNC]", `${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
+		progress.total += entries.length;
+		progress.phase = "pushing";
+		notifyProgress(true);
+		if (isExact) {
+			const pending = getPendingDeletes().filter((p) => p.type === type);
+			for (const p of pending) {
+				checkCancel();
+				if (entries.some((e) => e.mediaId === p.mediaId)) {
+					removePendingDelete(p.mediaId, type);
+					log(`${label}: deletion cancelled for "${p.title}" — entry is present on AniList.`);
+					continue;
+				}
+				let malId = p.malId || cachedId(type, { mediaId: p.mediaId }) || stores[type].ids.data[p.mediaId]?.m;
+				if (!malId && mal) {
+					for (const [id, st] of Object.entries(mal)) if (st.__malTitle && p.title && strictTitle(st.__malTitle) === strictTitle(p.title)) {
+						malId = Number(id);
+						break;
+					}
+				}
+				if (malId) try {
+					await breaker.wait(checkCancel);
+					checkCancel();
+					await malDeleteEntry(type, Number(malId));
+					if (mal[malId]) delete mal[malId];
+					c.deleted++;
+					log(`${label}: deleted "${p.title}" from MAL (Exact Match).`, "success");
+				} catch (e) {
+					if (e.status === 404) {
+						if (mal[malId]) delete mal[malId];
+					} else log(`${label}: failed to delete "${p.title}" from MAL: ${e.message}`, "warn");
+				}
+				else log(`${label}: could not find MAL ID for deleted title "${p.title}".`, "warn");
+				removePendingDelete(p.mediaId, type);
 			}
-		};
-		const tick = () => {
-			if (!active) return;
-			stepScroll();
-			rafId = requestAnimationFrame(tick);
-		};
-		const timer = setTimeout(() => {
-			stepScroll();
-			stop();
-		}, COLLAPSE_FALLBACK_MS);
-		collapsible.addEventListener("transitionend", onEnd);
-		window.addEventListener("wheel", stop, {
-			passive: true,
-			once: true
-		});
-		window.addEventListener("touchstart", stop, {
-			passive: true,
-			once: true
-		});
-		rafId = requestAnimationFrame(tick);
-		return stop;
-	}
-	function createSongGroup(title, songs, activePresets, groupType) {
-		const g = document.createElement("div");
-		g.className = "daiya-anisongs-group";
-		const h = document.createElement("h2");
-		h.textContent = title;
-		g.appendChild(h);
-		if (!songs.length) {
-			const empty = document.createElement("div");
-			empty.className = "daiya-anisongs-empty";
-			empty.textContent = "No songs to show (つ﹏<)･ﾟ｡";
-			g.appendChild(empty);
-			return g;
 		}
-		const initial = songs.slice(0, INITIAL_VISIBLE_SONGS);
-		const rest = songs.slice(INITIAL_VISIBLE_SONGS);
-		initial.forEach((s) => g.appendChild(createSongCard(s, activePresets, groupType)));
-		if (!rest.length) return g;
-		const extraWrap = document.createElement("div");
-		extraWrap.className = "daiya-anisong-collapsible daiya-anisongs-extra";
-		const extraInner = document.createElement("div");
-		extraInner.className = "daiya-anisong-collapsible-inner";
-		rest.forEach((s) => extraInner.appendChild(createSongCard(s, activePresets, groupType)));
-		extraWrap.appendChild(extraInner);
-		g.appendChild(extraWrap);
-		const btn = document.createElement("button");
-		btn.type = "button";
-		btn.className = "daiya-anisongs-toggle";
-		const showAllLabel = `Show all (${songs.length})`;
-		btn.textContent = showAllLabel;
-		btn.setAttribute("aria-expanded", "false");
-		let expanded = false;
-		let stopFollow = null;
-		btn.addEventListener("click", () => {
-			stopFollow?.();
-			stopFollow = null;
-			const startScrollY = typeof window !== "undefined" ? window.scrollY : 0;
-			const startDocHeight = getDocumentHeight();
-			const startBtnDocTop = btn.getBoundingClientRect().top + startScrollY;
-			expanded = !expanded;
-			if (!expanded) extraWrap.querySelectorAll("video").forEach((v) => v.pause?.());
-			extraWrap.classList.toggle("is-open", expanded);
-			btn.textContent = expanded ? "Show less" : showAllLabel;
-			btn.setAttribute("aria-expanded", String(expanded));
-			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop);
-		});
-		g.appendChild(btn);
-		return g;
-	}
-	function extractSongParams(song, groupType = "OP") {
-		let title = (song.title || "").trim();
-		if (!title) {
-			const m = song.name.match(/"([^"]+)"/);
-			title = m ? m[1].trim() : song.name.replace(/^\d+\.\s*/, "").trim();
+		const targets = dedupeTargets(type, await resolveTargets(type, entries, mal, c), c);
+		await runPool(planJobs(type, targets, mal, c), (job) => pushJob(type, job, mal, c), Math.max(2, Math.min(8, Math.round(malLimiter.rate / 20))));
+		if (isExact && fullPass) {
+			const targetMalIds = new Set(targets.map((t) => t.malId));
+			const orphanedMalIds = Object.keys(mal).map(Number).filter((id) => id > 0 && !targetMalIds.has(id));
+			const MAX_AUTO_DELETE_LIMIT = 10;
+			if (orphanedMalIds.length > MAX_AUTO_DELETE_LIMIT) log(`${label}: Exact Match found ${orphanedMalIds.length} MAL entries not present on AniList, exceeding the safety limit of ${MAX_AUTO_DELETE_LIMIT}. Auto-delete was skipped to protect your MAL list from potential API data loss.`, "warn");
+			else if (orphanedMalIds.length > 0) for (const orphanId of orphanedMalIds) {
+				checkCancel();
+				const orphanTitle = mal[orphanId]?.__malTitle || `MAL ID ${orphanId}`;
+				try {
+					await breaker.wait(checkCancel);
+					checkCancel();
+					await malDeleteEntry(type, orphanId);
+					delete mal[orphanId];
+					c.deleted++;
+					log(`${label}: deleted "${orphanTitle}" from MAL (not on AniList).`, "success");
+				} catch (e) {
+					if (e.status === 404) delete mal[orphanId];
+					else log(`${label}: failed to delete "${orphanTitle}" from MAL: ${e.message}`, "warn");
+				}
+			}
 		}
-		let artist = "";
-		if (Array.isArray(song.artists) && song.artists.length) artist = song.artists.filter(Boolean).join(" ");
-		else if (typeof song.artist === "string") artist = song.artist.trim();
-		else {
-			const m = song.name.match(/ by ([^(]+)/i);
-			if (m) artist = m[1].trim();
+		const ok = c.transient === 0;
+		if (ok) {
+			if (fullPass) {
+				store$1.set(`last_compare_${type}`, Date.now());
+				store$1.set(`last_sync_${type}`, Math.max(1, newest));
+			} else if (newest) store$1.set(`last_sync_${type}`, Math.max(newest, lastSync));
+			store$1.set(`last_run_${type}`, Math.floor(Date.now() / 1e3));
 		}
-		const anime = (song.animeName || "").trim() || document.querySelector(".header h1")?.textContent?.trim() || document.querySelector("meta[property=\"og:title\"]")?.getAttribute("content")?.trim() || "";
-		const type = song.type === "ED" || groupType === "ED" ? "ED" : "OP";
-		const number = Number.isFinite(song.sequence) && song.sequence >= 1 ? Math.floor(song.sequence) : 1;
-		return {
-			title,
-			title_romaji: song.title_romaji || title,
-			title_jp: song.title_jp || title,
-			artist,
-			artists: Array.isArray(song.artists) && song.artists.length ? song.artists.join(", ") : artist,
-			anime,
-			anime_romaji: song.animeRomaji || anime,
-			anime_en: song.animeEn || anime,
-			anime_jp: song.animeJp || anime,
-			year: song.year,
-			season: song.season,
-			type,
-			number,
-			eps: song.eps
-		};
+		log(`${label}: finished — ${[
+			`${c.pushed} updated`,
+			c.deleted ? `${c.deleted} deleted` : null,
+			`${c.unchanged + c.settled} already in sync`,
+			c.unmatched && `${c.unmatched} unmatched`,
+			c.skipped && `${c.skipped} skipped`,
+			c.conflicts && `${c.conflicts} conflicts`,
+			c.permanent && `${c.permanent} rejected`,
+			c.transient && `${c.transient} failed (will retry)`
+		].filter(Boolean).join(", ")}${c.transient ? "; this type will be retried" : ""}.`, c.transient || c.permanent || c.unmatched || c.conflicts ? "warn" : "success");
+		return { ok };
 	}
-	defineFeature({
-		id: "aniSongs",
-		key: "aniSongsEnabled",
-		section: "AniList Enhancements",
-		def: false,
-		legacy: [
-			"aniSongsEnabled",
-			"animeThemeSongsEnabled",
-			"anisongsEnabled"
-		],
-		title: "Anime Opening & Ending Songs",
-		help: "Show OP/ED theme songs on anime pages.",
-		options: [{
-			key: "aniSongsProviders",
-			type: "json",
-			def: DEFAULT_ANISONGS_CONFIG,
-			title: "Song Search Providers",
-			help: "Configure search shortcuts (YouTube, Spotify, etc.) and active music services.",
-			validate: validateAniSongsConfig
-		}]
-	}, () => {
-		const API = "https://rs.animethemes.moe/graphql";
-		const ROOT = "daiya-anisongs";
-		const TTL = 6048e5;
-		const EMPTY_TTL = 432e5;
-		addStyle("daiya-anisongs-style", `
-      #${ROOT}{width:100%;margin-top:30px}
-      #${ROOT} .daiya-anisongs-columns{display:flex;gap:30px;width:100%}
-      #${ROOT} .daiya-anisongs-group{flex:1 1 0;min-width:0}
-      #${ROOT} h2{margin-top:0}
-      #${ROOT} .daiya-anisong-entry{background:rgb(var(--color-foreground));border-radius:4px;padding:8px 10px;font-size:1.3rem;margin-bottom:10px;color:rgb(var(--color-text))}
-      #${ROOT} .daiya-anisong-header{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%}
-      #${ROOT} .daiya-anisong-title{flex:1 1 auto;min-width:0;word-break:break-word}
-      #${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title{cursor:pointer}
-      #${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title:hover{color:rgb(var(--color-blue));transition:color .15s}
-      #${ROOT} .daiya-anisong-actions{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
-      #${ROOT} .daiya-anisong-link{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:4px;background:rgba(var(--color-text-lighter),.08);padding:3px;transition:all .15s;text-decoration:none}
-      #${ROOT} .daiya-anisong-link:hover{background:rgba(var(--color-blue),.2);transform:translateY(-1px)}
-      #${ROOT} .daiya-anisong-icon{width:16px;height:16px;object-fit:contain;display:block;border-radius:2px}
-      #${ROOT} .daiya-anisong-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden;overflow-anchor:none}
-      #${ROOT} .daiya-anisong-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
-      #${ROOT} .daiya-anisong-collapsible-inner{min-height:0;overflow:hidden}
-      #${ROOT} .daiya-anisong-video-pad{padding-top:10px}
-      #${ROOT} .daiya-anisongs-versions .daiya-anisong-video-pad{padding:4px 0 6px}
-      #${ROOT} video{display:block;width:100%;max-width:39em;aspect-ratio:16/9;background:#000;border-radius:4px;cursor:auto}
-      #${ROOT} .daiya-anisongs-versions{display:flex;flex-direction:column;margin-top:8px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.15)}
-      #${ROOT} .daiya-anisong-version{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:1.2rem;color:rgb(var(--color-text-lighter));transition:color .15s,background .15s}
-      #${ROOT} .daiya-anisongs-versions>.daiya-anisong-version~.daiya-anisong-version{margin-top:4px}
-      #${ROOT} .daiya-anisong-version-tag{font-weight:700;color:rgb(var(--color-text));white-space:nowrap}
-      #${ROOT} .daiya-anisong-version.has-video{cursor:pointer}
-      #${ROOT} .daiya-anisong-version.has-video:hover{color:rgb(var(--color-blue));background:rgba(var(--color-blue),.08)}
-      #${ROOT} .daiya-anisong-version.has-video:hover .daiya-anisong-version-tag{color:rgb(var(--color-blue))}
-      #${ROOT} .daiya-anisong-version.is-active{color:rgb(var(--color-blue));background:rgba(var(--color-blue),.14)}
-      #${ROOT} .daiya-anisong-version.is-active .daiya-anisong-version-tag{color:rgb(var(--color-blue))}
-      #${ROOT} .daiya-anisongs-toggle{display:block;width:100%;padding:7px 10px;border:0;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text-lighter));font:inherit;font-size:1.2rem;font-weight:600;cursor:pointer;text-align:center;transition:color .15s,background .15s}
-      #${ROOT} .daiya-anisongs-toggle:hover{color:rgb(var(--color-blue));background:rgba(var(--color-blue),.1)}
-      #${ROOT} .daiya-anisongs-empty{text-align:center;opacity:.7;padding:10px}
-      @media (max-width:700px){#${ROOT} .daiya-anisongs-columns{flex-direction:column;gap:10px}}
-      @media (prefers-reduced-motion:reduce){#${ROOT} .daiya-anisong-collapsible,#${ROOT} .daiya-anisong-entry.has-video .daiya-anisong-title,#${ROOT} .daiya-anisong-link,#${ROOT} .daiya-anisong-version,#${ROOT} .daiya-anisongs-toggle{transition:none!important}}`);
-		const cacheStore = persistent("daiya_anisongs_cache_v8", (d) => {
-			for (const id of Object.keys(d)) if (!(Number(d[id]?.expires) > Date.now())) delete d[id];
+	var currentListType = () => {
+		const m = location.pathname.match(LIST_PATH_RE);
+		return m ? m[1].toUpperCase() : null;
+	};
+	async function confirmDecimalScores() {
+		if ((await tryOr(() => AniList.viewer()))?.scoreFormat !== "POINT_10_DECIMAL") return true;
+		const mode = Settings.get("syncScoreRounding");
+		return confirm(`Decimal scores detected on AniList.\n\nMAL uses whole-number scores, so your decimal scores will be converted using: ${{
+			ceil: "Ceil (always up)",
+			round: "Round (.1–.4 down, .5–.9 up)",
+			floor: "Floor (always down)"
+		}[mode]}.\n${{
+			ceil: "7.4 → 8 and 7.5 → 8",
+			round: "7.4 → 7 and 7.5 → 8",
+			floor: "7.4 → 7 and 7.5 → 7"
+		}[mode]}.\n\nThis will affect the scores written to MAL during this first sync.\n\nContinue with the first sync?`);
+	}
+	function handleAuthFailure(e) {
+		if (e.auth === "AniList") AniList.clearViewer();
+		else clearMalAuth();
+		log(`⚠ ${e.message}`);
+	}
+	async function runSync(types = [...TYPES], opts = {}) {
+		logDebug("[SYNC]", "runSync initiated for types:", types, "options:", opts);
+		if (syncStatus.syncing) return log("Sync already running.");
+		if (!onAniList()) return log("Open AniList to run a sync — it needs your AniList login.", "warn");
+		if (!AniList.hasAuth()) return log("Log in to AniList first.");
+		if (!store$1.get("mal_token")) return log("Connect MyAnimeList first.");
+		if (navigator.onLine === false) return log("You appear to be offline; sync skipped.");
+		syncStatus.syncing = true;
+		syncStatus.cancelled = false;
+		if (!await acquireLock()) {
+			syncStatus.syncing = false;
+			return log("Another tab is already syncing, skipped.");
+		}
+		breaker.reset();
+		store$1.set("sync_onboarded", true);
+		Object.assign(progress, {
+			phase: "fetching",
+			done: 0,
+			total: 0,
+			changed: 0
 		});
-		const cache = cacheStore.data;
-		const atQuery = `query ($id: [Int!]) {
-      filterAnimeByExternalSite(site: ANILIST, id: $id) {
-        title { romaji native }
-        themes {
-          type
-          sequence
-          group { name }
-          song {
-            title { romaji native }
-            staff {
-              role
-              relevance
-              alias
-              as
-              artist {
-                name { main }
-              }
-            }
-            resources {
-              nodes {
-                site
-                link
-              }
-            }
-          }
-          entries {
-            episodes
-            version
-            notes
-            videos {
-              nodes {
-                link
-                source
-                basename
-              }
-            }
-          }
+		notifyState();
+		const startedAt = Date.now();
+		let allOk = false;
+		try {
+			const viewer = await AniList.viewer();
+			if (!viewer) throw authError("AniList", "AniList is not logged in.");
+			const me = await malWhoAmI();
+			const account = `${viewer.id}:${me.id}`;
+			const prev = store$1.get("sync_account", null);
+			if (prev && prev !== account) {
+				log("Connected account changed. Resetting sync watermarks and per-account suppression state.", "warn");
+				resetAccountState();
+			}
+			store$1.set("sync_account", account);
+			if (opts.full) for (const t of types) clearCache(stores[t].settled);
+			const results = await Promise.allSettled(types.map((t) => syncType(t, viewer.id, !!opts.full)));
+			const fatal = results.find((r) => r.status === "rejected" && (r.reason?.auth || r.reason?.abort));
+			for (const r of results) {
+				if (r.status !== "rejected") continue;
+				const e = r.reason || {};
+				if (e.cancelled) log("Sync stopped after the current request finished.", "warn");
+				else if (!e.auth) log(`Sync could not finish: ${e.message || e}`, "error");
+			}
+			if (fatal) {
+				if (fatal.reason.auth) handleAuthFailure(fatal.reason);
+				else log(`Sync stopped: ${fatal.reason.message}`, "error");
+			}
+			allOk = results.every((r) => r.status === "fulfilled" && r.value.ok);
+			if (allOk) {
+				store$1.del("sync_retry_at");
+				log(`Synced in ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
+			} else if (!syncStatus.cancelled) store$1.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
+		} catch (e) {
+			if (e.auth) handleAuthFailure(e);
+			else log("Sync could not finish: " + (e.message || e), "error");
+			if (!e.auth && !syncStatus.cancelled) store$1.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
+		} finally {
+			for (const t of types) {
+				stores[t].ids.save();
+				stores[t].settled.save();
+			}
+			releaseLock();
+			syncStatus.syncing = false;
+			syncStatus.cancelled = false;
+			progress.phase = "idle";
+			notifyState();
+		}
+	}
+	async function startManualSync() {
+		if (syncStatus.syncing) return;
+		const pageType = currentListType();
+		const types = pageType ? [pageType] : [...TYPES];
+		if (types.some((t) => !store$1.get(`last_sync_${t}`, 0)) && !await confirmDecimalScores()) return log("First sync cancelled.");
+		runSync(types);
+	}
+	async function fullResync() {
+		if (syncStatus.syncing) return;
+		if (!store$1.get("sync_onboarded", false) && !await confirmDecimalScores()) return log("Full resync cancelled.");
+		for (const t of TYPES) clearCache(stores[t].ids);
+		log("Full Resync started: checking the entire AniList library and clearing cached match/suppression decisions.");
+		runSync([...TYPES], { full: true });
+	}
+	function maybeAutoSync() {
+		if (!onAniList() || !Settings.get("syncEnabled") || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
+		if (!AniList.hasAuth() || !store$1.get("mal_token")) return;
+		const retryAt = Number(store$1.get("sync_retry_at", 0)) || 0;
+		if (retryAt > 0 && Date.now() < retryAt) return;
+		const dueTypes = [];
+		for (const t of TYPES) {
+			const isAnime = t === "ANIME";
+			if (!Settings.get(isAnime ? "syncAutoAnime" : "syncAutoManga")) continue;
+			const hours = Math.max(1, Number(Settings.get(isAnime ? "syncIntervalAnime" : "syncIntervalManga")) || 6);
+			const last = Number(store$1.get(`last_run_${t}`, 0)) || 0;
+			if (retryAt > 0 ? !last || Date.now() - last * 1e3 >= RETRY_AFTER_FAILURE_MS : !last || Date.now() - last * 1e3 >= hours * 36e5) dueTypes.push(t);
+		}
+		if (dueTypes.length > 0) {
+			const labels = dueTypes.map(typeLabel).join(" & ");
+			log(retryAt > 0 ? `Auto-sync (${labels}): retrying after an earlier failure…` : `Auto-sync (${labels}): interval reached or initial sync…`);
+			syncStatus.autoSyncRetryAfter = Date.now() + 3e5;
+			runSync(dueTypes);
+		} else if (retryAt > 0 && Date.now() >= retryAt) store$1.del("sync_retry_at");
+	}
+	var MODAL_ID = "ala-overrides-backdrop";
+	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
+	addStyle("ala-overrides-style", `
+  #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
+  #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
+  .ala-ov-sheet *{box-sizing:border-box}
+  .ala-ov-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+  .ala-ov-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
+  .ala-ov-head h2{margin:0;font-size:18px;font-weight:600}
+  .ala-ov-body {flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable;}
+  .ala-ov-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+
+  .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
+  .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+  .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
+  .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
+
+  .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
+  .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
+  .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
+  .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
+  .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
+  .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
+
+  .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
+  .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
+
+  .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
+  .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
+  .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
+
+  .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
+  .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
+  .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
+  .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
+  .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
+  .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
+
+  .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+  .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+  .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
+  .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
+  .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
+
+  .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
+  .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
+
+  .ala-ov-list{display:grid;gap:8px;min-width:0;}
+  .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
+  .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
+  .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
+  .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
+  .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
+  .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
+  .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
+  .ala-ov-item-meta a:hover{text-decoration:underline}
+  .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
+
+  .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
+
+  .ala-ov-audit-section{margin-bottom:20px}
+  .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
+
+  @media (max-width:700px){
+    #${MODAL_ID}{align-items:flex-end;padding:0}
+    #${MODAL_ID} .ala-ov-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    #${QUICK_MODAL_ID}{align-items:flex-end;padding:0}
+    #${QUICK_MODAL_ID} .ala-ov-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+
+    .ala-ov-head{padding:14px 16px}
+    .ala-ov-body{padding:12px 16px}
+    .ala-ov-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
+    .ala-ov-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
+
+    .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
+    .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
+
+    .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
+    .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
+    .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
+    .ala-ov-filter-group{width:100%;flex-wrap:wrap}
+
+    .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
+    .ala-ov-item-cover{width:36px;height:48px}
+    .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
+    .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
+    .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
+    .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
+  }
+  `);
+	function extractAlId(raw) {
+		const str = String(raw || "").trim();
+		const match = str.match(/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
+		return match ? Number(match[1]) : 0;
+	}
+	function extractMalId(raw) {
+		const str = String(raw || "").trim();
+		const match = str.match(/myanimelist\.net\/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
+		return match ? Number(match[1]) : 0;
+	}
+	function matchesSearch(text, id, extraId, query) {
+		if (!query) return true;
+		const q = query.trim().toLowerCase();
+		if (!q) return true;
+		if (String(id).includes(q)) return true;
+		if (extraId != null && String(extraId).includes(q)) return true;
+		const t = (text || "").toLowerCase();
+		if (t.includes(q)) return true;
+		let qIdx = 0;
+		for (let i = 0; i < t.length && qIdx < q.length; i++) if (t[i] === q[qIdx]) qIdx++;
+		return qIdx === q.length;
+	}
+	var unmatchedMetaCache = new Map();
+	async function batchFetchUnmatchedMeta(ids) {
+		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
+		if (!needed.length) return;
+		for (let i = 0; i < needed.length; i += 50) {
+			const batch = needed.slice(i, i + 50);
+			const q = `query ($ids: [Int]) {
+      Page(page: 1, perPage: 50) {
+        media(id_in: $ids) {
+          id
+          title { userPreferred english romaji }
+          coverImage { medium }
         }
       }
     }`;
-		const loadThemes = memo(async (id) => {
-			const hit = cache[String(id)];
-			if (hit && hit.expires > Date.now()) return hit.data;
-			const [themesRes, alRes] = await Promise.allSettled([gm.json(API, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"User-Agent": "AL-Additions"
-				},
-				data: JSON.stringify({
-					query: atQuery,
-					variables: { id: [Number(id)] }
-				})
-			}), AniList.query(`query ($id: Int) {
-        Media(id: $id) {
-          title { userPreferred english romaji native }
-          seasonYear
-          season
-        }
-      }`, { id: Number(id) })]);
-			const result = themesRes.status === "fulfilled" ? themesRes.value : null;
-			const alMedia = alRes.status === "fulfilled" ? alRes.value?.Media : null;
-			const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite) ? result.data.filterAnimeByExternalSite[0] : null;
-			const animeName = str(alMedia?.title?.userPreferred) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || document.querySelector(".header h1")?.textContent?.trim() || "";
-			const data = groupThemes(rawAnime, {
-				animeName,
-				animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
-				animeEn: str(alMedia?.title?.english) || animeName,
-				animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || "",
-				year: alMedia?.seasonYear || rawAnime?.year || "",
-				season: alMedia?.season || rawAnime?.season || ""
-			});
-			const empty = !data.OP.length && !data.ED.length;
-			cache[String(id)] = {
-				expires: Date.now() + (empty ? EMPTY_TTL : TTL),
-				data
-			};
-			cacheStore.save();
-			return data;
-		});
-		function mount(state, overview) {
-			document.getElementById(ROOT)?.remove();
-			const config = getValidAniSongsConfig();
-			const presetMap = new Map();
-			config.presets.forEach((p) => presetMap.set(p.id, p));
-			const activePresets = config.active.map((id) => presetMap.get(id)).filter(Boolean);
-			const root = document.createElement("section");
-			root.id = ROOT;
-			root.dataset.animeId = state.id;
-			const cols = document.createElement("div");
-			cols.className = "daiya-anisongs-columns";
-			cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP"), createSongGroup("Endings", state.themes.ED, activePresets, "ED"));
-			root.appendChild(cols);
-			overview.appendChild(root);
-		}
-		let cur = null;
-		let backoff = {
-			id: null,
-			until: 0
-		};
-		const animeId = () => {
-			const r = mediaRoute();
-			return r && r.kind === "anime" ? String(r.id) : null;
-		};
-		async function sync() {
-			const id = animeId();
-			if (!id) {
-				document.getElementById(ROOT)?.remove();
-				cur = null;
-				return;
-			}
-			if (cur?.id === id) return;
-			if (backoff.id === id && Date.now() < backoff.until) return;
-			document.getElementById(ROOT)?.remove();
-			const mine = {
-				id,
-				themes: null,
-				busy: true
-			};
-			cur = mine;
 			try {
-				const themes = await loadThemes(id, id);
-				if (cur !== mine) return;
-				if (!themes.OP.length && !themes.ED.length) return;
-				mine.themes = themes;
-				const overview = await Core.waitForSelector(".overview", 1e4);
-				if (cur === mine && overview && animeId() === id) mount(mine, overview);
-			} catch (err) {
-				console.error("[AL-Additions] Anisongs sync error:", err);
-				if (cur === mine) {
-					cur = null;
-					backoff = {
-						id,
-						until: Date.now() + 3e4
-					};
+				const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
+				for (const m of list) {
+					const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
+					unmatchedMetaCache.set(m.id, {
+						title: t,
+						cover: m.coverImage?.medium
+					});
 				}
-			} finally {
-				mine.busy = false;
+			} catch (e) {
+				console.warn("[AL-Additions] Failed to batch fetch unmatched metadata:", e);
+				break;
 			}
 		}
-		function repair() {
-			const id = animeId();
-			if (!id) return;
-			if (cur?.id !== id) return void sync();
-			if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
-				const overview = document.querySelector(".overview");
-				if (overview) try {
-					mount(cur, overview);
-				} catch (err) {
-					console.error("[AL-Additions] Anisongs repair error:", err);
-				}
-			}
-		}
-		Core.ready(sync);
-		Core.onNavigate(sync);
-		Core.onBodyMutation(debounce(repair, 200));
-	});
-	function getValidTiers() {
-		const check = validateTiers(Settings.get("tierLabels"));
-		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 	}
-	defineFeature({
-		id: "tierLabels",
-		key: "tierLabelsEnabled",
-		section: "AniList Enhancements",
-		def: false,
-		legacy: ["tierLabelsEnabled"],
-		title: "AniList Tier Labels",
-		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
-		options: [
-			{
-				key: "tierLabelsColorScore",
-				type: "toggle",
-				def: true,
-				title: "Color score value",
-				help: "Color the score number text to match its tier badge."
-			},
-			{
-				key: "tierLabelsAverageScore",
-				type: "toggle",
-				def: false,
-				title: "Show on Weighted Score",
-				help: "Display tier badge next to the Weighted Score on media pages."
-			},
-			{
-				key: "tierLabels",
-				type: "json",
-				def: DEFAULT_TIERS,
-				title: "Tier Ranges & Colors",
-				help: "Customize score ranges, badge labels, and colors.",
-				validate: validateTiers
-			}
-		]
-	}, () => {
+	async function openQuickOverrideModal(mediaId, mediaType = "ANIME") {
+		const existing = document.getElementById(QUICK_MODAL_ID);
+		if (existing) existing.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = QUICK_MODAL_ID;
+		const existingOverride = getManualOverrides()[String(mediaId)];
+		backdrop.innerHTML = `
+    <div class="ala-ov-sheet ala-ov-quick-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-qo-modal-title">
+      <header class="ala-ov-head">
+        <h2 id="ala-qo-modal-title">Set MAL Mapping</h2>
+        <button class="ala-icon-btn ala-qo-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-ov-body">
+        <div id="ala-qo-preview" class="ala-ov-preview">
+          <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
+        </div>
+
+        <div class="ala-ov-field">
+          <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
+          <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
+        </div>
+
+        <div class="ala-ov-form-actions">
+          <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
+          <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
+          ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
+        </div>
+      </div>
+      <footer class="ala-ov-foot">
+        <button class="ala-btn ala-qo-close" type="button">Cancel</button>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const close = () => backdrop.remove();
+		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close();
+		});
+		const previewBox = backdrop.querySelector("#ala-qo-preview");
+		const malInput = backdrop.querySelector("#ala-qo-mal-input");
+		const saveBtn = backdrop.querySelector("#ala-qo-btn-save");
+		const ignoreBtn = backdrop.querySelector("#ala-qo-btn-ignore");
+		const removeBtn = backdrop.querySelector("#ala-qo-btn-remove");
+		if (existingOverride && existingOverride.malId > 0) malInput.value = String(existingOverride.malId);
+		let loadedTitle = existingOverride?.title || `Media #${mediaId}`;
+		let loadedCover = existingOverride?.cover;
+		let loadedType = existingOverride?.type || mediaType;
+		let detectedMalId;
+		const q = `query ($id: Int) {
+    Media(id: $id) {
+      id
+      idMal
+      type
+      title { userPreferred english romaji }
+      coverImage { medium }
+    }
+  }`;
 		try {
-			const legacy = localStorage.getItem("anilistTierLabelsSettings");
-			if (legacy) {
-				const parsed = JSON.parse(legacy);
-				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
-					const check = validateTiers(parsed.tiers);
-					if (check.valid && check.tiers) store$1.set(PREFIX + "tierLabels", check.tiers);
-				}
-				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
+			const m = (await AniList.query(q, { id: mediaId }))?.Media;
+			if (m) {
+				loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
+				loadedCover = m.coverImage?.medium || loadedCover;
+				loadedType = m.type === "MANGA" ? "MANGA" : "ANIME";
+				detectedMalId = Number(m.idMal) || void 0;
 			}
 		} catch (_) {}
-		addStyle("ala-tier-labels-css", `
-      .ala-tier-badge {
-        display: inline-block;
-        font-weight: 700;
-        border-radius: 4px;
-        vertical-align: middle;
-        white-space: nowrap;
-        line-height: 1.2;
-        box-sizing: border-box;
-      }
-      .ala-tier-badge--list {
-        font-size: 11px;
-        padding: 2px 5px;
-        margin-left: 5px;
-      }
-      .ala-tier-badge--block {
-        font-size: 10px;
-        padding: 1px 4px;
-        margin-left: 4px;
-      }
-      .ala-tier-container {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-      }
-      .ala-tier-container--block {
-        background-color: rgba(0, 0, 0, 0.55);
-        padding: 2px 6px;
-        border-radius: 4px;
-        overflow: hidden;
-      }
-      `);
-		function createBadge(tier, isBlockView = false) {
-			const badge = document.createElement("span");
-			badge.className = `ala-tier-badge ${isBlockView ? "ala-tier-badge--block" : "ala-tier-badge--list"}`;
-			badge.textContent = tier.label;
-			badge.style.backgroundColor = tier.color;
-			badge.style.color = tier.textColor;
-			return badge;
-		}
-		function getScoreSystem() {
-			const container = document.querySelector(".content.container, .medialist");
-			if (container) {
-				if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
-				if (container.querySelector(".medialist.table.POINT_10_DECIMAL, .medialist.POINT_10_DECIMAL")) return "POINT_10_DECIMAL";
-				if (container.querySelector(".medialist.table.POINT_10, .medialist.POINT_10")) return "POINT_10";
-				if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
-				if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
-			}
-			const viewerFmt = store$1.get("al_score_format", null);
-			if (viewerFmt) return viewerFmt;
-			return "UNKNOWN";
-		}
-		function getCompareColumnFormat(el) {
-			const compareRoot = el.closest(".compare");
-			if (!compareRoot) return "UNKNOWN";
-			const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
-			const sideKey = isAuthUser ? "auth" : "target";
-			if (!compareRoot._colFormats) compareRoot._colFormats = {};
-			if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
-			if (isAuthUser) {
-				const viewerFmt = store$1.get("al_score_format", null);
-				if (viewerFmt) {
-					compareRoot._colFormats[sideKey] = viewerFmt;
-					return viewerFmt;
-				}
-			}
-			const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
-			const cells = compareRoot.querySelectorAll(colSelector);
-			let maxScore = 0;
-			let hasDecimal = false;
-			let hasStarIcon = false;
-			for (const cell of cells) {
-				if (cell.querySelector("svg, .icon")) hasStarIcon = true;
-				const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
-				const num = parseFloat(s);
-				if (!isNaN(num) && num > 0) {
-					if (num > maxScore) maxScore = num;
-					if (s.includes(".")) hasDecimal = true;
-				}
-			}
-			let detected = "UNKNOWN";
-			if (maxScore > 10) detected = "POINT_100";
-			else if (hasDecimal) detected = "POINT_10_DECIMAL";
-			else if (hasStarIcon) detected = "POINT_5";
-			else if (maxScore > 5) detected = "POINT_10";
-			else if (maxScore > 0) detected = "POINT_10";
-			compareRoot._colFormats[sideKey] = detected;
-			logDebug("[TIER]", `Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
-				maxScore,
-				hasDecimal,
-				hasStarIcon
+		const isIgnored = existingOverride && existingOverride.malId === 0;
+		const isCustom = existingOverride && existingOverride.malId > 0;
+		previewBox.innerHTML = `
+    ${loadedCover ? `<img class="ala-ov-preview-cover" src="${loadedCover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+    <div class="ala-ov-preview-info">
+      <div class="ala-ov-preview-title">${loadedTitle}</div>
+      <div class="ala-ov-preview-meta">
+        <span class="ala-ov-badge ${loadedType === "MANGA" ? "ala-ov-badge--manga" : ""}">${loadedType}</span>
+        ${isIgnored ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>` : isCustom ? `<span>Overridden to MAL ID: <b>${existingOverride.malId}</b></span>` : detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+      </div>
+    </div>
+  `;
+		if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
+		saveBtn.addEventListener("click", () => {
+			let malId = extractMalId(malInput.value);
+			if (!malId && detectedMalId) malId = detectedMalId;
+			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
+			setOverride(mediaId, {
+				malId,
+				type: loadedType,
+				title: loadedTitle,
+				cover: loadedCover
 			});
-			return detected;
-		}
-		function normalizeScore(score, scoreSystem, isPercentage = false) {
-			if (isNaN(score) || score <= 0) return null;
-			if (isPercentage) return score;
-			switch (scoreSystem) {
-				case "POINT_100": return score;
-				case "POINT_10_DECIMAL":
-				case "POINT_10": return score * 10;
-				case "POINT_5": return score * 20;
-				case "POINT_3": return score === 3 ? 100 : score === 2 ? 60 : 20;
-				default: return score > 10 ? score : score * 10;
-			}
-		}
-		function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
-			if (el.hasAttribute("data-ala-probe")) return;
-			if (el.dataset.tierModified) {
-				const attrNow = el.getAttribute("score");
-				const changed = attrNow !== null && attrNow !== el.dataset.tierSource;
-				if (el.querySelector(".ala-tier-container") && !changed) return;
-				delete el.dataset.tierModified;
-			}
-			const attr = el.getAttribute("score");
-			const rawText = (attr || el.textContent || "").replace("%", "").trim();
-			if (!rawText || rawText === "-" || rawText === "0") return;
-			const num = parseFloat(rawText);
-			if (isNaN(num) || num <= 0) return;
-			const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
-			if (normalizedRating === null) return;
-			const tier = getTier(normalizedRating, tiers);
-			if (!tier) return;
-			logDebug("[TIER]", "Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
-			el.dataset.tierModified = "true";
-			el.dataset.tierSource = attr ?? "";
-			const container = document.createElement("div");
-			container.className = `ala-tier-container ${isBlockView ? "ala-tier-container--block" : ""}`;
-			const scoreSpan = document.createElement("span");
-			scoreSpan.className = "ala-tier-score-text";
-			if (colorScore) scoreSpan.style.color = tier.color;
-			const icon = el.querySelector("svg, .icon");
-			if (icon) {
-				scoreSpan.appendChild(icon.cloneNode(true));
-				scoreSpan.appendChild(document.createTextNode(" " + rawText));
-			} else scoreSpan.textContent = isPercentage ? `${rawText}%` : rawText;
-			container.appendChild(scoreSpan);
-			container.appendChild(createBadge(tier, isBlockView));
-			el.textContent = "";
-			el.appendChild(container);
-		}
-		function processTop100Elements(tiers, colorScore) {
-			document.querySelectorAll(".row.score").forEach((row) => {
-				const percentageEl = row.querySelector(".percentage");
-				if (!percentageEl || percentageEl.classList.contains("popularity")) return;
-				if (percentageEl.dataset.tierModified) {
-					if (percentageEl.querySelector(".ala-tier-container")) return;
-					delete percentageEl.dataset.tierModified;
-				}
-				const textNode = Array.from(percentageEl.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim() !== "");
-				if (!textNode) return;
-				const ratingText = (textNode.textContent || "").trim().replace("%", "");
-				const numericRating = parseFloat(ratingText);
-				if (isNaN(numericRating) || numericRating <= 0) return;
-				const tier = getTier(numericRating, tiers);
-				if (!tier) return;
-				percentageEl.dataset.tierModified = "true";
-				textNode.remove();
-				const ratingWrapper = document.createElement("div");
-				ratingWrapper.className = "ala-tier-container";
-				ratingWrapper.style.display = "inline-flex";
-				ratingWrapper.style.alignItems = "center";
-				ratingWrapper.style.gap = "6px";
-				const textSpan = document.createElement("span");
-				textSpan.className = "ala-tier-score-text";
-				textSpan.textContent = numericRating + "%";
-				if (colorScore) textSpan.style.color = tier.color;
-				ratingWrapper.appendChild(textSpan);
-				ratingWrapper.appendChild(createBadge(tier));
-				const popularityEl = percentageEl.querySelector(".sub-row.popularity");
-				if (popularityEl) percentageEl.insertBefore(ratingWrapper, popularityEl);
-				else percentageEl.appendChild(ratingWrapper);
-			});
-		}
-		function applyTierLabels() {
-			const tiers = getValidTiers();
-			const colorScore = Settings.get("tierLabelsColorScore");
-			const showAverage = Settings.get("tierLabelsAverageScore");
-			document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
-				processScoreElement(el, tiers, colorScore, false, false);
-			});
-			document.querySelectorAll(".entry-card .score").forEach((el) => {
-				processScoreElement(el, tiers, colorScore, false, true);
-			});
-			if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
-				const label = dataSet.querySelector(".type");
-				const value = dataSet.querySelector(".value");
-				if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
-			});
-			processTop100Elements(tiers, colorScore);
-		}
-		const HINT_KEY = "ala_standalone_seen_tierLabels";
-		let paused = !!store$1.get(HINT_KEY, false);
-		const runScan = () => {
-			if (!paused) applyTierLabels();
-		};
-		Core.ready(() => {
-			runScan();
-			Core.onNavigate(() => {
-				document.querySelectorAll(".compare").forEach((c) => {
-					delete c._colFormats;
-				});
-				runScan();
-			});
-			let scanQueued = false;
-			Core.onBodyMutation(() => {
-				if (scanQueued) return;
-				scanQueued = true;
-				setTimeout(() => {
-					scanQueued = false;
-					runScan();
-				}, 100);
-			});
-			detectStandalone("tierLabels").then((found) => {
-				store$1.set(HINT_KEY, found);
-				const wasPaused = paused;
-				paused = found;
-				if (found && !wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
-				if (!found && wasPaused) runScan();
-			});
+			close();
 		});
-	});
-	var STATUSES = [
-		"Completed",
-		"Planning",
-		"Current",
-		"Paused",
-		"Dropped"
-	];
-	function normalizeStatus(raw) {
-		const s = (raw || "").trim().toLowerCase();
-		if (s.includes("plan")) return "Planning";
-		if (s.includes("complete")) return "Completed";
-		if (s.includes("current") || s.includes("watch") || s.includes("read") || s.includes("repeat")) return "Current";
-		if (s.includes("pause") || s.includes("hold")) return "Paused";
-		if (s.includes("drop")) return "Dropped";
-		return raw ? raw.trim() : "Planning";
-	}
-	function getEntryData(el) {
-		const cached = el._alaCompareData;
-		if (cached) return cached;
-		const title = (el.querySelector(".title a, .title")?.textContent || "").trim();
-		const scores = el.querySelectorAll(".score");
-		const yourScoreEl = el.querySelector(".score[label=\"Score\"]") || scores[0];
-		const otherScoreEl = Array.from(scores).find((s) => s !== yourScoreEl) || scores[1];
-		const yourScoreAttr = yourScoreEl?.getAttribute("score");
-		let yourScore = yourScoreAttr ? parseFloat(yourScoreAttr) : parseFloat(yourScoreEl?.textContent?.replace(/[^\d.]/g, "") || "0");
-		if (!Number.isFinite(yourScore)) yourScore = 0;
-		const otherScoreAttr = otherScoreEl?.getAttribute("score");
-		let otherScore = otherScoreAttr ? parseFloat(otherScoreAttr) : parseFloat(otherScoreEl?.textContent?.replace(/[^\d.]/g, "") || "0");
-		if (!Number.isFinite(otherScore)) otherScore = 0;
-		const statuses = el.querySelectorAll(".status");
-		const yourStatusEl = el.querySelector(".status[label=\"Your Status\"]") || statuses[0];
-		const otherStatusEl = Array.from(statuses).find((s) => s !== yourStatusEl) || statuses[1];
-		const yourStatus = normalizeStatus(yourStatusEl?.textContent || "");
-		const otherStatus = normalizeStatus(otherStatusEl?.textContent || "");
-		const data = {
-			el,
-			title,
-			yourScore,
-			otherScore,
-			yourStatus,
-			otherStatus
-		};
-		el._alaCompareData = data;
-		return data;
-	}
-	function compareEntries(a, b, col, dir) {
-		if (col === "title") {
-			const cmp = a.title.localeCompare(b.title, void 0, {
-				numeric: true,
-				sensitivity: "base"
+		ignoreBtn.addEventListener("click", () => {
+			setOverride(mediaId, {
+				malId: 0,
+				type: loadedType,
+				title: loadedTitle,
+				cover: loadedCover
 			});
-			return dir === "asc" ? cmp : -cmp;
-		}
-		const aVal = col === "yourScore" ? a.yourScore : a.otherScore;
-		const bVal = col === "yourScore" ? b.yourScore : b.otherScore;
-		if (aVal !== bVal) return dir === "asc" ? aVal - bVal : bVal - aVal;
-		return a.title.localeCompare(b.title, void 0, {
-			numeric: true,
-			sensitivity: "base"
+			close();
+		});
+		removeBtn?.addEventListener("click", () => {
+			removeOverride(mediaId);
+			close();
 		});
 	}
-	defineFeature({
-		id: "compareView",
-		key: "compareViewEnabled",
-		section: "AniList Enhancements",
-		def: false,
-		title: "Compare View Improvements",
-		help: "Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown."
-	}, () => {
-		addStyle("ala-compare-style", `
-      .content.container.ala-compare-page-container {
-        padding-left: 18px !important;
-        padding-right: 18px !important;
-        max-width: calc(100% - 36px) !important;
-        width: 100% !important;
-        box-sizing: border-box !important;
-      }
-      .ala-compare-wrap {
-        display: flex;
-        gap: 20px;
-        align-items: flex-start;
-        width: 100%;
-        box-sizing: border-box;
-        margin-top: 30px;
-      }
-      .ala-compare-sidebar {
-        flex: 0 0 170px;
-        width: 170px;
-        box-sizing: border-box;
-        position: sticky;
-        top: 85px;
-        z-index: 10;
-      }
-      .ala-compare-main {
-        flex: 1 1 0%;
-        min-width: 0;
-      }
-      .ala-compare-main .compare {
-        margin-top: 0 !important;
-      }
-      .ala-compare-card {
-        background: rgb(var(--color-foreground));
-        border-radius: 6px;
-        padding: 14px 16px;
-        color: rgb(var(--color-text));
-        font-size: 1.3rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,.15);
-        box-sizing: border-box;
-      }
-      .ala-compare-card-title {
-        font-size: 1.35rem;
-        font-weight: 600;
-        margin-bottom: 12px;
-        color: rgb(var(--color-text));
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        user-select: none;
-      }
-      .ala-compare-card-title::-webkit-details-marker {
-        display: none;
-      }
-      .ala-compare-arrow-icon {
-        display: none;
-      }
-      .ala-compare-active-badge {
-        display: none;
-        font-size: 1.15rem;
-        font-weight: 400;
-        color: rgb(var(--color-text-lighter));
-        margin-left: auto;
-        margin-right: 8px;
-      }
-      .ala-compare-status-list {
-        display: flex;
-        flex-direction: column;
-        gap: 9px;
-      }
-      .ala-compare-status-item {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-        cursor: pointer;
-        user-select: none;
-        transition: color .15s ease;
-        font-size: 1.3rem;
-      }
-      .ala-compare-status-item:hover {
-        color: rgb(var(--color-blue));
-      }
-      .ala-compare-cb {
-        accent-color: rgb(var(--color-blue));
-        width: 15px;
-        height: 15px;
-        margin: 0;
-        cursor: pointer;
-      }
-      .ala-compare-cb-label {
-        flex: 1 1 auto;
-      }
-      .ala-compare-count {
-        font-size: 1.15rem;
-        color: rgb(var(--color-text-lighter));
-      }
-      .ala-compare-actions {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-top: 12px;
-        padding-top: 10px;
-        border-top: 1px solid rgba(var(--color-text-lighter), .15);
-        font-size: 1.2rem;
-      }
-      .ala-compare-btn-link {
-        background: transparent;
-        border: 0;
-        padding: 0;
-        color: rgb(var(--color-text-lighter));
-        font: inherit;
-        cursor: pointer;
-        transition: color .15s ease;
-      }
-      .ala-compare-btn-link:hover {
-        color: rgb(var(--color-blue));
-      }
-      .ala-compare-dot {
-        color: rgb(var(--color-text-lighter));
-        opacity: .5;
-      }
-      .ala-compare-load-indicator {
-        margin-top: 10px;
-        padding-top: 8px;
-        border-top: 1px solid rgba(var(--color-text-lighter), .12);
-        font-size: 1.15rem;
-        color: rgb(var(--color-text-lighter));
-        display: flex;
-        align-items: center;
-        gap: 7px;
-      }
-      .ala-compare-spinner {
-        width: 12px;
-        height: 12px;
-        border: 2px solid rgba(var(--color-text-lighter), .25);
-        border-top-color: rgb(var(--color-blue));
-        border-radius: 50%;
-        animation: ala-compare-spin .7s linear infinite;
-        flex-shrink: 0;
-        display: inline-block;
-      }
-      @keyframes ala-compare-spin {
-        to { transform: rotate(360deg); }
-      }
-      .ala-compare-empty {
-        padding: 40px 20px;
-        text-align: center;
-        color: rgb(var(--color-text-lighter));
-        font-size: 1.4rem;
-        background: rgb(var(--color-foreground));
-        border-radius: 4px;
-        margin-top: 12px;
-      }
-      .compare .entry {
-        display: flex !important;
-        align-items: stretch !important;
-      }
-      .compare .entry.ala-hidden {
-        display: none !important;
-      }
-      .compare .entry > div {
-        flex: 1 1 0% !important;
-        min-width: 0 !important;
-        box-sizing: border-box !important;
-      }
-      .compare .entry > div.title {
-        flex: 3.5 3.5 0% !important;
-        min-width: 0 !important;
-      }
-      .entry.header > div {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .entry.header > div.title {
-        justify-content: flex-start;
-      }
-      @media (max-width: 760px) {
-        .entry.header > div.status,
-        .entry .status {
-          display: none !important;
-        }
-      }
-      .ala-header-wrap {
-        position: relative;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        max-width: 100%;
-      }
-      .entry.header > div.title .ala-header-wrap {
-        justify-content: flex-start;
-      }
-      .ala-header-label {
-        line-height: 1.25;
-        text-align: center;
-        word-break: break-word;
-      }
-      .entry.header > div.title .ala-header-label {
-        text-align: left;
-      }
-      .ala-sortable-header {
-        cursor: pointer;
-        user-select: none;
-        transition: background-color .15s ease;
-        border-radius: 3px;
-      }
-      .ala-sortable-header:hover {
-        background-color: var(--ala-header-hover-bg, rgba(255, 255, 255, 0.18)) !important;
-      }
-      .ala-sort-arrow {
-        position: absolute;
-        left: 100%;
-        top: 50%;
-        transform: translateY(-50%);
-        margin-left: 4px;
-        font-size: 11px;
-        color: inherit;
-        opacity: 0.85;
-        user-select: none;
-        pointer-events: none;
-        white-space: nowrap;
-      }
+	function openOverridesModal() {
+		const existing = document.getElementById(MODAL_ID);
+		if (existing) existing.remove();
+		refreshStaleOverrides().then(() => {
+			if (document.getElementById(MODAL_ID)) renderList();
+		});
+		const backdrop = document.createElement("div");
+		backdrop.id = MODAL_ID;
+		backdrop.innerHTML = `
+    <div class="ala-ov-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-ov-modal-title">
+      <header class="ala-ov-head">
+        <h2 id="ala-ov-modal-title">Manual Mappings & Sync Audit</h2>
+        <button class="ala-icon-btn ala-ov-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-ov-body">
+        <div class="ala-ov-tabs">
+          <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
+          <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
+          <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
+        </div>
 
-      @media (min-width: 851px) {
-        .ala-compare-card-title {
-          pointer-events: none;
-        }
-        .ala-compare-card > .ala-compare-content {
-          display: block !important;
-        }
-      }
+        <div id="ala-ov-view-overrides">
+          <div class="ala-ov-form-box">
+            <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
+            <div class="ala-ov-field">
+              <label for="ala-ov-al-input">AniList Media ID or URL</label>
+              <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
+            </div>
 
-      @media (max-width: 850px) {
-        .content.container.ala-compare-page-container {
-          padding-left: 10px !important;
-          padding-right: 10px !important;
-          max-width: calc(100% - 20px) !important;
-        }
-        .ala-compare-wrap {
-          flex-direction: column;
-          gap: 16px;
-          margin-top: 18px;
-        }
-        .ala-compare-sidebar {
-          width: 100%;
-          flex: none;
-          position: static;
-        }
-        .ala-compare-card {
-          padding: 0;
-          overflow: hidden;
-        }
-        .ala-compare-card-title {
-          padding: 12px 14px;
-          margin-bottom: 0;
-          cursor: pointer;
-        }
-        .ala-compare-active-badge {
-          display: inline-block;
-        }
-        .ala-compare-arrow-icon {
-          display: inline-block;
-          font-size: 10px;
-          transition: transform .2s ease;
-          opacity: .7;
-        }
-        .ala-compare-card[open] .ala-compare-arrow-icon {
-          transform: rotate(180deg);
-        }
-        .ala-compare-content {
-          padding: 10px 14px 14px;
-          border-top: 1px solid rgba(var(--color-text-lighter), .12);
-        }
-        .ala-compare-status-list {
-          flex-direction: column;
-          gap: 10px;
-        }
-      }
-    `);
-		const isComparePage = () => /\/(animelist|mangalist)\/compare/i.test(location.pathname);
-		let activeSortCol = "otherScore";
-		let activeSortDir = "desc";
-		const activeStatuses = new Set(STATUSES);
-		let lastProcessedCount = -1;
-		let currentRoute = "";
-		let isLoadingAll = false;
-		let isCompareLoaded = false;
-		let loadFailed = false;
-		let isMutatingDOM = false;
-		let loadAbortState = null;
-		let resizeCleanup = null;
-		let indicatorTimer = null;
-		function getCompareVue() {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const scrollerEl = win.document?.querySelector?.(".scroller") || document.querySelector(".scroller");
-			if (scrollerEl && scrollerEl.__vue__?.$parent) return scrollerEl.__vue__.$parent;
-			const compareEl = win.document?.querySelector?.(".compare") || document.querySelector(".compare");
-			if (compareEl && compareEl.__vue__) return compareEl.__vue__;
-			return null;
-		}
-		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		const setRpcBlock = (fn) => {
-			pageWin.__ALFL_RPC_BLOCK__ = fn;
-		};
-		const compareBlocker = (q, vars) => isComparePage() && (/\bcompareWithAuthList\b/i.test(q || "") || Boolean(vars?.compareWithAuthList));
-		const installBlocker = () => {
-			setRpcBlock(compareBlocker);
-		};
-		function disableNativeScrollers(listContainer) {
-			(listContainer?.parentElement || listContainer || document).querySelectorAll(".scroller").forEach((el) => {
-				try {
-					const v = el.__vue__;
-					if (v) {
-						if (typeof v.check === "function") {
-							window.removeEventListener("scroll", v.check);
-							window.removeEventListener("resize", v.check);
-							v._scrollContainer?.removeEventListener?.("scroll", v.check);
-							v._scrollContainer?.removeEventListener?.("resize", v.check);
-						}
-						v.execute = () => {};
-						v.handler = () => {};
-						if (v.$parent) {
-							v.$parent.complete = true;
-							v.$parent.loading = false;
-						}
-						v.$destroy?.();
-					}
-				} catch {}
-				el.remove();
+            <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
+
+            <div class="ala-ov-field">
+              <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
+              <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
+            </div>
+
+            <div class="ala-ov-form-actions">
+              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
+            </div>
+          </div>
+
+          <div class="ala-ov-controls">
+            <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
+            <div class="ala-ov-filter-groups">
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Status:</span>
+                <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
+                <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
+                <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
+              </div>
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Type:</span>
+                <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
+                <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
+                <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
+              </div>
+            </div>
+          </div>
+
+          <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
+          <div id="ala-ov-list" class="ala-ov-list"></div>
+        </div>
+
+        <div id="ala-ov-view-audit" style="display:none">
+          <div class="ala-ov-audit-section">
+            <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
+            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
+            <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
+              <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Type:</span>
+                <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
+                <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
+                <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
+              </div>
+            </div>
+            <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
+          </div>
+
+          <div class="ala-ov-audit-section" style="margin-top:24px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
+              <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
+            </div>
+            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
+            <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
+              <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Type:</span>
+                <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
+                <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
+                <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
+              </div>
+            </div>
+            <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
+          </div>
+        </div>
+
+        <div id="ala-ov-view-json" style="display:none">
+          <div class="ala-ov-form-box">
+            <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
+            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
+              View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
+            </p>
+            <div class="ala-ov-field">
+              <label for="ala-ov-json-textarea">Configuration JSON</label>
+              <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
+            </div>
+            <div id="ala-ov-json-status" class="ala-ov-status"></div>
+            <div class="ala-ov-form-actions">
+              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer class="ala-ov-foot">
+        <button class="ala-btn ala-btn--primary ala-ov-close" type="button">Done</button>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const close = () => backdrop.remove();
+		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close();
+		});
+		const tabs = backdrop.querySelectorAll(".ala-ov-tab");
+		const viewOverrides = backdrop.querySelector("#ala-ov-view-overrides");
+		const viewAudit = backdrop.querySelector("#ala-ov-view-audit");
+		const viewJson = backdrop.querySelector("#ala-ov-view-json");
+		tabs.forEach((t) => {
+			t.addEventListener("click", () => {
+				tabs.forEach((o) => o.classList.toggle("is-active", o === t));
+				const target = t.dataset.tab;
+				viewOverrides.style.display = target === "overrides" ? "block" : "none";
+				viewAudit.style.display = target === "audit" ? "block" : "none";
+				viewJson.style.display = target === "json" ? "block" : "none";
+				if (target === "audit") renderAudit();
+				else if (target === "overrides") renderList();
+				else if (target === "json") renderJsonView();
 			});
-		}
-		async function resolveCompareUsers() {
-			const type = location.pathname.toLowerCase().includes("mangalist") ? "MANGA" : "ANIME";
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const userMap = win.__ALFL_USER_MAP__;
-			let otherName;
-			let otherId;
-			const urlMatch = location.pathname.match(/\/user\/([^/]+)\/(animelist|mangalist)\/compare/i);
-			if (urlMatch) try {
-				otherName = decodeURIComponent(urlMatch[1]);
-			} catch {
-				otherName = urlMatch[1];
-			}
-			if (!otherName) {
-				const queryUser = new URLSearchParams(location.search).get("user");
-				if (queryUser) otherName = queryUser;
-			}
-			const vue = getCompareVue();
-			if (vue) {
-				if (!otherName) otherName = vue.user?.name || vue.userName || void 0;
-				if (!otherId) otherId = Number(vue.user?.id || vue.userId) || void 0;
-			}
-			if (otherName && !otherId && userMap) otherId = userMap.get(otherName.toLowerCase());
-			if (otherName && otherId) {
-				if (userMap) userMap.set(otherName.toLowerCase(), otherId);
-				if (win.__ALFL_ID_MAP__) win.__ALFL_ID_MAP__.set(otherId, otherName);
-			}
-			let viewerId = Number(store$1.get("al_user_id", 0)) || void 0;
-			let viewerName = store$1.get("al_username", null) || void 0;
-			if (!viewerId || !viewerName) {
-				const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-				if (nuxtUser) {
-					if (!viewerId && nuxtUser.id) viewerId = Number(nuxtUser.id);
-					if (!viewerName && nuxtUser.name) viewerName = String(nuxtUser.name);
-				}
-			}
-			if (!viewerId || !viewerName) {
-				const viewer = await AniList.viewer();
-				if (viewer) {
-					viewerId = viewer.id;
-					viewerName = viewer.name;
-				}
-			}
-			if (!viewerId && viewerName && userMap) viewerId = userMap.get(viewerName.toLowerCase());
-			return {
-				viewerId,
-				viewerName,
-				otherId,
-				otherName,
-				type
-			};
-		}
-		function updateHeaderHoverColor() {
-			const testEl = document.createElement("div");
-			testEl.style.color = "rgb(var(--color-blue))";
-			document.body.appendChild(testEl);
-			const computedColor = getComputedStyle(testEl).color;
-			testEl.remove();
-			const m = computedColor.match(/\d+/g);
-			let isLight = false;
-			if (m && m.length >= 3) {
-				const r = parseInt(m[0], 10);
-				const g = parseInt(m[1], 10);
-				const b = parseInt(m[2], 10);
-				isLight = (r * 299 + g * 587 + b * 114) / 1e3 > 155;
-			}
-			const hoverBg = isLight ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.18)";
-			document.documentElement.style.setProperty("--ala-header-hover-bg", hoverBg);
-		}
-		function cleanHeaderText(raw) {
-			return raw.replace(/[▲▼]/g, "").trim();
-		}
-		function renderHeaderContent(el, baseText, isActive, activeDir) {
-			const clean = cleanHeaderText(baseText);
-			let wrap = el.querySelector(".ala-header-wrap");
-			if (!wrap) {
-				wrap = document.createElement("div");
-				wrap.className = "ala-header-wrap";
-				el.innerHTML = "";
-				el.appendChild(wrap);
-			}
-			let label = wrap.querySelector(".ala-header-label");
-			if (!label) {
-				label = document.createElement("span");
-				label.className = "ala-header-label";
-				wrap.appendChild(label);
-			}
-			label.textContent = clean;
-			let arrow = wrap.querySelector(".ala-sort-arrow");
-			if (isActive) {
-				if (!arrow) {
-					arrow = document.createElement("span");
-					arrow.className = "ala-sort-arrow";
-					wrap.appendChild(arrow);
-				}
-				arrow.textContent = activeDir === "asc" ? "▲" : "▼";
-			} else arrow?.remove();
-		}
-		function updateSortArrows(titleEl, yourScoreEl, otherScoreEl, activeCol, activeDir) {
-			updateHeaderHoverColor();
-			const items = [
-				[titleEl, "title"],
-				[yourScoreEl, "yourScore"],
-				[otherScoreEl, "otherScore"]
-			];
-			for (const [el, col] of items) {
-				if (!el) continue;
-				el.classList.add("ala-sortable-header");
-				if (!el._alaBaseText) el._alaBaseText = cleanHeaderText(el.textContent || "");
-				const baseText = el._alaBaseText;
-				renderHeaderContent(el, baseText, col === activeCol, activeDir);
-			}
-		}
-		function applyFilter(listContainer, entries) {
-			let visibleCount = 0;
-			for (const el of entries) {
-				const d = getEntryData(el);
-				const show = activeStatuses.has(d.yourStatus) && activeStatuses.has(d.otherStatus);
-				el.classList.toggle("ala-hidden", !show);
-				el.style.display = "";
-				if (show) visibleCount++;
-			}
-			let emptyEl = listContainer.querySelector(".ala-compare-empty");
-			if (visibleCount === 0 && entries.length > 0) {
-				if (!emptyEl) {
-					emptyEl = document.createElement("div");
-					emptyEl.className = "ala-compare-empty";
-					emptyEl.textContent = "No entries match the selected status filters.";
-					listContainer.appendChild(emptyEl);
-				}
-				emptyEl.style.display = "";
-			} else if (emptyEl) emptyEl.style.display = "none";
-		}
-		function applySort(listContainer, entries, col, dir) {
-			if (entries.length > 0) listContainer.querySelector(".no-results")?.remove();
-			entries.sort((a, b) => {
-				return compareEntries(getEntryData(a), getEntryData(b), col, dir);
-			});
-			const frag = document.createDocumentFragment();
-			for (const el of entries) frag.appendChild(el);
-			isMutatingDOM = true;
-			listContainer.appendChild(frag);
-			const emptyEl = listContainer.querySelector(".ala-compare-empty");
-			if (emptyEl) listContainer.appendChild(emptyEl);
-			isMutatingDOM = false;
-		}
-		function updateStatusCounts(sidebar, entries) {
-			const counts = {
-				Completed: 0,
-				Planning: 0,
-				Current: 0,
-				Paused: 0,
-				Dropped: 0
-			};
-			for (const el of entries) {
-				const d = getEntryData(el);
-				const counted = new Set([d.yourStatus, d.otherStatus]);
-				for (const s of counted) if (s in counts) counts[s]++;
-			}
-			sidebar.querySelectorAll(".ala-compare-count").forEach((span) => {
-				const status = span.dataset.status;
-				if (status && status in counts) span.textContent = String(counts[status]);
-			});
-			const badge = sidebar.querySelector(".ala-compare-active-badge");
-			if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
-		}
-		function setLoadIndicator(sidebar, text) {
-			if (indicatorTimer) {
-				clearTimeout(indicatorTimer);
-				indicatorTimer = null;
-			}
-			let indicator = sidebar.querySelector("#ala-compare-load-indicator");
-			if (!text) {
-				indicator?.remove();
+		});
+		let activePreview = null;
+		let statusFilter = "all";
+		let typeFilter = "all";
+		let searchQuery = "";
+		const alInput = backdrop.querySelector("#ala-ov-al-input");
+		const malInput = backdrop.querySelector("#ala-ov-mal-input");
+		const previewBox = backdrop.querySelector("#ala-ov-preview");
+		const listContainer = backdrop.querySelector("#ala-ov-list");
+		const countLabel = backdrop.querySelector("#ala-ov-count");
+		const searchInput = backdrop.querySelector("#ala-ov-search");
+		const updatePreviewUI = (loading = false) => {
+			if (loading) {
+				previewBox.style.display = "flex";
+				previewBox.innerHTML = `<span style="font-size:12px;color:rgb(var(--color-text-lighter))">Looking up AniList entry...</span>`;
 				return;
 			}
-			if (!indicator) {
-				indicator = document.createElement("div");
-				indicator.id = "ala-compare-load-indicator";
-				indicator.className = "ala-compare-load-indicator";
-				indicator.innerHTML = `
-          <span class="ala-compare-spinner"></span>
-          <span class="ala-compare-load-text"></span>
-        `;
-				(sidebar.querySelector(".ala-compare-content") || sidebar.querySelector(".ala-compare-card"))?.appendChild(indicator);
+			if (!activePreview) {
+				previewBox.style.display = "none";
+				previewBox.innerHTML = "";
+				malInput.placeholder = "e.g. 16498 or https://myanimelist.net/anime/16498";
+				return;
 			}
-			indicator.style.display = "flex";
-			const textEl = indicator.querySelector(".ala-compare-load-text");
-			if (textEl) textEl.textContent = text;
-		}
-		function getActiveCompareContainer(fallback) {
-			return document.getElementById("ala-compare-table") || fallback || document.querySelector(".ala-compare-main .compare") || null;
-		}
-		function triggerFilterUpdate(sidebar, fallback) {
-			const badge = sidebar.querySelector(".ala-compare-active-badge");
-			if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
-			const target = getActiveCompareContainer(fallback);
-			if (!target) return;
-			applyFilter(target, Array.from(target.querySelectorAll(".entry:not(.header)")));
-		}
-		function triggerSort(col, fallback) {
-			if (activeSortCol === col) activeSortDir = activeSortDir === "asc" ? "desc" : "asc";
-			else {
-				activeSortCol = col;
-				activeSortDir = col === "title" ? "asc" : "desc";
+			const { type, title, cover, detectedMalId } = activePreview;
+			previewBox.style.display = "flex";
+			previewBox.innerHTML = `
+      ${cover ? `<img class="ala-ov-preview-cover" src="${cover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+      <div class="ala-ov-preview-info">
+        <div class="ala-ov-preview-title">${title}</div>
+        <div class="ala-ov-preview-meta">
+          <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
+          ${detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+        </div>
+      </div>
+    `;
+			if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
+		};
+		let lookupTimer = 0;
+		const doLookup = async (id) => {
+			if (!id) {
+				activePreview = null;
+				updatePreviewUI();
+				return;
 			}
-			const target = getActiveCompareContainer(fallback);
-			if (!target) return;
-			const currentHeader = target.querySelector(".entry.header");
-			if (currentHeader) {
-				const titleH = currentHeader.querySelector(".title");
-				const scores = currentHeader.querySelectorAll(".score");
-				updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
-			}
-			applySort(target, Array.from(target.querySelectorAll(".entry:not(.header)")), activeSortCol, activeSortDir);
-		}
-		async function loadAllEntriesViaMediaList(compareRoot, sidebar) {
-			if (isLoadingAll || isCompareLoaded || loadFailed) return;
-			isLoadingAll = true;
-			const abortState = { abort: false };
-			loadAbortState = abortState;
-			indicatorTimer = setTimeout(() => {
-				if (!abortState.abort && isComparePage()) setLoadIndicator(sidebar, "Loading full compare list...");
-			}, 250);
+			const existing = getManualOverrides()[String(id)];
+			if (existing) {
+				activePreview = {
+					mediaId: id,
+					type: existing.type,
+					title: existing.title,
+					cover: existing.cover,
+					detectedMalId: existing.malId > 0 ? existing.malId : void 0
+				};
+				if (existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
+				updatePreviewUI();
+			} else updatePreviewUI(true);
+			const q = `query ($id: Int) {
+      Media(id: $id) {
+        id
+        idMal
+        type
+        title { userPreferred english romaji }
+        coverImage { medium }
+      }
+    }`;
 			try {
-				const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers();
-				if (abortState.abort || !isComparePage()) return;
-				const viewerTarget = viewerId || viewerName;
-				const otherTarget = otherId || otherName;
-				if (!viewerTarget || !otherTarget) {
-					logDebug("[COMPARE] Missing viewer or other user for getMediaList, keeping fallback");
-					loadFailed = true;
+				const res = await AniList.query(q, { id });
+				if (extractAlId(alInput.value) !== id) return;
+				const m = res?.Media;
+				if (!m) {
+					if (!existing) {
+						activePreview = null;
+						updatePreviewUI();
+					}
 					return;
 				}
-				const [myListRes, otherListRes] = await Promise.all([AniList.getMediaList(viewerTarget, type, {
-					userId: viewerId,
-					userName: viewerId ? void 0 : viewerName
-				}), AniList.getMediaList(otherTarget, type, {
-					userId: otherId,
-					userName: otherId ? void 0 : otherName
-				})]);
-				if (abortState.abort || !isComparePage()) return;
-				const myMap = new Map();
-				for (const entry of myListRes.allEntries) myMap.set(entry.mediaId, entry);
-				const safeOtherName = esc(otherListRes.user?.name || otherName || "User");
-				const scopeAttr = Array.from(compareRoot.attributes).map((a) => a.name).find((n) => /^data-v-[a-f0-9]+$/i.test(n));
-				const seenMediaIds = new Set();
-				const matchedNodes = [];
-				for (const otherEntry of otherListRes.allEntries) {
-					const mediaId = otherEntry.mediaId;
-					if (seenMediaIds.has(mediaId)) continue;
-					const myEntry = myMap.get(mediaId);
-					if (!myEntry) continue;
-					seenMediaIds.add(mediaId);
-					const title = otherEntry.media?.title?.userPreferred || otherEntry.media?.title?.romaji || otherEntry.media?.title?.english || myEntry.media?.title?.userPreferred || "Unknown";
-					const yourScore = myEntry.score || 0;
-					const otherScore = otherEntry.score || 0;
-					const yourStatus = normalizeStatus(myEntry.status);
-					const otherStatus = normalizeStatus(otherEntry.status);
-					const row = document.createElement("div");
-					row.className = "entry";
-					if (scopeAttr) row.setAttribute(scopeAttr, "");
-					row.innerHTML = `
-            <div class="title"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
-              <a href="/${type.toLowerCase()}/${mediaId}/" class=""${scopeAttr ? ` ${scopeAttr}=""` : ""}></a>
-            </div>
-            <div class="score" label="Score" score="${yourScore}"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${yourScore > 0 ? yourScore : "0"}</span></div>
-            <div class="score" label="${safeOtherName}'s Score" score="${otherScore}"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${otherScore > 0 ? otherScore : "0"}</span></div>
-            <div class="status" label="Your Status"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${yourStatus}</span></div>
-            <div class="status" label="${safeOtherName}'s Status"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${otherStatus}</span></div>
-          `;
-					const link = row.querySelector(".title a");
-					if (link) link.textContent = title;
-					row._alaCompareData = {
-						el: row,
-						title,
-						yourScore,
-						otherScore,
-						yourStatus,
-						otherStatus
-					};
-					matchedNodes.push(row);
-				}
-				logDebug("[COMPARE] Matched entries via MediaListCollection:", matchedNodes.length);
-				const main = compareRoot.parentElement || document.querySelector(".ala-compare-main");
-				if (!main) return;
-				let customTable = main.querySelector("#ala-compare-table");
-				if (!customTable) {
-					customTable = document.createElement("div");
-					customTable.id = "ala-compare-table";
-					customTable.className = "compare";
-					if (scopeAttr) customTable.setAttribute(scopeAttr, "");
-					main.appendChild(customTable);
-				}
-				let customHeader = customTable.querySelector(".entry.header");
-				if (!customHeader) {
-					customHeader = document.createElement("div");
-					customHeader.className = "entry header";
-					if (scopeAttr) customHeader.setAttribute(scopeAttr, "");
-					customHeader.innerHTML = `
-            <div class="title ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
-              <div class="ala-header-wrap"><span class="ala-header-label">Title</span></div>
-            </div>
-            <div class="score ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
-              <div class="ala-header-wrap"><span class="ala-header-label">Your Score</span></div>
-            </div>
-            <div class="score ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
-              <div class="ala-header-wrap"><span class="ala-header-label">${safeOtherName}'s Score</span></div>
-            </div>
-            <div class="status"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
-              <span class="ala-header-label">Your Status</span>
-            </div>
-            <div class="status"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
-              <span class="ala-header-label">${safeOtherName}'s Status</span>
-            </div>
-          `;
-					customTable.appendChild(customHeader);
-					const titleH = customHeader.querySelector(".title");
-					const scores = customHeader.querySelectorAll(".score");
-					titleH?.addEventListener("click", () => triggerSort("title", compareRoot));
-					scores[0]?.addEventListener("click", () => triggerSort("yourScore", compareRoot));
-					scores[1]?.addEventListener("click", () => triggerSort("otherScore", compareRoot));
-				}
-				const titleH = customHeader.querySelector(".title");
-				const scores = customHeader.querySelectorAll(".score");
-				updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
-				matchedNodes.sort((a, b) => {
-					return compareEntries(getEntryData(a), getEntryData(b), activeSortCol, activeSortDir);
-				});
-				isMutatingDOM = true;
-				customTable.querySelectorAll(".entry:not(.header)").forEach((el) => el.remove());
-				const frag = document.createDocumentFragment();
-				for (const el of matchedNodes) frag.appendChild(el);
-				customTable.appendChild(frag);
-				if (matchedNodes.length === 0) {
-					let empty = customTable.querySelector(".no-results");
-					if (!empty) {
-						empty = document.createElement("div");
-						empty.className = "no-results";
-						empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
-						customTable.appendChild(empty);
-					}
-					customHeader.style.display = "none";
-				} else {
-					customTable.querySelector(".no-results")?.remove();
-					customHeader.style.display = "";
-				}
-				const emptyEl = customTable.querySelector(".ala-compare-empty");
-				if (emptyEl) customTable.appendChild(emptyEl);
-				isMutatingDOM = false;
-				compareRoot.style.display = "none";
-				disableNativeScrollers(compareRoot);
-				lastProcessedCount = matchedNodes.length;
-				isCompareLoaded = true;
-				installBlocker();
-				updateStatusCounts(sidebar, matchedNodes);
-				applyFilter(customTable, matchedNodes);
-			} catch (err) {
-				loadFailed = true;
-				setRpcBlock();
-				console.error("[AL-Additions] CompareView getMediaList error:", err);
-			} finally {
-				isLoadingAll = false;
-				loadAbortState = null;
-				setLoadIndicator(sidebar, null);
-			}
-		}
-		function cleanup() {
-			if (!isComparePage()) setRpcBlock();
-			else installBlocker();
-			if (indicatorTimer) {
-				clearTimeout(indicatorTimer);
-				indicatorTimer = null;
-			}
-			if (loadAbortState) {
-				loadAbortState.abort = true;
-				loadAbortState = null;
-			}
-			isLoadingAll = false;
-			isCompareLoaded = false;
-			loadFailed = false;
-			isMutatingDOM = false;
-			if (resizeCleanup) {
-				resizeCleanup();
-				resizeCleanup = null;
-			}
-			const customTable = document.getElementById("ala-compare-table");
-			if (customTable) customTable.remove();
-			const wrap = document.getElementById("ala-compare-wrap");
-			if (wrap) {
-				const main = wrap.querySelector(".ala-compare-main");
-				const compareRoot = main?.querySelector(".compare:not(#ala-compare-table)") || main?.firstElementChild;
-				if (compareRoot && wrap.parentElement) {
-					if (compareRoot.style) compareRoot.style.display = "";
-					wrap.parentElement.insertBefore(compareRoot, wrap);
-				}
-				wrap.remove();
-			} else {
-				const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
-				if (compareRoot) {
-					delete compareRoot.dataset.alaCompareInit;
-					compareRoot.style.display = "";
-				}
-			}
-			document.querySelectorAll(".ala-compare-page-container").forEach((el) => {
-				el.classList.remove("ala-compare-page-container");
-			});
-			document.querySelectorAll(".compare .entry.ala-hidden").forEach((el) => {
-				el.classList.remove("ala-hidden");
-			});
-			const header = document.querySelector(".compare:not(#ala-compare-table) .entry.header, .entry.header");
-			if (header) {
-				delete header._alaHeaderBound;
-				delete header.dataset.alaCompareInit;
-				header.querySelectorAll(".ala-sortable-header").forEach((el) => {
-					el.classList.remove("ala-sortable-header");
-					const baseText = el._alaBaseText;
-					if (baseText) el.textContent = cleanHeaderText(baseText);
-					delete el._alaBaseText;
-				});
-				header.querySelectorAll(".status").forEach((el) => {
-					const label = el.querySelector(".ala-header-label");
-					if (label) el.textContent = label.textContent || "";
-				});
-			}
-			lastProcessedCount = -1;
-		}
-		function setupCompareView(compareRoot, header, entries) {
-			if (header) header.querySelectorAll(".status").forEach((statusEl) => {
-				if (!statusEl.querySelector(".ala-header-label")) statusEl.innerHTML = `<span class="ala-header-label">${statusEl.textContent?.trim() || ""}</span>`;
-			});
-			const headerCells = header ? Array.from(header.children) : [];
-			const titleHeader = headerCells.length >= 3 ? header.querySelector(".title") || headerCells.find((el) => /title/i.test(el.textContent || "")) || headerCells[0] : null;
-			const yourScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => /your score/i.test(el.textContent || "")) || header.querySelector(".score:first-of-type") || headerCells[1] : null;
-			const otherScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => el !== yourScoreHeader && /score/i.test(el.textContent || "")) || header.querySelectorAll(".score")[1] || headerCells[2] : null;
-			const container = compareRoot.closest(".content.container") || compareRoot.parentElement;
-			if (container) container.classList.add("ala-compare-page-container");
-			let wrap = document.getElementById("ala-compare-wrap");
-			let sidebar = document.getElementById("ala-compare-sidebar");
-			if (!wrap || !wrap.contains(compareRoot)) {
-				wrap?.remove();
-				wrap = document.createElement("div");
-				wrap.id = "ala-compare-wrap";
-				wrap.className = "ala-compare-wrap";
-				sidebar = document.createElement("aside");
-				sidebar.id = "ala-compare-sidebar";
-				sidebar.className = "ala-compare-sidebar";
-				const main = document.createElement("div");
-				main.className = "ala-compare-main";
-				compareRoot.parentElement?.insertBefore(wrap, compareRoot);
-				wrap.appendChild(sidebar);
-				wrap.appendChild(main);
-				main.appendChild(compareRoot);
-			}
-			if (sidebar && !sidebar.querySelector(".ala-compare-card")) {
-				const isMobileScreen = window.innerWidth <= 850;
-				sidebar.innerHTML = `
-          <details class="ala-compare-card" ${isMobileScreen ? "" : "open"}>
-            <summary class="ala-compare-card-title">
-              <span>Status Filter</span>
-              <span class="ala-compare-active-badge">${activeStatuses.size}/${STATUSES.length}</span>
-              <span class="ala-compare-arrow-icon">▼</span>
-            </summary>
-            <div class="ala-compare-content">
-              <div class="ala-compare-status-list">
-                ${STATUSES.map((s) => `
-                  <label class="ala-compare-status-item">
-                    <input type="checkbox" class="ala-compare-cb" data-status="${s}" ${activeStatuses.has(s) ? "checked" : ""}>
-                    <span class="ala-compare-cb-label">${s}</span>
-                    <span class="ala-compare-count" data-status="${s}">0</span>
-                  </label>`).join("")}
-              </div>
-              <div class="ala-compare-actions">
-                <button type="button" class="ala-compare-btn-link" id="ala-compare-all">Select all</button>
-                <span class="ala-compare-dot">·</span>
-                <button type="button" class="ala-compare-btn-link" id="ala-compare-none">Clear all</button>
-              </div>
-            </div>
-          </details>
-        `;
-				const details = sidebar.querySelector(".ala-compare-card");
-				sidebar.querySelector(".ala-compare-card-title")?.addEventListener("click", (e) => {
-					if (window.innerWidth > 850) {
-						e.preventDefault();
-						if (details) details.open = true;
-					}
-				});
-				if (resizeCleanup) resizeCleanup();
-				let isDesktop = window.innerWidth > 850;
-				const syncDetailsOpen = () => {
-					if (!details) return;
-					const nowDesktop = window.innerWidth > 850;
-					if (nowDesktop !== isDesktop) {
-						details.open = nowDesktop;
-						isDesktop = nowDesktop;
-					}
+				const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
+				activePreview = {
+					mediaId: m.id,
+					type: m.type === "MANGA" ? "MANGA" : "ANIME",
+					title: t,
+					cover: m.coverImage?.medium || existing?.cover,
+					detectedMalId: Number(m.idMal) || void 0
 				};
-				window.addEventListener("resize", syncDetailsOpen);
-				resizeCleanup = () => {
-					window.removeEventListener("resize", syncDetailsOpen);
-				};
-				sidebar.querySelectorAll(".ala-compare-cb").forEach((cb) => {
-					cb.addEventListener("change", () => {
-						const st = cb.dataset.status;
-						if (cb.checked) activeStatuses.add(st);
-						else activeStatuses.delete(st);
-						triggerFilterUpdate(sidebar, compareRoot);
-					});
-				});
-				sidebar.querySelector("#ala-compare-all")?.addEventListener("click", () => {
-					for (const s of STATUSES) activeStatuses.add(s);
-					sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = true);
-					triggerFilterUpdate(sidebar, compareRoot);
-				});
-				sidebar.querySelector("#ala-compare-none")?.addEventListener("click", () => {
-					activeStatuses.clear();
-					sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = false);
-					triggerFilterUpdate(sidebar, compareRoot);
-				});
-			}
-			if (sidebar && entries.length > 0) updateStatusCounts(sidebar, entries);
-			if (header && titleHeader && yourScoreHeader && otherScoreHeader && !header._alaHeaderBound) {
-				header._alaHeaderBound = true;
-				const attachSortClick = (el, col) => {
-					if (!el) return;
-					el.addEventListener("click", () => {
-						triggerSort(col, compareRoot);
-					});
-				};
-				attachSortClick(titleHeader, "title");
-				attachSortClick(yourScoreHeader, "yourScore");
-				attachSortClick(otherScoreHeader, "otherScore");
-			}
-			if (header && titleHeader) {
-				header.dataset.alaCompareInit = "true";
-				updateSortArrows(titleHeader, yourScoreHeader, otherScoreHeader, activeSortCol, activeSortDir);
-			}
-			compareRoot.dataset.alaCompareInit = "true";
-			entries.forEach((el) => {
-				el.querySelectorAll(".score").forEach((scoreEl) => {
-					const text = scoreEl.textContent?.trim();
-					if (!text || text === "") scoreEl.textContent = "0";
-				});
-			});
-			disableNativeScrollers(compareRoot);
-			if (entries.length > 0) {
-				applyFilter(compareRoot, entries);
-				applySort(compareRoot, entries, activeSortCol, activeSortDir);
-			}
-			installBlocker();
-			if (!isLoadingAll && !isCompareLoaded && !loadFailed && sidebar) loadAllEntriesViaMediaList(compareRoot, sidebar);
-		}
-		const checkView = debounce(() => {
-			if (isMutatingDOM) return;
-			const path = location.pathname;
-			if (!isComparePage()) {
-				if (currentRoute) {
-					cleanup();
-					currentRoute = "";
+				updatePreviewUI();
+				if (existing && existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
+			} catch (_) {
+				if (!existing && extractAlId(alInput.value) === id) {
+					activePreview = null;
+					updatePreviewUI();
 				}
+			}
+		};
+		alInput.addEventListener("input", () => {
+			clearTimeout(lookupTimer);
+			lookupTimer = setTimeout(() => {
+				const id = extractAlId(alInput.value);
+				doLookup(id);
+			}, 300);
+		});
+		const saveBtn = backdrop.querySelector("#ala-ov-btn-save");
+		const ignoreBtn = backdrop.querySelector("#ala-ov-btn-ignore");
+		const clearBtn = backdrop.querySelector("#ala-ov-btn-clear");
+		const clearForm = () => {
+			clearTimeout(lookupTimer);
+			alInput.value = "";
+			malInput.value = "";
+			activePreview = null;
+			updatePreviewUI();
+		};
+		clearBtn.addEventListener("click", clearForm);
+		saveBtn.addEventListener("click", () => {
+			const id = activePreview?.mediaId || extractAlId(alInput.value);
+			if (!id) return alert("Please enter a valid AniList ID or URL.");
+			let malId = extractMalId(malInput.value);
+			if (!malId && activePreview?.detectedMalId) malId = activePreview.detectedMalId;
+			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
+			const existing = getManualOverrides()[String(id)];
+			const title = activePreview?.title || existing?.title || `Media #${id}`;
+			const cover = activePreview?.cover || existing?.cover;
+			const type = activePreview?.type || existing?.type || "ANIME";
+			setOverride(id, {
+				malId,
+				type,
+				title,
+				cover
+			});
+			clearForm();
+			renderList();
+			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
+				const m = res?.Media;
+				if (m) {
+					const current = getManualOverrides();
+					if (current[String(id)]) {
+						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
+						const c = m.coverImage?.medium || current[String(id)].cover;
+						current[String(id)] = {
+							...current[String(id)],
+							title: t,
+							cover: c,
+							type: m.type === "MANGA" ? "MANGA" : "ANIME",
+							updatedAt: Date.now()
+						};
+						saveManualOverrides(current);
+						if (document.getElementById(MODAL_ID)) renderList();
+					}
+				}
+			}).catch(() => {});
+		});
+		ignoreBtn.addEventListener("click", () => {
+			const id = activePreview?.mediaId || extractAlId(alInput.value);
+			if (!id) return alert("Please enter a valid AniList ID or URL.");
+			const existing = getManualOverrides()[String(id)];
+			const title = activePreview?.title || existing?.title || `Media #${id}`;
+			const cover = activePreview?.cover || existing?.cover;
+			setOverride(id, {
+				malId: 0,
+				type: activePreview?.type || existing?.type || "ANIME",
+				title,
+				cover
+			});
+			clearForm();
+			renderList();
+			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
+				const m = res?.Media;
+				if (m) {
+					const current = getManualOverrides();
+					if (current[String(id)]) {
+						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
+						const c = m.coverImage?.medium || current[String(id)].cover;
+						current[String(id)] = {
+							...current[String(id)],
+							title: t,
+							cover: c,
+							type: m.type === "MANGA" ? "MANGA" : "ANIME",
+							updatedAt: Date.now()
+						};
+						saveManualOverrides(current);
+						if (document.getElementById(MODAL_ID)) renderList();
+					}
+				}
+			}).catch(() => {});
+		});
+		backdrop.querySelectorAll("[data-status-filter]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-status-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
+				statusFilter = c.dataset.statusFilter || "all";
+				renderList();
+			});
+		});
+		backdrop.querySelectorAll("[data-type-filter]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-type-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
+				typeFilter = c.dataset.typeFilter || "all";
+				renderList();
+			});
+		});
+		let searchTimer = 0;
+		searchInput?.addEventListener("input", () => {
+			clearTimeout(searchTimer);
+			searchTimer = setTimeout(() => {
+				searchQuery = searchInput.value.trim();
+				renderList();
+			}, 150);
+		});
+		function renderList() {
+			const all = getManualOverrides();
+			const entries = Object.entries(all).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+			const filtered = entries.filter(([idStr, o]) => {
+				if (statusFilter === "overrides" && o.malId === 0) return false;
+				if (statusFilter === "ignored" && o.malId > 0) return false;
+				if (typeFilter !== "all" && o.type.toLowerCase() !== typeFilter.toLowerCase()) return false;
+				if (searchQuery && !matchesSearch(o.title, idStr, o.malId > 0 ? o.malId : void 0, searchQuery)) return false;
+				return true;
+			});
+			countLabel.textContent = `Configured Entries (${entries.length}${filtered.length !== entries.length ? ` — showing ${filtered.length}` : ""})`;
+			if (!filtered.length) {
+				listContainer.innerHTML = `<div class="ala-ov-empty">No entries found matching this filter.</div>`;
 				return;
 			}
-			if (path !== currentRoute) {
-				currentRoute = path;
-				activeSortCol = "otherScore";
-				activeSortDir = "desc";
-				for (const s of STATUSES) activeStatuses.add(s);
-				cleanup();
-				installBlocker();
-			}
-			if (isCompareLoaded) return;
-			const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
-			if (!compareRoot) return;
-			const header = compareRoot.querySelector(".entry.header");
-			const entries = Array.from(compareRoot.querySelectorAll(".entry:not(.header)"));
-			if (!compareRoot.dataset.alaCompareInit || !isCompareLoaded && entries.length !== lastProcessedCount) {
-				lastProcessedCount = entries.length;
-				setupCompareView(compareRoot, header, entries);
-			}
-		}, 60);
-		installBlocker();
-		Core.ready(checkView);
-		Core.onNavigate(() => {
-			installBlocker();
-			checkView();
+			listContainer.innerHTML = filtered.map(([idStr, o]) => {
+				const id = Number(idStr);
+				const isIgnoredEntry = o.malId === 0;
+				const alUrl = `https://anilist.co/${o.type.toLowerCase()}/${id}`;
+				const malUrl = o.malId > 0 ? `https://myanimelist.net/${o.type.toLowerCase()}/${o.malId}` : "#";
+				return `
+        <div class="ala-ov-item" data-id="${id}">
+          ${o.cover ? `<img class="ala-ov-item-cover" src="${o.cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+          <div class="ala-ov-item-info">
+            <a class="ala-ov-item-title" href="${alUrl}" target="_blank" rel="noopener" title="${o.title}">${o.title}</a>
+            <div class="ala-ov-item-meta">
+              <span class="ala-ov-badge ${o.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${o.type}</span>
+              <span>AniList ID: <b>${id}</b></span>
+              ${isIgnoredEntry ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>` : `<span>MAL ID: <a href="${malUrl}" target="_blank" rel="noopener"><b>${o.malId}</b></a></span>`}
+            </div>
+          </div>
+          <div class="ala-ov-item-actions">
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${id}">Edit</button>
+            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${id}" title="Remove override">✕</button>
+          </div>
+        </div>
+      `;
+			}).join("");
+			listContainer.querySelectorAll(".ala-ov-btn-del").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					if (id) {
+						removeOverride(id);
+						if (activePreview?.mediaId === id) clearForm();
+						renderList();
+					}
+				});
+			});
+			listContainer.querySelectorAll(".ala-ov-btn-edit").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					if (id) {
+						alInput.value = String(id);
+						doLookup(id);
+						viewOverrides.scrollTop = 0;
+					}
+				});
+			});
+		}
+		let unmatchedTypeFilter = "all";
+		let unmatchedSearchQuery = "";
+		let orphansTypeFilter = "all";
+		let orphansSearchQuery = "";
+		const unmatchedControls = backdrop.querySelector("#ala-ov-unmatched-controls");
+		const unmatchedSearchInput = backdrop.querySelector("#ala-ov-unmatched-search");
+		backdrop.querySelectorAll("[data-unmatched-type]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-unmatched-type]").forEach((o) => o.classList.toggle("is-active", o === c));
+				unmatchedTypeFilter = c.dataset.unmatchedType || "all";
+				renderUnmatchedList();
+			});
 		});
-		Core.onBodyMutation(() => {
-			if (isComparePage() && !isMutatingDOM) {
-				installBlocker();
-				checkView();
+		let unmatchedSearchTimer = 0;
+		unmatchedSearchInput?.addEventListener("input", () => {
+			clearTimeout(unmatchedSearchTimer);
+			unmatchedSearchTimer = setTimeout(() => {
+				unmatchedSearchQuery = unmatchedSearchInput.value.trim();
+				renderUnmatchedList();
+			}, 150);
+		});
+		function getRawUnmatched() {
+			const configured = getManualOverrides();
+			const unmatched = [];
+			for (const t of ["ANIME", "MANGA"]) {
+				const data = stores[t].ids.data || {};
+				for (const [idStr, rec] of Object.entries(data)) {
+					const id = Number(idStr);
+					if (id > 0 && rec && rec.m === 0 && !configured[String(id)]) unmatched.push({
+						mediaId: id,
+						type: t
+					});
+				}
+			}
+			return unmatched;
+		}
+		function renderUnmatchedList() {
+			const unmatchedBox = backdrop.querySelector("#ala-ov-audit-unmatched");
+			const raw = getRawUnmatched();
+			if (!raw.length) {
+				unmatchedControls.style.display = "none";
+				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries found. All synced titles have MAL IDs or were resolved!</div>`;
+				return;
+			}
+			unmatchedControls.style.display = "flex";
+			const filtered = raw.filter(({ mediaId, type }) => {
+				if (unmatchedTypeFilter !== "all" && type.toLowerCase() !== unmatchedTypeFilter.toLowerCase()) return false;
+				const title = unmatchedMetaCache.get(mediaId)?.title || `Media #${mediaId}`;
+				if (unmatchedSearchQuery && !matchesSearch(title, mediaId, void 0, unmatchedSearchQuery)) return false;
+				return true;
+			});
+			if (!filtered.length) {
+				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries match this filter.</div>`;
+				return;
+			}
+			unmatchedBox.innerHTML = filtered.map(({ mediaId, type }) => {
+				const meta = unmatchedMetaCache.get(mediaId);
+				const title = meta?.title || `Media #${mediaId}`;
+				const cover = meta?.cover;
+				return `
+        <div class="ala-ov-item" data-id="${mediaId}">
+          ${cover ? `<img class="ala-ov-item-cover" src="${cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+          <div class="ala-ov-item-info">
+            <a class="ala-ov-item-title" href="https://anilist.co/${type.toLowerCase()}/${mediaId}" target="_blank" rel="noopener" title="${title}">${title}</a>
+            <div class="ala-ov-item-meta">
+              <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
+              <span>AniList ID: <b>${mediaId}</b></span>
+            </div>
+          </div>
+          <div class="ala-ov-item-actions">
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${mediaId}">Set MAL ID</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${mediaId}" data-type="${type}">Ignore</button>
+          </div>
+        </div>
+      `;
+			}).join("");
+			unmatchedBox.querySelectorAll(".ala-ov-audit-set").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					tabs[0].click();
+					alInput.value = String(id);
+					doLookup(id);
+				});
+			});
+			unmatchedBox.querySelectorAll(".ala-ov-audit-ignore").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					const type = btn.dataset.type || "ANIME";
+					const meta = unmatchedMetaCache.get(id);
+					setOverride(id, {
+						malId: 0,
+						type,
+						title: meta?.title || `Media #${id}`,
+						cover: meta?.cover
+					});
+					renderUnmatchedList();
+					renderList();
+				});
+			});
+		}
+		function renderAudit() {
+			renderUnmatchedList();
+			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
+			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds).then(() => {
+				renderUnmatchedList();
+			});
+			renderOrphansList();
+		}
+		let scannedOrphans = null;
+		const orphansControls = backdrop.querySelector("#ala-ov-orphans-controls");
+		const orphansSearchInput = backdrop.querySelector("#ala-ov-orphans-search");
+		backdrop.querySelectorAll("[data-orphans-type]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-orphans-type]").forEach((o) => o.classList.toggle("is-active", o === c));
+				orphansTypeFilter = c.dataset.orphansType || "all";
+				renderOrphansList();
+			});
+		});
+		let orphansSearchTimer = 0;
+		orphansSearchInput?.addEventListener("input", () => {
+			clearTimeout(orphansSearchTimer);
+			orphansSearchTimer = setTimeout(() => {
+				orphansSearchQuery = orphansSearchInput.value.trim();
+				renderOrphansList();
+			}, 150);
+		});
+		function renderOrphansList() {
+			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
+			if (!orphansBox) return;
+			if (scannedOrphans === null) {
+				orphansControls.style.display = "none";
+				orphansBox.innerHTML = `<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
+				return;
+			}
+			if (!scannedOrphans.length) {
+				orphansControls.style.display = "none";
+				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
+				return;
+			}
+			orphansControls.style.display = "flex";
+			const filtered = scannedOrphans.filter((item) => {
+				if (orphansTypeFilter !== "all" && item.type.toLowerCase() !== orphansTypeFilter.toLowerCase()) return false;
+				if (orphansSearchQuery && !matchesSearch(item.title, item.malId, void 0, orphansSearchQuery)) return false;
+				return true;
+			});
+			if (!filtered.length) {
+				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
+				return;
+			}
+			orphansBox.innerHTML = filtered.map((item) => `
+        <div class="ala-ov-item" data-mal-id="${item.malId}">
+          <div class="ala-ov-item-info">
+            <a class="ala-ov-item-title" href="https://myanimelist.net/${item.type.toLowerCase()}/${item.malId}" target="_blank" rel="noopener" title="${item.title}">${item.title}</a>
+            <div class="ala-ov-item-meta">
+              <span class="ala-ov-badge ${item.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${item.type}</span>
+              <span>MAL ID: <b>${item.malId}</b></span>
+            </div>
+          </div>
+          <div class="ala-ov-item-actions">
+            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${item.malId}" data-type="${item.type}">Delete from MAL</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${item.malId}">Keep on MAL</button>
+          </div>
+        </div>
+      `).join("");
+			orphansBox.querySelectorAll(".ala-ov-btn-del-mal").forEach((btn) => {
+				btn.addEventListener("click", async () => {
+					const id = Number(btn.dataset.malId);
+					const type = btn.dataset.type || "ANIME";
+					if (!id) return;
+					if (!confirm(`Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`)) return;
+					btn.disabled = true;
+					btn.textContent = "Deleting...";
+					try {
+						await malDeleteEntry(type, id);
+						scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
+						renderOrphansList();
+					} catch (err) {
+						btn.disabled = false;
+						btn.textContent = "Delete from MAL";
+						alert(`Failed to delete from MAL: ${err?.message || err}`);
+					}
+				});
+			});
+			orphansBox.querySelectorAll(".ala-ov-btn-keep-mal").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.malId);
+					scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
+					renderOrphansList();
+				});
+			});
+		}
+		const scanOrphansBtn = backdrop.querySelector("#ala-ov-btn-scan-orphans");
+		scanOrphansBtn?.addEventListener("click", async () => {
+			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
+			scanOrphansBtn.disabled = true;
+			scanOrphansBtn.textContent = "Scanning...";
+			orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
+			try {
+				const viewer = await AniList.viewer();
+				if (!viewer) {
+					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
+					return;
+				}
+				const overrides = getManualOverrides();
+				const knownMalIds = new Set();
+				for (const t of ["ANIME", "MANGA"]) try {
+					const alEntries = await alFetchAll(viewer.id, t);
+					for (const e of alEntries) {
+						const ov = overrides[String(e.mediaId)];
+						if (ov) {
+							if (ov.malId > 0) knownMalIds.add(ov.malId);
+						} else {
+							const cached = stores[t].ids.data[e.mediaId]?.m;
+							if (cached && cached > 0) knownMalIds.add(cached);
+							else if (e.idMal > 0) knownMalIds.add(e.idMal);
+						}
+					}
+				} catch (e) {
+					console.warn(`[AL-Additions] Audit scan: failed to fetch AniList ${t}:`, e);
+				}
+				const foundOrphans = [];
+				for (const t of ["ANIME", "MANGA"]) try {
+					const malList = await malFetchList(t);
+					for (const [idStr, data] of Object.entries(malList)) {
+						const malId = Number(idStr);
+						if (malId > 0 && !knownMalIds.has(malId)) foundOrphans.push({
+							malId,
+							type: t,
+							title: data.__malTitle || `MAL #${malId}`
+						});
+					}
+				} catch (e) {
+					console.warn(`[AL-Additions] Audit scan: failed to fetch MAL ${t}:`, e);
+				}
+				scannedOrphans = foundOrphans;
+				renderOrphansList();
+			} catch (err) {
+				orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${err?.message || err}</div>`;
+			} finally {
+				scanOrphansBtn.disabled = false;
+				scanOrphansBtn.textContent = "Scan MAL";
 			}
 		});
+		const jsonTextarea = backdrop.querySelector("#ala-ov-json-textarea");
+		const jsonStatus = backdrop.querySelector("#ala-ov-json-status");
+		const jsonSaveBtn = backdrop.querySelector("#ala-ov-btn-json-save");
+		const jsonMergeBtn = backdrop.querySelector("#ala-ov-btn-json-merge");
+		const jsonCopyBtn = backdrop.querySelector("#ala-ov-btn-json-copy");
+		const jsonResetBtn = backdrop.querySelector("#ala-ov-btn-json-reset");
+		function renderJsonView() {
+			const current = getManualOverrides();
+			jsonTextarea.value = JSON.stringify(current, null, 2);
+			jsonStatus.style.display = "none";
+		}
+		jsonCopyBtn?.addEventListener("click", async () => {
+			try {
+				await navigator.clipboard.writeText(jsonTextarea.value);
+				const prev = jsonCopyBtn.textContent;
+				jsonCopyBtn.textContent = "Copied!";
+				setTimeout(() => {
+					jsonCopyBtn.textContent = prev;
+				}, 1500);
+			} catch (_) {
+				jsonTextarea.select();
+				document.execCommand("copy");
+				const prev = jsonCopyBtn.textContent;
+				jsonCopyBtn.textContent = "Copied!";
+				setTimeout(() => {
+					jsonCopyBtn.textContent = prev;
+				}, 1500);
+			}
+		});
+		jsonResetBtn?.addEventListener("click", renderJsonView);
+		jsonSaveBtn?.addEventListener("click", () => {
+			const res = importOverrides(jsonTextarea.value, "replace");
+			if (!res.success) {
+				jsonStatus.className = "ala-ov-status ala-ov-status--error";
+				jsonStatus.textContent = res.error || "Failed to parse JSON";
+				jsonStatus.style.display = "block";
+				return;
+			}
+			jsonStatus.className = "ala-ov-status ala-ov-status--success";
+			jsonStatus.textContent = `Successfully saved ${res.count ?? 0} overrides!`;
+			jsonStatus.style.display = "block";
+			renderList();
+		});
+		jsonMergeBtn?.addEventListener("click", () => {
+			const res = importOverrides(jsonTextarea.value, "merge");
+			if (!res.success) {
+				jsonStatus.className = "ala-ov-status ala-ov-status--error";
+				jsonStatus.textContent = res.error || "Failed to parse JSON";
+				jsonStatus.style.display = "block";
+				return;
+			}
+			const current = getManualOverrides();
+			jsonStatus.className = "ala-ov-status ala-ov-status--success";
+			jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
+			jsonStatus.style.display = "block";
+			jsonTextarea.value = JSON.stringify(current, null, 2);
+			renderList();
+		});
+		renderList();
+	}
+	defineFeature({
+		id: "nyaa",
+		key: "nyaaEnabled",
+		section: "External Links, Downloads & Mappings",
+		def: false,
+		legacy: [
+			"nyaaEnabled",
+			"malNyaaLinksEnabled",
+			"malNyaaEnabled"
+		],
+		title: "MyAnimeList & Nyaa Links",
+		help: "Show a MyAnimeList link, with Nyaa search available by Ctrl/Cmd-click on desktop or long-press on mobile.",
+		options: [{
+			key: "nyaaProviders",
+			type: "list",
+			def: ["SubsPlease", "ToonsHub"],
+			legacy: ["nyaaProviders", "nyaaSearchGroups"],
+			title: "Nyaa Search Providers",
+			help: "Comma-separated provider names to include in Nyaa searches. Defaults to SubsPlease and ToonsHub."
+		}]
+	}, () => {
+		const ID = "ala-find-on-nyaa";
+		const TITLE_SEL = ".page-content .header .content > h1";
+		const ICON = icon("external", 17);
+		addStyle("ala-nyaa-style", `#${ID},#ala-edit-mal-id{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}#${ID}{margin-left:10px}#ala-edit-mal-id{margin-left:6px;cursor:pointer}#${ID}:hover,#ala-edit-mal-id:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`);
+		const nyaaUrl = (title) => {
+			const q = title.trim().replace(/[^a-zA-Z0-9]+/g, "+").replace(/^\++|\++$/g, "");
+			const frag = Settings.get("nyaaProviders").map(encodeURIComponent).join("&text=");
+			return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
+		};
+		function attach(h1, route) {
+			const EDIT_ID = "ala-edit-mal-id";
+			const a = document.createElement("a");
+			a.id = ID;
+			a.href = "#";
+			a.title = isIgnored(route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
+			a.setAttribute("aria-label", "Open on MAL; long-press to search Nyaa");
+			a.innerHTML = ICON;
+			const titleText = () => [...h1.childNodes].filter((n) => n !== a && n?.id !== EDIT_ID).map((n) => n.textContent).join("").trim();
+			const searchNyaa = () => openTab(nyaaUrl(titleText()));
+			MediaData.get(route.id, route.type);
+			let timer = null;
+			let longPressed = false;
+			let sx = 0;
+			let sy = 0;
+			const cancel = () => {
+				if (timer) clearTimeout(timer);
+				timer = null;
+			};
+			a.addEventListener("touchstart", (e) => {
+				if (e.touches.length !== 1) return;
+				sx = e.touches[0].clientX;
+				sy = e.touches[0].clientY;
+				longPressed = false;
+				cancel();
+				timer = setTimeout(() => {
+					timer = null;
+					longPressed = true;
+					searchNyaa();
+					setTimeout(() => {
+						longPressed = false;
+					}, 800);
+				}, 550);
+			}, { passive: true });
+			a.addEventListener("touchmove", (e) => {
+				if (timer === null || !e.touches.length) return;
+				if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
+			}, { passive: true });
+			a.addEventListener("touchend", cancel, { passive: true });
+			a.addEventListener("touchcancel", cancel, { passive: true });
+			a.addEventListener("contextmenu", (e) => {
+				if (longPressed) e.preventDefault();
+			});
+			a.addEventListener("click", async (e) => {
+				e.preventDefault();
+				if (longPressed) {
+					longPressed = false;
+					e.stopPropagation();
+					return;
+				}
+				const w = window.open("about:blank", "_blank");
+				const title = titleText();
+				const nyaa = nyaaUrl(title);
+				let target = nyaa;
+				if (!e.ctrlKey && !e.metaKey) {
+					if (isIgnored(route.id)) target = nyaa;
+					else {
+						const media = await MediaData.get(route.id, route.type);
+						const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
+						if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
+						else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
+					}
+				}
+				if (w) {
+					w.opener = null;
+					w.location.href = target;
+				} else openTab(target);
+			});
+			h1.appendChild(a);
+			document.getElementById(EDIT_ID)?.remove();
+			const editBtn = document.createElement("a");
+			editBtn.id = EDIT_ID;
+			editBtn.href = "#";
+			editBtn.title = "Set or edit MyAnimeList mapping";
+			editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
+			editBtn.innerHTML = icon("edit", 16);
+			editBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				openQuickOverrideModal(route.id, route.type);
+			});
+			h1.appendChild(editBtn);
+		}
+		let token = 0;
+		let placedKey = null;
+		let placing = false;
+		async function place() {
+			const route = mediaRoute();
+			const key = route && `${route.type}:${route.id}`;
+			if (key && key === placedKey && document.getElementById(ID)) return;
+			document.getElementById(ID)?.remove();
+			document.getElementById("ala-edit-mal-id")?.remove();
+			placedKey = null;
+			if (!route) return;
+			const mine = ++token;
+			placing = true;
+			try {
+				const h1 = await Core.waitForSelector(TITLE_SEL, 8e3);
+				if (h1 && mine === token && mediaRoute()?.id === route.id && !document.getElementById(ID)) {
+					attach(h1, route);
+					placedKey = key;
+				}
+			} finally {
+				if (mine === token) placing = false;
+			}
+		}
+		const repair = debounce(() => {
+			if (placedKey && !placing && !document.getElementById(ID)) place();
+		}, 400);
+		place();
+		Core.onNavigate(place);
+		Core.onBodyMutation(repair);
 	});
+	defineFeature({
+		id: "removeTitle",
+		key: "linkShortenerEnabled",
+		section: "AniList Enhancements",
+		def: false,
+		legacy: [
+			"linkShortenerEnabled",
+			"shortAniListUrlsEnabled",
+			"shortAniListUrls"
+		],
+		title: "Short AniList URLs",
+		help: "Remove the title slug from AniList anime, manga, staff, and character URLs."
+	}, () => {
+		const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
+		const strip = (s) => s.replace(/^((?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/)[^/?#]+\/?(?=[?#]|$)/, "$1");
+		function fixLocation() {
+			if (!/anilist\.co\/(manga|anime|staff|character)\//.test(location.href) || !/\/\d{1,10}\/./.test(location.href)) return;
+			const cur = location.pathname + location.search + location.hash;
+			const next = strip(cur.replace(/^https:\/\/anilist\.co/, ""));
+			if (cur !== next) Core.silently(() => history.replaceState(history.state, "", next));
+		}
+		function fixLinks(nodes) {
+			for (const node of Array.from(nodes)) {
+				if (node.nodeType !== 1) continue;
+				const el = node;
+				const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
+				for (const a of links) {
+					const href = a.getAttribute("href");
+					if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
+				}
+			}
+		}
+		fixLocation();
+		Core.onNavigate(fixLocation);
+		Core.onBodyMutation((muts) => {
+			for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
+		});
+		Core.ready(() => fixLinks([document.body]));
+	});
+	var MODAL_CSS = `
+  #ala-pwd-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 12, 20, 0.75);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 100005;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  .ala-pwd-sheet {
+    width: 100%;
+    max-width: 420px;
+    background: rgb(var(--color-foreground, 31, 38, 49));
+    color: rgb(var(--color-text, 240, 243, 246));
+    border-radius: 10px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: alaModalPop 0.15s ease-out;
+  }
+  @keyframes alaModalPop {
+    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .ala-pwd-desc {
+    margin: 0 0 16px;
+    font-size: 13px;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    line-height: 1.45;
+  }
+  .ala-pwd-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ala-pwd-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+  }
+  .ala-pwd-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+  }
+  .ala-pwd-field {
+    width: 100%;
+    height: 40px;
+    padding: 0 38px 0 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
+    background: rgb(var(--color-background, 15, 23, 42));
+    color: rgb(var(--color-text, 240, 243, 246));
+    font: inherit;
+    font-size: 14px;
+    box-sizing: border-box;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .ala-pwd-field:focus {
+    outline: none;
+    border-color: rgb(var(--color-blue, 61, 180, 242));
+    box-shadow: 0 0 0 2px rgba(var(--color-blue, 61, 180, 242), 0.25);
+  }
+  .ala-pwd-toggle {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+  .ala-pwd-toggle:hover {
+    color: rgb(var(--color-text, 240, 243, 246));
+    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.12);
+  }
+  .ala-pwd-error {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: rgba(var(--color-red, 224, 85, 85), 0.12);
+    border: 1px solid rgba(var(--color-red, 224, 85, 85), 0.3);
+    color: rgb(var(--color-red, 224, 85, 85));
+    font-size: 12px;
+    font-weight: 500;
+  }
+`;
+	var EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+	var EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+	function promptPasswordModal(options) {
+		return new Promise((resolve) => {
+			addStyle("ala-pwd-modal-style", MODAL_CSS);
+			const existing = document.getElementById("ala-pwd-backdrop");
+			if (existing) existing.remove();
+			const backdrop = document.createElement("div");
+			backdrop.id = "ala-pwd-backdrop";
+			backdrop.innerHTML = `
+      <div class="ala-sheet ala-pwd-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-pwd-title">
+        <header class="ala-sheet-head">
+          <h2 id="ala-pwd-title">${esc(options.title)}</h2>
+          <button class="ala-icon-btn ala-pwd-btn-close" type="button" aria-label="Close">✕</button>
+        </header>
+        <div class="ala-sheet-body">
+          ${options.description ? `<p class="ala-pwd-desc">${esc(options.description)}</p>` : ""}
+          <div class="ala-pwd-group">
+            <label for="ala-pwd-input-main" class="ala-pwd-label">Password</label>
+            <div class="ala-pwd-input-wrap">
+              <input
+                id="ala-pwd-input-main"
+                class="ala-pwd-field"
+                type="password"
+                placeholder="${esc(options.placeholder || "Enter password")}"
+                autocomplete="${options.confirm ? "new-password" : "current-password"}"
+              />
+              <button type="button" class="ala-pwd-toggle" title="Show / Hide password" aria-label="Toggle password visibility">
+                ${EYE_OPEN}
+              </button>
+            </div>
+          </div>
+          ${options.confirm ? `
+            <div class="ala-pwd-group" style="margin-top:12px">
+              <label for="ala-pwd-input-confirm" class="ala-pwd-label">Confirm Password</label>
+              <div class="ala-pwd-input-wrap">
+                <input
+                  id="ala-pwd-input-confirm"
+                  class="ala-pwd-field"
+                  type="password"
+                  placeholder="Re-enter password"
+                  autocomplete="new-password"
+                />
+              </div>
+            </div>
+          ` : ""}
+          <div class="ala-pwd-error" id="ala-pwd-err" style="display:none"></div>
+        </div>
+        <footer class="ala-sheet-foot">
+          <button class="ala-btn ala-btn--primary" id="ala-pwd-btn-submit" type="button">
+            ${esc(options.submitText || "Submit")}
+          </button>
+          <button class="ala-btn" id="ala-pwd-btn-cancel" type="button">
+            ${esc(options.cancelText || "Cancel")}
+          </button>
+        </footer>
+      </div>
+    `;
+			document.body.appendChild(backdrop);
+			const input = backdrop.querySelector("#ala-pwd-input-main");
+			const confirmInput = backdrop.querySelector("#ala-pwd-input-confirm");
+			const toggleBtn = backdrop.querySelector(".ala-pwd-toggle");
+			const errBox = backdrop.querySelector("#ala-pwd-err");
+			const submitBtn = backdrop.querySelector("#ala-pwd-btn-submit");
+			const cancelBtn = backdrop.querySelector("#ala-pwd-btn-cancel");
+			const closeBtn = backdrop.querySelector(".ala-pwd-btn-close");
+			let isVisible = false;
+			const cleanup = () => {
+				document.removeEventListener("keydown", onKeyDown);
+				backdrop.remove();
+			};
+			const cancel = () => {
+				cleanup();
+				resolve(null);
+			};
+			const submit = () => {
+				const val = input.value;
+				if (!options.allowEmpty && !val.trim()) {
+					errBox.textContent = "Password cannot be empty.";
+					errBox.style.display = "block";
+					input.focus();
+					return;
+				}
+				if (options.confirm && confirmInput) {
+					if (val && val !== confirmInput.value) {
+						errBox.textContent = "Passwords do not match.";
+						errBox.style.display = "block";
+						confirmInput.focus();
+						return;
+					}
+				}
+				cleanup();
+				resolve(val);
+			};
+			toggleBtn.addEventListener("click", () => {
+				isVisible = !isVisible;
+				const type = isVisible ? "text" : "password";
+				input.type = type;
+				if (confirmInput) confirmInput.type = type;
+				toggleBtn.innerHTML = isVisible ? EYE_OFF : EYE_OPEN;
+				toggleBtn.title = isVisible ? "Hide password" : "Show password";
+			});
+			submitBtn.addEventListener("click", submit);
+			cancelBtn.addEventListener("click", cancel);
+			closeBtn.addEventListener("click", cancel);
+			backdrop.addEventListener("click", (e) => {
+				if (e.target === backdrop) cancel();
+			});
+			const onKeyDown = (e) => {
+				if (e.key === "Escape") {
+					e.preventDefault();
+					cancel();
+				} else if (e.key === "Enter") {
+					e.preventDefault();
+					submit();
+				}
+			};
+			document.addEventListener("keydown", onKeyDown);
+			setTimeout(() => input.focus(), 50);
+		});
+	}
+	var BACKUP_FILENAME = "al-additions.settings";
+	var MAGIC_PLAIN = new Uint8Array([
+		65,
+		76,
+		65,
+		83
+	]);
+	var MAGIC_ENCRYPTED = new Uint8Array([
+		65,
+		76,
+		65,
+		69
+	]);
+	var SENSITIVE_KEYS = [
+		"mal_code_verifier",
+		"mal_token",
+		"mal_refresh_token",
+		"mal_expires_at"
+	];
+	var SESSION_CACHE_KEYS = [
+		"al_token",
+		"al_username",
+		"al_user_id",
+		"al_score_format"
+	];
+	var PBKDF2_ITERATIONS = 1e5;
+	function matchesMagic(bytes, magic) {
+		if (bytes.length < magic.length) return false;
+		for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic[i]) return false;
+		return true;
+	}
+	function base64ToUint8(b64) {
+		const binary = atob(b64.replace(/\s+/g, ""));
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+		return bytes;
+	}
+	async function deriveAesKey(password, salt) {
+		const enc = new TextEncoder();
+		const baseKey = await window.crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+		return window.crypto.subtle.deriveKey({
+			name: "PBKDF2",
+			salt,
+			iterations: PBKDF2_ITERATIONS,
+			hash: "SHA-256"
+		}, baseKey, {
+			name: "AES-GCM",
+			length: 256
+		}, false, ["encrypt", "decrypt"]);
+	}
+	async function decryptData(cryptoData, password) {
+		const salt = base64ToUint8(cryptoData.salt);
+		const iv = base64ToUint8(cryptoData.iv);
+		const ciphertext = base64ToUint8(cryptoData.ciphertext);
+		const key = await deriveAesKey(password, salt);
+		const decryptedBuffer = await window.crypto.subtle.decrypt({
+			name: "AES-GCM",
+			iv
+		}, key, ciphertext);
+		return new TextDecoder().decode(decryptedBuffer);
+	}
+	async function compressDeflateRaw(data) {
+		const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+		const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+		const buffer = await new Response(stream).arrayBuffer();
+		return new Uint8Array(buffer);
+	}
+	async function decompressDeflateRaw(data) {
+		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+		return await new Response(stream).text();
+	}
+	async function decompressGzip(data) {
+		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"));
+		return await new Response(stream).text();
+	}
+	async function createBackup(includeSecrets, password, overrides) {
+		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
+		const data = {};
+		for (const r of Object.values(ROWS)) {
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(PREFIX + r.key, r.def);
+			data[r.key] = rawVal;
+		}
+		if (includeSecrets) for (const key of SENSITIVE_KEYS) {
+			const val = store$1.get(key, void 0);
+			if (val !== void 0 && val !== null) data[key] = val;
+		}
+		const plainPayload = {
+			version: 1,
+			exportedAt: Date.now(),
+			data
+		};
+		const jsonBytes = new TextEncoder().encode(JSON.stringify(plainPayload));
+		const compressedBytes = await compressDeflateRaw(jsonBytes);
+		if (password && password.trim().length > 0) {
+			const salt = window.crypto.getRandomValues(new Uint8Array(16));
+			const iv = window.crypto.getRandomValues(new Uint8Array(12));
+			const key = await deriveAesKey(password, salt);
+			const ciphertextBuffer = await window.crypto.subtle.encrypt({
+				name: "AES-GCM",
+				iv
+			}, key, compressedBytes);
+			const ciphertext = new Uint8Array(ciphertextBuffer);
+			const out = new Uint8Array(33 + ciphertext.length);
+			out.set(MAGIC_ENCRYPTED, 0);
+			out[4] = 1;
+			out.set(salt, 5);
+			out.set(iv, 21);
+			out.set(ciphertext, 33);
+			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			return out;
+		} else {
+			const out = new Uint8Array(5 + compressedBytes.length);
+			out.set(MAGIC_PLAIN, 0);
+			out[4] = 1;
+			out.set(compressedBytes, 5);
+			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			return out;
+		}
+	}
+	function createRawBackup(overrides) {
+		const data = {};
+		for (const r of Object.values(ROWS)) {
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(PREFIX + r.key, r.def);
+			data[r.key] = rawVal;
+		}
+		for (const key of SENSITIVE_KEYS) {
+			const val = store$1.get(key, void 0);
+			if (val !== void 0 && val !== null) data[key] = val;
+		}
+		return JSON.stringify({
+			version: 1,
+			exportedAt: Date.now(),
+			data
+		}, null, 2);
+	}
+	function downloadBackupFile(bytes, filename = BACKUP_FILENAME) {
+		const blob = new Blob([bytes], { type: "application/octet-stream" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 1e3);
+	}
+	function applyVersion1Settings(data) {
+		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
+		let applied = 0;
+		let secretsApplied = 0;
+		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
+		for (const [key, rawValue] of Object.entries(data)) {
+			if (SESSION_CACHE_KEYS.includes(key)) continue;
+			if (SENSITIVE_KEYS.includes(key)) {
+				if (rawValue !== void 0 && rawValue !== null) {
+					store$1.set(key, rawValue);
+					secretsApplied++;
+				}
+				continue;
+			}
+			const settingKey = key.startsWith("ala_setting_") ? key.slice(PREFIX.length) : key;
+			const r = ROWS[settingKey];
+			if (r) {
+				const normalized = TYPES$1[r.type].normalize(rawValue, r);
+				store$1.set(PREFIX + settingKey, normalized);
+				applied++;
+			}
+		}
+		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
+		return {
+			applied,
+			secretsApplied
+		};
+	}
+	async function handleLegacyJsonBackup(jsonText, promptPassword) {
+		let payload;
+		try {
+			payload = JSON.parse(jsonText);
+		} catch {
+			throw new Error("Invalid backup file: corrupted JSON content.");
+		}
+		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
+		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
+		if (payload.encrypted === true) {
+			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
+			const password = await promptPassword("Enter password to decrypt your settings backup:");
+			if (password === null) return {
+				applied: 0,
+				secretsApplied: 0,
+				cancelled: true
+			};
+			if (!password) throw new Error("Password cannot be empty.");
+			let decryptedText;
+			try {
+				decryptedText = await decryptData(payload.crypto, password);
+			} catch {
+				throw new Error("Incorrect password or corrupted backup file.");
+			}
+			let data;
+			try {
+				data = JSON.parse(decryptedText);
+			} catch {
+				throw new Error("Decrypted content is not valid JSON.");
+			}
+			return applyVersion1Settings(data);
+		}
+		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
+	}
+	async function importBackup(fileInput, customPromptPassword) {
+		let bytes;
+		if (typeof fileInput === "string") bytes = new TextEncoder().encode(fileInput);
+		else bytes = fileInput;
+		if (!bytes || bytes.length === 0) throw new Error("Backup file is empty.");
+		const promptPassword = customPromptPassword || ((hint) => promptPasswordModal({
+			title: "Decrypt Settings Backup",
+			description: hint || "Enter your password to decrypt your settings backup:",
+			submitText: "Decrypt & Restore",
+			allowEmpty: false,
+			confirm: false,
+			placeholder: "Enter backup password"
+		}));
+		if (matchesMagic(bytes, MAGIC_ENCRYPTED)) {
+			if (bytes.length < 49) throw new Error("Invalid encrypted backup file: file is truncated.");
+			const version = bytes[4];
+			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
+			const password = await promptPassword("Enter password to decrypt your settings backup:");
+			if (password === null) return {
+				applied: 0,
+				secretsApplied: 0,
+				cancelled: true
+			};
+			if (!password) throw new Error("Password cannot be empty.");
+			const salt = bytes.subarray(5, 21);
+			const iv = bytes.subarray(21, 33);
+			const ciphertext = bytes.subarray(33);
+			const key = await deriveAesKey(password, salt);
+			let decryptedBuffer;
+			try {
+				decryptedBuffer = await window.crypto.subtle.decrypt({
+					name: "AES-GCM",
+					iv
+				}, key, ciphertext);
+			} catch {
+				throw new Error("Incorrect password or corrupted backup file.");
+			}
+			let jsonText;
+			try {
+				jsonText = await decompressDeflateRaw(new Uint8Array(decryptedBuffer));
+			} catch {
+				throw new Error("Corrupted decrypted data: failed to decompress.");
+			}
+			let payload;
+			try {
+				payload = JSON.parse(jsonText);
+			} catch {
+				throw new Error("Decrypted content is not valid JSON.");
+			}
+			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
+			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+		}
+		if (matchesMagic(bytes, MAGIC_PLAIN)) {
+			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
+			const version = bytes[4];
+			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
+			let jsonText;
+			try {
+				jsonText = await decompressDeflateRaw(bytes.subarray(5));
+			} catch {
+				throw new Error("Corrupted backup file: failed to decompress.");
+			}
+			let payload;
+			try {
+				payload = JSON.parse(jsonText);
+			} catch {
+				throw new Error("Corrupted backup file: invalid JSON content.");
+			}
+			logDebug("[CORE]", "Imported plain binary backup successfully.");
+			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+		}
+		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
+			let jsonText;
+			try {
+				jsonText = await decompressGzip(bytes);
+			} catch {
+				throw new Error("Corrupted or invalid GZIP backup file.");
+			}
+			logDebug("[CORE]", "Imported legacy GZIP backup.");
+			return handleLegacyJsonBackup(jsonText, promptPassword);
+		}
+		let jsonText;
+		try {
+			jsonText = new TextDecoder().decode(bytes);
+		} catch {
+			throw new Error("Failed to decode backup file as UTF-8 text.");
+		}
+		logDebug("[CORE]", "Imported legacy JSON/text backup.");
+		return handleLegacyJsonBackup(jsonText, promptPassword);
+	}
+	async function readFileAsBytes(file) {
+		if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(new Uint8Array(reader.result));
+			reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+			reader.readAsArrayBuffer(file);
+		});
+	}
 	addStyle("almal-style", `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
   #almal-panel *{box-sizing:border-box}
@@ -11289,57 +10025,1321 @@
 		help: "Manage custom MyAnimeList ID overrides, entries ignored from sync, and review database discrepancies."
 	}, () => {});
 	defineFeature({
-		id: "devMode",
-		key: "devModeEnabled",
-		section: "Advanced",
+		id: "tagPercent",
+		key: "tagFilterEnabled",
+		section: "AniList Enhancements",
+		early: true,
 		def: false,
-		title: "Developer Mode",
-		help: "Enable developer diagnostics and verbose module logging in the browser console.",
+		legacy: ["tagFilterEnabled", "browseTagRankFilterEnabled"],
+		title: "Browse Tag Rank Filter",
+		help: "Automatically apply a minimum tag-rank percentage when you search with a tag or genre.",
+		options: [{
+			key: "tagPercentage",
+			type: "number",
+			def: 50,
+			min: 1,
+			max: 100,
+			legacy: ["tagPercentage", "minimumTagRankPercentage"],
+			title: "Minimum Tag Rank",
+			help: "The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles."
+		}]
+	}, () => {
+		const PARAM = "minimumTagRank";
+		const VALUE = String(Settings.get("tagPercentage"));
+		const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
+		const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
+		let fixing = false;
+		function apply(initial) {
+			if (fixing || !isTarget()) return;
+			const u = new URL(location.href);
+			if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
+			u.searchParams.set(PARAM, VALUE);
+			fixing = true;
+			try {
+				if (initial) location.replace(u.toString());
+				else {
+					history.replaceState(history.state, document.title, u.toString());
+					window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+				}
+			} finally {
+				fixing = false;
+			}
+		}
+		apply(true);
+		Core.onNavigate(() => apply(false));
+	});
+	var DEFAULT_TIERS = [
+		{
+			min: 95,
+			max: 100,
+			label: "S+",
+			color: "#FFD700",
+			textColor: "#000000"
+		},
+		{
+			min: 85,
+			max: 94.9,
+			label: "S",
+			color: "#ff7f00",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 75,
+			max: 84.9,
+			label: "A",
+			color: "#aa00ff",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 65,
+			max: 74.9,
+			label: "B",
+			color: "#007fff",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 55,
+			max: 64.9,
+			label: "C",
+			color: "#00aa00",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 41,
+			max: 54.9,
+			label: "D",
+			color: "#aaaaaa",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 0,
+			max: 40.9,
+			label: "F",
+			color: "#666666",
+			textColor: "#FFFFFF"
+		}
+	];
+	function getTier(rating, tiers) {
+		if (rating <= 0 || !Number.isFinite(rating)) return null;
+		for (const tier of tiers) if (rating >= tier.min && rating <= tier.max) return tier;
+		for (const tier of tiers) if (rating >= tier.min - .05 && rating <= tier.max + .05) return tier;
+		return null;
+	}
+	var NAMED_COLORS = new Set([
+		"black",
+		"white",
+		"gray",
+		"grey",
+		"silver",
+		"red",
+		"maroon",
+		"yellow",
+		"olive",
+		"lime",
+		"green",
+		"aqua",
+		"cyan",
+		"teal",
+		"blue",
+		"navy",
+		"fuchsia",
+		"magenta",
+		"purple",
+		"orange",
+		"gold",
+		"pink",
+		"brown",
+		"transparent"
+	]);
+	function isValidColor(color) {
+		if (typeof color !== "string") return false;
+		const s = color.trim();
+		if (!s) return false;
+		if (/^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return true;
+		if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
+		if (NAMED_COLORS.has(s.toLowerCase())) return true;
+		if (typeof CSS !== "undefined" && typeof CSS.supports === "function") try {
+			if (CSS.supports("color", s)) return true;
+		} catch (_) {}
+		if (typeof Option !== "undefined") try {
+			const opt = new Option();
+			opt.style.color = s;
+			return !!opt.style.color;
+		} catch (_) {}
+		return false;
+	}
+	function normalizeHexColor(color) {
+		const s = (color || "").trim();
+		const m3 = s.match(/^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/);
+		if (m3) return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`.toLowerCase();
+		if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+		return s;
+	}
+	function validateTiers(input) {
+		if (!Array.isArray(input)) return {
+			valid: false,
+			error: "Tiers configuration must be an array."
+		};
+		if (input.length === 0) return {
+			valid: false,
+			error: "At least one tier must be defined."
+		};
+		const validated = [];
+		for (let i = 0; i < input.length; i++) {
+			const item = input[i];
+			const idx = i + 1;
+			if (!item || typeof item !== "object") return {
+				valid: false,
+				error: `Tier #${idx} is invalid (must be an object).`
+			};
+			const label = typeof item.label === "string" ? item.label.trim() : "";
+			if (!label) return {
+				valid: false,
+				error: `Tier #${idx} must have a non-empty label.`
+			};
+			if (label.length > 20) return {
+				valid: false,
+				error: `Tier "${label}" label is too long (maximum 20 characters).`
+			};
+			const min = typeof item.min === "number" ? item.min : parseFloat(item.min);
+			if (!Number.isFinite(min)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid min score (must be a number).`
+			};
+			if (min < 0 || min > 100) return {
+				valid: false,
+				error: `Tier "${label}" min score (${min}) must be between 0 and 100.`
+			};
+			const max = typeof item.max === "number" ? item.max : parseFloat(item.max);
+			if (!Number.isFinite(max)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid max score (must be a number).`
+			};
+			if (max < 0 || max > 100) return {
+				valid: false,
+				error: `Tier "${label}" max score (${max}) must be between 0 and 100.`
+			};
+			if (min > max) return {
+				valid: false,
+				error: `Tier "${label}" min score (${min}) cannot be greater than max score (${max}).`
+			};
+			const color = typeof item.color === "string" ? item.color.trim() : "";
+			if (!isValidColor(color)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid badge color: "${item.color}". Must be a valid hex or CSS color.`
+			};
+			const textColor = typeof item.textColor === "string" ? item.textColor.trim() : "";
+			if (!isValidColor(textColor)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid text color: "${item.textColor}". Must be a valid hex or CSS color.`
+			};
+			validated.push({
+				label,
+				min: Math.round(min * 100) / 100,
+				max: Math.round(max * 100) / 100,
+				color: normalizeHexColor(color),
+				textColor: normalizeHexColor(textColor)
+			});
+		}
+		return {
+			valid: true,
+			tiers: validated
+		};
+	}
+	function getValidTiers() {
+		const check = validateTiers(Settings.get("tierLabels"));
+		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
+	}
+	defineFeature({
+		id: "tierLabels",
+		key: "tierLabelsEnabled",
+		section: "AniList Enhancements",
+		def: false,
+		legacy: ["tierLabelsEnabled"],
+		title: "AniList Tier Labels",
+		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
 		options: [
 			{
-				key: "debugFastLoad",
+				key: "tierLabelsColorScore",
 				type: "toggle",
-				def: false,
-				title: "Fast Load Debug",
-				help: "Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity."
+				def: true,
+				title: "Color score value",
+				help: "Color the score number text to match its tier badge."
 			},
 			{
-				key: "debugSync",
+				key: "tierLabelsAverageScore",
 				type: "toggle",
 				def: false,
-				title: "Sync Debug",
-				help: "Log MAL synchronization steps, queue processing, rate limits, and deletions."
+				title: "Show on Weighted Score",
+				help: "Display tier badge next to the Weighted Score on media pages."
 			},
 			{
-				key: "debugCompareView",
-				type: "toggle",
-				def: false,
-				title: "Compare View Debug",
-				help: "Log list comparison data loading, score diffs, sorting, and filtering passes."
-			},
-			{
-				key: "debugMediaInfo",
-				type: "toggle",
-				def: false,
-				title: "Media Info Debug",
-				help: "Log media info sidebar updates, progress steppers, and save requests."
-			},
-			{
-				key: "debugTierLabels",
-				type: "toggle",
-				def: false,
-				title: "Tier Labels Debug",
-				help: "Log scoring system detection, tier matching, and badge rendering."
-			},
-			{
-				key: "debugGeneral",
-				type: "toggle",
-				def: false,
-				title: "Core & Observer Debug",
-				help: "Log DOM observer mutations, route changes, and general script lifecycle events."
+				key: "tierLabels",
+				type: "json",
+				def: DEFAULT_TIERS,
+				title: "Tier Ranges & Colors",
+				help: "Customize score ranges, badge labels, and colors.",
+				validate: validateTiers
 			}
 		]
-	}, () => {});
+	}, () => {
+		try {
+			const legacy = localStorage.getItem("anilistTierLabelsSettings");
+			if (legacy) {
+				const parsed = JSON.parse(legacy);
+				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
+					const check = validateTiers(parsed.tiers);
+					if (check.valid && check.tiers) store$1.set(PREFIX + "tierLabels", check.tiers);
+				}
+				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
+			}
+		} catch (_) {}
+		addStyle("ala-tier-labels-css", `
+      .ala-tier-badge {
+        display: inline-block;
+        font-weight: 700;
+        border-radius: 4px;
+        vertical-align: middle;
+        white-space: nowrap;
+        line-height: 1.2;
+        box-sizing: border-box;
+      }
+      .ala-tier-badge--list {
+        font-size: 11px;
+        padding: 2px 5px;
+        margin-left: 5px;
+      }
+      .ala-tier-badge--block {
+        font-size: 10px;
+        padding: 1px 4px;
+        margin-left: 4px;
+      }
+      .ala-tier-container {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .ala-tier-container--block {
+        background-color: rgba(0, 0, 0, 0.55);
+        padding: 2px 6px;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      `);
+		function createBadge(tier, isBlockView = false) {
+			const badge = document.createElement("span");
+			badge.className = `ala-tier-badge ${isBlockView ? "ala-tier-badge--block" : "ala-tier-badge--list"}`;
+			badge.textContent = tier.label;
+			badge.style.backgroundColor = tier.color;
+			badge.style.color = tier.textColor;
+			return badge;
+		}
+		function getScoreSystem() {
+			const container = document.querySelector(".content.container, .medialist");
+			if (container) {
+				if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
+				if (container.querySelector(".medialist.table.POINT_10_DECIMAL, .medialist.POINT_10_DECIMAL")) return "POINT_10_DECIMAL";
+				if (container.querySelector(".medialist.table.POINT_10, .medialist.POINT_10")) return "POINT_10";
+				if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
+				if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
+			}
+			const viewerFmt = store$1.get("al_score_format", null);
+			if (viewerFmt) return viewerFmt;
+			return "UNKNOWN";
+		}
+		function getCompareColumnFormat(el) {
+			const compareRoot = el.closest(".compare");
+			if (!compareRoot) return "UNKNOWN";
+			const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
+			const sideKey = isAuthUser ? "auth" : "target";
+			if (!compareRoot._colFormats) compareRoot._colFormats = {};
+			if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
+			if (isAuthUser) {
+				const viewerFmt = store$1.get("al_score_format", null);
+				if (viewerFmt) {
+					compareRoot._colFormats[sideKey] = viewerFmt;
+					return viewerFmt;
+				}
+			}
+			const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
+			const cells = compareRoot.querySelectorAll(colSelector);
+			let maxScore = 0;
+			let hasDecimal = false;
+			let hasStarIcon = false;
+			for (const cell of cells) {
+				if (cell.querySelector("svg, .icon")) hasStarIcon = true;
+				const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
+				const num = parseFloat(s);
+				if (!isNaN(num) && num > 0) {
+					if (num > maxScore) maxScore = num;
+					if (s.includes(".")) hasDecimal = true;
+				}
+			}
+			let detected = "UNKNOWN";
+			if (maxScore > 10) detected = "POINT_100";
+			else if (hasDecimal) detected = "POINT_10_DECIMAL";
+			else if (hasStarIcon) detected = "POINT_5";
+			else if (maxScore > 5) detected = "POINT_10";
+			else if (maxScore > 0) detected = "POINT_10";
+			compareRoot._colFormats[sideKey] = detected;
+			logDebug("[TIER]", `Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
+				maxScore,
+				hasDecimal,
+				hasStarIcon
+			});
+			return detected;
+		}
+		function normalizeScore(score, scoreSystem, isPercentage = false) {
+			if (isNaN(score) || score <= 0) return null;
+			if (isPercentage) return score;
+			switch (scoreSystem) {
+				case "POINT_100": return score;
+				case "POINT_10_DECIMAL":
+				case "POINT_10": return score * 10;
+				case "POINT_5": return score * 20;
+				case "POINT_3": return score === 3 ? 100 : score === 2 ? 60 : 20;
+				default: return score > 10 ? score : score * 10;
+			}
+		}
+		function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
+			if (el.hasAttribute("data-ala-probe")) return;
+			if (el.dataset.tierModified) {
+				const attrNow = el.getAttribute("score");
+				const changed = attrNow !== null && attrNow !== el.dataset.tierSource;
+				if (el.querySelector(".ala-tier-container") && !changed) return;
+				delete el.dataset.tierModified;
+			}
+			const attr = el.getAttribute("score");
+			const rawText = (attr || el.textContent || "").replace("%", "").trim();
+			if (!rawText || rawText === "-" || rawText === "0") return;
+			const num = parseFloat(rawText);
+			if (isNaN(num) || num <= 0) return;
+			const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
+			if (normalizedRating === null) return;
+			const tier = getTier(normalizedRating, tiers);
+			if (!tier) return;
+			logDebug("[TIER]", "Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
+			el.dataset.tierModified = "true";
+			el.dataset.tierSource = attr ?? "";
+			const container = document.createElement("div");
+			container.className = `ala-tier-container ${isBlockView ? "ala-tier-container--block" : ""}`;
+			const scoreSpan = document.createElement("span");
+			scoreSpan.className = "ala-tier-score-text";
+			if (colorScore) scoreSpan.style.color = tier.color;
+			const icon = el.querySelector("svg, .icon");
+			if (icon) {
+				scoreSpan.appendChild(icon.cloneNode(true));
+				scoreSpan.appendChild(document.createTextNode(" " + rawText));
+			} else scoreSpan.textContent = isPercentage ? `${rawText}%` : rawText;
+			container.appendChild(scoreSpan);
+			container.appendChild(createBadge(tier, isBlockView));
+			el.textContent = "";
+			el.appendChild(container);
+		}
+		function processTop100Elements(tiers, colorScore) {
+			document.querySelectorAll(".row.score").forEach((row) => {
+				const percentageEl = row.querySelector(".percentage");
+				if (!percentageEl || percentageEl.classList.contains("popularity")) return;
+				if (percentageEl.dataset.tierModified) {
+					if (percentageEl.querySelector(".ala-tier-container")) return;
+					delete percentageEl.dataset.tierModified;
+				}
+				const textNode = Array.from(percentageEl.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim() !== "");
+				if (!textNode) return;
+				const ratingText = (textNode.textContent || "").trim().replace("%", "");
+				const numericRating = parseFloat(ratingText);
+				if (isNaN(numericRating) || numericRating <= 0) return;
+				const tier = getTier(numericRating, tiers);
+				if (!tier) return;
+				percentageEl.dataset.tierModified = "true";
+				textNode.remove();
+				const ratingWrapper = document.createElement("div");
+				ratingWrapper.className = "ala-tier-container";
+				ratingWrapper.style.display = "inline-flex";
+				ratingWrapper.style.alignItems = "center";
+				ratingWrapper.style.gap = "6px";
+				const textSpan = document.createElement("span");
+				textSpan.className = "ala-tier-score-text";
+				textSpan.textContent = numericRating + "%";
+				if (colorScore) textSpan.style.color = tier.color;
+				ratingWrapper.appendChild(textSpan);
+				ratingWrapper.appendChild(createBadge(tier));
+				const popularityEl = percentageEl.querySelector(".sub-row.popularity");
+				if (popularityEl) percentageEl.insertBefore(ratingWrapper, popularityEl);
+				else percentageEl.appendChild(ratingWrapper);
+			});
+		}
+		function applyTierLabels() {
+			const tiers = getValidTiers();
+			const colorScore = Settings.get("tierLabelsColorScore");
+			const showAverage = Settings.get("tierLabelsAverageScore");
+			document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
+				processScoreElement(el, tiers, colorScore, false, false);
+			});
+			document.querySelectorAll(".entry-card .score").forEach((el) => {
+				processScoreElement(el, tiers, colorScore, false, true);
+			});
+			if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
+				const label = dataSet.querySelector(".type");
+				const value = dataSet.querySelector(".value");
+				if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
+			});
+			processTop100Elements(tiers, colorScore);
+		}
+		const HINT_KEY = "ala_standalone_seen_tierLabels";
+		let paused = !!store$1.get(HINT_KEY, false);
+		const runScan = () => {
+			if (!paused) applyTierLabels();
+		};
+		Core.ready(() => {
+			runScan();
+			Core.onNavigate(() => {
+				document.querySelectorAll(".compare").forEach((c) => {
+					delete c._colFormats;
+				});
+				runScan();
+			});
+			let scanQueued = false;
+			Core.onBodyMutation(() => {
+				if (scanQueued) return;
+				scanQueued = true;
+				setTimeout(() => {
+					scanQueued = false;
+					runScan();
+				}, 100);
+			});
+			detectStandalone("tierLabels").then((found) => {
+				store$1.set(HINT_KEY, found);
+				const wasPaused = paused;
+				paused = found;
+				if (found && !wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
+				if (!found && wasPaused) runScan();
+			});
+		});
+	});
+	var CREDITS = [
+		{
+			name: "Daiya",
+			url: "https://github.com/Daiya404",
+			note: "Combining, fixing and maintaining this script, and the standalone script check for Fast Load and Tier Labels. Everything not credited below, such as the Keyframe Staff List button, the List Score & Progress Editor, and AniList Fast Load, is original work.",
+			works: [["AL-Additions on GitHub", "https://github.com/Daiya404/AL-Additions"], ["AniList Fast Load on GitHub", "https://github.com/Daiya404/AL-Fast-Load"]]
+		},
+		{
+			name: "MatiX221",
+			url: "https://github.com/MatiX221",
+			note: "The API limit fix idea, modularising the script, general bug fixes, AniList Fast Load and Tier Labels integration and improvements, Compare View improvements, manual sync mappings, and the backup and restore feature.",
+			works: [["MatiX221/AL-Additions", "https://github.com/MatiX221/AL-Additions"]]
+		},
+		{
+			name: "Plennhar",
+			url: "https://greasyfork.org/en/users/1323916-plennhar",
+			note: "Browse Tag Rank Filter and Airing Progress Indicator.",
+			works: [["AniList Browse: set default minimum tag percentage to 50", "https://greasyfork.org/en/scripts/559539-anilist-browse-set-default-minimum-tag-percentage-to-50"], ["AniList: color airing dots on anime lists orange if the user is behind on episodes", "https://greasyfork.org/en/scripts/563899-anilist-color-airing-dots-on-anime-lists-orange-if-the-user-is-behind-on-episodes"]]
+		},
+		{
+			name: "Morimasa",
+			url: "https://greasyfork.org/en/users/61126-morimasa",
+			note: "Anime OP/ED songs.",
+			works: [["Anisongs", "https://greasyfork.org/en/scripts/374785-anisongs"]]
+		},
+		{
+			name: "Samu",
+			url: "https://greasyfork.org/en/users/17840-samu",
+			note: "Nyaa search link.",
+			works: [["Find on Nyaa", "https://greasyfork.org/en/scripts/379776-find-on-nyaa"]]
+		},
+		{
+			name: "trevor229",
+			url: "https://greasyfork.org/en/users/158806-trevor229",
+			note: "Banner Downloader.",
+			works: [["AniList Banner Downloader", "https://greasyfork.org/en/scripts/370470-anilist-banner-downloader"]]
+		},
+		{
+			name: "meatloaf1",
+			url: "https://greasyfork.org/en/users/1630083-meatloaf1",
+			note: "Short AniList URLs.",
+			works: [["Remove AniList titles from URL", "https://greasyfork.org/en/scripts/589540-remove-anilist-titles-from-url"]]
+		},
+		{
+			name: "MALSync",
+			url: "https://github.com/MALSync",
+			note: "Inspiration for the MyAnimeList sync, and for the episode/chapter and score embedding.",
+			works: [["MALSync on GitHub", "https://github.com/MALSync/MALSync"]]
+		},
+		{
+			name: "ercarp",
+			url: "https://greasyfork.org/en/users/1434372-ercarp",
+			note: "AniList Tier Labels.",
+			works: [["AniList Tier Labels", "https://greasyfork.org/en/scripts/526694-anilist-tier-labels"]]
+		},
+		{
+			name: "Claude & ChatGPT",
+			note: "AI assistance throughout the consolidation and fixes."
+		}
+	];
+	var creditLink = (url, text, cls = "") => `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
+	var creditsHtml = () => CREDITS.map((c) => `<div class="ala-credit"><b>${c.url ? creditLink(c.url, c.name) : esc(c.name)}</b> — ${esc(c.note)}${c.works ? `<ul>${c.works.map(([label, url]) => `<li>${creditLink(url, label)}</li>`).join("")}</ul>` : ""}</div>`).join("");
+	var SECTIONS = [
+		"Sync",
+		"AniList Enhancements",
+		"External Links, Downloads & Mappings",
+		"Advanced"
+	];
+	var CSS$1 = `
+  .ala-settings-nav-section{margin-top:26px}
+  .ala-settings-nav-heading{color:rgb(var(--color-text-lighter));margin-bottom:12px}
+  .ala-settings-nav-link{display:block;padding:9px 12px;border-radius:3px;color:rgb(var(--color-text));text-decoration:none;cursor:pointer}
+  .ala-settings-nav-link:hover,.ala-settings-nav-link.is-active{background:rgb(var(--color-foreground))}
+  #ala-settings-mobile-launcher{display:none}
+
+  #ala-settings-backdrop{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  #ala-settings-panel{box-sizing:border-box;display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:8px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:14px;line-height:1.4;box-shadow:0 18px 60px rgba(0,0,0,.45);overflow:hidden;outline:none;transform:translateZ(0)}
+  #ala-settings-panel *{box-sizing:border-box}
+  #ala-settings-panel :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+  #ala-settings-panel h2,#ala-settings-panel h3{margin:0;font-family:inherit}
+
+  .ala-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 10px}
+  .ala-sheet-head h2{font-size:19px;font-weight:600;line-height:1.3}
+  .ala-sheet-body{flex:1 1 auto;min-height:0;padding:0 20px 8px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .ala-sheet-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+  .ala-status{flex:1 1 160px;color:rgb(var(--color-text-lighter));font-size:12px;transition:color .15s}
+  .ala-status.is-error{color:rgb(var(--color-red,224,85,85));font-weight:600}
+
+  #ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
+  .ala-section{border-radius:6px;background:rgb(var(--color-background));overflow:hidden}
+  .ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}
+  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;min-height:48px;cursor:pointer;user-select:none;list-style:none;transition:background .15s}
+  .ala-section-summary::-webkit-details-marker{display:none}
+  .ala-section-summary:hover{background:rgba(var(--color-text-lighter),.06)}
+  .ala-section-summary:focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:-2px}
+  .ala-section-summary .ala-section-title{margin:0!important;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
+  .ala-chevron{display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--color-text-lighter));transition:transform .22s cubic-bezier(0.4,0,0.2,1);will-change:transform}
+  .ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}
+  .ala-section-collapsible .ala-collapsible-inner{border-top:1px solid rgba(var(--color-text-lighter),.12)}
+
+  .ala-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden}
+  .ala-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
+  .ala-collapsible-inner{min-height:0;overflow:hidden}
+
+  .ala-feature+.ala-feature{border-top:1px solid rgba(var(--color-text-lighter),.12)}
+  .ala-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:12px 14px;cursor:pointer}
+  .ala-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .ala-title{font-size:14px;color:rgb(var(--color-text))}
+  .ala-help{color:rgb(var(--color-text-lighter));font-size:12px;line-height:1.4}
+  .ala-options-collapsible{margin:0;padding:0}
+  .ala-options{margin:0 14px 12px 20px;padding-left:12px;border-left:2px solid rgba(var(--color-blue),.4)}
+  .ala-options .ala-row{min-height:48px;padding:8px 0;cursor:default}
+  .ala-options .ala-row:has(.ala-switch){cursor:pointer}
+  .ala-child-option{margin-left:8px}
+  .ala-child-option .ala-collapsible-inner{border-left:2px solid rgba(var(--color-blue),.25);padding-left:10px}
+  .ala-child-option .ala-row{min-height:44px;padding:6px 0}
+  .ala-standalone-note{margin:0 14px 12px;padding:8px 10px;border-radius:4px;border-left:3px solid rgb(var(--color-orange,255,152,0));background:rgba(var(--color-orange,255,152,0),.12);color:rgb(var(--color-text));font-size:12px;line-height:1.45}
+
+  #ala-settings-panel input[type=number],#ala-settings-panel input[type=text],#ala-settings-panel select{width:170px;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
+  #ala-settings-panel input:disabled,#ala-settings-panel select:disabled{cursor:not-allowed}
+
+  .ala-switch{position:relative;flex:0 0 auto;width:44px;height:26px}
+  .ala-switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+  .ala-slider{position:absolute;inset:0;border-radius:999px;background:rgba(var(--color-text-lighter),.3);transition:background .15s;pointer-events:none}
+  .ala-slider:before{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .15s}
+  .ala-switch input:checked+.ala-slider{background:rgb(var(--color-blue))}
+  .ala-switch input:checked+.ala-slider:before{transform:translateX(18px)}
+  .ala-switch input:disabled{cursor:not-allowed}
+  .ala-switch input:disabled+.ala-slider{opacity:.5}
+  .ala-switch input:focus-visible+.ala-slider{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+
+  .ala-btn{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 18px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:4px;background:transparent;color:rgb(var(--color-text));font:inherit;font-size:13px;cursor:pointer}
+  .ala-btn--primary{border-color:transparent;background:rgb(var(--color-blue));color:#fff;font-weight:600}
+  .ala-btn--danger{border-color:rgba(var(--color-red,224,85,85),.35);color:rgb(var(--color-red,224,85,85))}
+  .ala-btn--danger:hover{border-color:transparent;background:rgb(var(--color-red,224,85,85));color:#fff}
+  .ala-btn:hover{filter:brightness(1.1)}
+  .ala-icon-btn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:rgb(var(--color-text-lighter));cursor:pointer}
+  .ala-icon-btn:hover{background:rgba(var(--color-text-lighter),.14);color:rgb(var(--color-text))}
+  .ala-account-row{cursor:default}
+  .ala-account-row .ala-btn{flex:0 0 auto;min-width:145px}
+  .ala-credits-content{padding:12px 14px;color:rgb(var(--color-text-lighter));font-size:12px}
+  .ala-credit{margin-top:10px}
+  .ala-credit:first-child{margin-top:0}
+  .ala-credit ul{margin:3px 0 0;padding-left:18px;list-style:disc}
+  .ala-credit a{color:rgb(var(--color-blue));text-decoration:none}
+  .ala-credit a:hover{text-decoration:underline}
+
+  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
+  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
+  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
+  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
+  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
+  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
+  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
+  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
+  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
+  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
+  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
+  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
+  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
+
+  @media (max-width:700px){
+    .ala-settings-nav-section{display:none!important}
+    #ala-settings-backdrop{align-items:flex-end;padding:0}
+    #ala-settings-panel{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
+    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    .ala-tier-table-wrap{max-height:45vh}
+    .ala-tier-table th,.ala-tier-table td{padding:4px}
+    .ala-sheet-head{padding:16px 16px 8px}
+    .ala-sheet-body{padding:0 16px 8px}
+    .ala-sheet-foot{padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
+    .ala-sheet-foot .ala-btn{flex:1 1 40%;min-height:44px}
+    .ala-status{flex-basis:100%;order:3}
+    .ala-row{min-height:60px}
+    .ala-options .ala-row{flex-direction:column;align-items:stretch;gap:8px}
+    .ala-options .ala-row:has(.ala-switch){flex-direction:row;align-items:center;justify-content:space-between}
+    .ala-account-row{flex-direction:column;align-items:stretch;gap:10px}
+    .ala-account-row .ala-btn{width:100%;min-height:42px}
+    #ala-settings-panel input[type=number],#ala-settings-panel input[type=text],#ala-settings-panel select{width:100%;height:44px;font-size:16px}
+    #ala-settings-mobile-launcher{display:inline-flex;align-items:center;gap:8px;position:fixed;left:16px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:99998;min-height:46px;padding:0 18px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgb(var(--color-blue));color:#fff;font:inherit;font-size:14px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer}
+    #ala-settings-mobile-launcher:active{transform:translateY(1px)}
+  }
+  @media (prefers-reduced-motion:reduce){.ala-slider,.ala-slider:before,.ala-collapsible,.ala-chevron{transition:none!important}}`;
+	var onSettingsPage = () => /^\/settings(\/|$)/.test(location.pathname);
+	var rowText = (title, help) => `<span class="ala-text"><span class="ala-title">${title}</span><span class="ala-help">${help}</span></span>`;
+	var optionHtml = (r) => {
+		const tag = r.type === "json" ? "div" : "label";
+		const rowHtml = `<${tag} class="ala-row">${rowText(r.title, r.help)}${TYPES$1[r.type].html(r, Settings.get(r.key))}</${tag}>`;
+		if (r.childOf) return `<div class="ala-collapsible ala-child-option ${!!Settings.get(r.childOf) ? "is-open" : ""}" data-child-for="${r.childOf}">
+      <div class="ala-collapsible-inner">
+        ${rowHtml}
+      </div>
+    </div>`;
+		return rowHtml;
+	};
+	var featureHtml = (f) => {
+		if (f.toggle.type === "json") return `<div class="ala-feature" data-feature="${f.id}">
+      <div class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES$1.json.html(f.toggle, Settings.get(f.toggle.key))}</div>
+    </div>`;
+		const isFeatureOn = !!Settings.get(f.toggle.key);
+		return `<div class="ala-feature ${isFeatureOn ? "" : "is-off"}" data-feature="${f.id}">
+    <label class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES$1.toggle.html(f.toggle, isFeatureOn)}</label>
+    ${f.options.length ? `
+      <div class="ala-collapsible ala-options-collapsible ${isFeatureOn ? "is-open" : ""}">
+        <div class="ala-collapsible-inner">
+          <div class="ala-options">${f.options.map(optionHtml).join("")}</div>
+        </div>
+      </div>` : ""}
+  </div>`;
+	};
+	function accountsHtml() {
+		const malConnected = !!store$1.get("mal_token", null);
+		return `<h3 class="ala-section-title">Connected Accounts</h3>
+  <div class="ala-section">
+    <div class="ala-row ala-account-row">
+      <span class="ala-text">
+        <span class="ala-title">MyAnimeList</span>
+        <span class="ala-help" id="ala-status-mal">${malConnected ? "Connected" : "Not connected"}</span>
+      </span>
+      <button type="button" class="ala-btn ${malConnected ? "ala-btn--danger" : "ala-btn--primary"}" id="ala-btn-mal">
+        ${malConnected ? "Disconnect" : "Connect to MAL"}
+      </button>
+    </div>
+  </div>`;
+	}
+	function backupRestoreHtml() {
+		const isDev = !!Settings.get("devModeEnabled");
+		return `<details class="ala-section-dropdown" data-section="backup" open>
+    <summary class="ala-section-summary">
+      <span class="ala-section-title">Backup &amp; Restore</span>
+      <span class="ala-chevron">${icon("chevron", 14)}</span>
+    </summary>
+    <div class="ala-collapsible ala-section-collapsible">
+      <div class="ala-collapsible-inner">
+        <div class="ala-section">
+          <div class="ala-row ala-account-row">
+            <span class="ala-text">
+              <span class="ala-title">Export Settings</span>
+              <span class="ala-help">Download all settings as a backup file. Excludes account credentials.</span>
+            </span>
+            <button type="button" class="ala-btn" id="ala-btn-export">Export</button>
+          </div>
+          <div class="ala-row ala-account-row" style="border-top:1px solid rgba(var(--color-text-lighter),.12)">
+            <span class="ala-text">
+              <span class="ala-title">Export with Credentials</span>
+              <span class="ala-help">Include MyAnimeList tokens. A password is required.</span>
+            </span>
+            <button type="button" class="ala-btn ala-btn--danger" id="ala-btn-export-secrets">Export with Secrets</button>
+          </div>
+          <div class="ala-row ala-account-row" id="ala-row-export-raw" style="border-top:1px solid rgba(var(--color-text-lighter),.12);${isDev ? "" : "display:none;"}">
+            <span class="ala-text">
+              <span class="ala-title">Export Raw JSON</span>
+              <span class="ala-help">Export unminified raw JSON including all settings and credentials without encryption (for testing/verification).</span>
+            </span>
+            <button type="button" class="ala-btn ala-btn--danger" id="ala-btn-export-raw">Export Raw JSON</button>
+          </div>
+          <div class="ala-row ala-account-row" style="border-top:1px solid rgba(var(--color-text-lighter),.12)">
+            <span class="ala-text">
+              <span class="ala-title">Import Settings</span>
+              <span class="ala-help">Restore settings from an <code>al-additions.settings</code> file. Existing values not in the backup are kept.</span>
+            </span>
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-btn-import">Import File</button>
+            <input type="file" id="ala-import-file" accept=".settings,.json,text/*" style="display:none">
+          </div>
+        </div>
+      </div>
+    </div>
+  </details>`;
+	}
+	function sectionsHtml() {
+		return [...new Set([...SECTIONS, ...features.map((f) => f.section)])].map((name) => {
+			const items = features.filter((f) => f.section === name);
+			return items.length ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
+            <summary class="ala-section-summary">
+              <span class="ala-section-title">${esc(name)}</span>
+              <span class="ala-chevron">${icon("chevron", 14)}</span>
+            </summary>
+            <div class="ala-collapsible ala-section-collapsible">
+              <div class="ala-collapsible-inner">
+                <div class="ala-section">${items.map(featureHtml).join("")}</div>
+              </div>
+            </div>
+          </details>` : "";
+		}).join("");
+	}
+	function creditsDropdownHtml() {
+		return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits" open>
+    <summary class="ala-section-summary">
+      <span class="ala-section-title">Credits</span>
+      <span class="ala-chevron">${icon("chevron", 14)}</span>
+    </summary>
+    <div class="ala-collapsible ala-section-collapsible">
+      <div class="ala-collapsible-inner">
+        <div class="ala-credits-content">${creditsHtml()}</div>
+      </div>
+    </div>
+  </details>`;
+	}
+	function initDropdownAnimations(panel) {
+		panel.querySelectorAll("details.ala-section-dropdown").forEach((details) => {
+			const summary = details.querySelector(":scope > summary");
+			const collapsible = details.querySelector(":scope > .ala-collapsible");
+			if (!summary || !collapsible) return;
+			summary.addEventListener("click", (e) => {
+				e.preventDefault();
+				const isExpanded = details.classList.toggle("is-expanded");
+				collapsible.classList.toggle("is-open", isExpanded);
+			});
+		});
+	}
+	var prevOverflow = null;
+	function openTierEditor(inputEl) {
+		let tiers;
+		try {
+			const check = validateTiers(JSON.parse(inputEl.value));
+			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		} catch {
+			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		}
+		const existing = document.getElementById("ala-tier-editor-backdrop");
+		if (existing) existing.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = "ala-tier-editor-backdrop";
+		backdrop.innerHTML = `
+    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
+      <header class="ala-sheet-head">
+        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
+        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-sheet-body">
+        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
+        <div class="ala-tier-table-wrap">
+          <table class="ala-tier-table">
+            <thead>
+              <tr>
+                <th style="width:75px">Label</th>
+                <th style="width:70px">Min</th>
+                <th style="width:70px">Max</th>
+                <th style="width:48px">Badge</th>
+                <th style="width:48px">Text</th>
+                <th style="width:75px">Preview</th>
+                <th style="width:36px"></th>
+              </tr>
+            </thead>
+            <tbody id="ala-tier-tbody"></tbody>
+          </table>
+        </div>
+        <div class="ala-tier-actions">
+          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
+        </div>
+        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
+          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
+          </div>
+        </div>
+      </div>
+      <footer class="ala-sheet-foot">
+        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
+        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const tbody = backdrop.querySelector("#ala-tier-tbody");
+		const status = backdrop.querySelector("#ala-tier-status");
+		const setModalStatus = (msg, isError = false) => {
+			status.textContent = msg;
+			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
+		};
+		const createRowHtml = (t, idx) => {
+			const badgeColor = normalizeHexColor(t.color) || "#000000";
+			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
+			return `
+    <tr data-idx="${idx}">
+      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
+      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
+      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
+      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
+      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
+      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
+      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
+    </tr>
+  `;
+		};
+		const renderTable = (list) => {
+			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
+		};
+		const getRowsData = () => {
+			const rows = tbody.querySelectorAll("tr");
+			const result = [];
+			rows.forEach((tr) => {
+				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
+				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
+				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
+				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+				result.push({
+					label: label || "Tier",
+					min: isNaN(min) ? 0 : min,
+					max: isNaN(max) ? 100 : max,
+					color,
+					textColor
+				});
+			});
+			return result;
+		};
+		const updatePreview = (tr) => {
+			const label = tr.querySelector(".ala-t-label")?.value || "";
+			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+			const preview = tr.querySelector(".ala-t-preview");
+			if (preview) {
+				preview.textContent = label;
+				preview.style.backgroundColor = color;
+				preview.style.color = textColor;
+			}
+		};
+		tbody.addEventListener("input", (e) => {
+			const tr = e.target.closest("tr");
+			if (tr) updatePreview(tr);
+		});
+		tbody.addEventListener("click", (e) => {
+			const btn = e.target.closest(".ala-tier-del-btn");
+			if (btn) {
+				const tr = btn.closest("tr");
+				if (tr) {
+					tr.remove();
+					setModalStatus("Tier removed.");
+				}
+			}
+		});
+		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
+			const current = getRowsData();
+			current.push({
+				min: 0,
+				max: 0,
+				label: "New",
+				color: "#3db4f2",
+				textColor: "#ffffff"
+			});
+			renderTable(current);
+			setModalStatus("Added new tier.");
+		});
+		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
+			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
+			setModalStatus("Reset to default tiers.");
+		});
+		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
+		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
+		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
+			if (jsonWrap.style.display === "none") {
+				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
+				jsonWrap.style.display = "block";
+			} else jsonWrap.style.display = "none";
+		});
+		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
+			try {
+				const check = validateTiers(JSON.parse(jsonArea.value));
+				if (!check.valid || !check.tiers) {
+					setModalStatus(check.error || "Invalid tier JSON.", true);
+					return;
+				}
+				renderTable(check.tiers);
+				jsonWrap.style.display = "none";
+				setModalStatus("JSON applied successfully.");
+			} catch (e) {
+				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
+			}
+		});
+		const closeModal = () => {
+			document.removeEventListener("keydown", onKey, true);
+			backdrop.remove();
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				closeModal();
+			}
+		};
+		document.addEventListener("keydown", onKey, true);
+		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
+		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) closeModal();
+		});
+		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
+			const check = validateTiers(getRowsData());
+			if (!check.valid || !check.tiers) {
+				setModalStatus(check.error || "Invalid tier configuration.", true);
+				return;
+			}
+			inputEl.value = JSON.stringify(check.tiers);
+			Settings.set("tierLabels", check.tiers);
+			closeModal();
+			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
+			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
+		});
+		renderTable(tiers);
+	}
+	function standaloneNote(id) {
+		return `<b>Standalone ${STANDALONE[id].name} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.`;
+	}
+	function showStandaloneNotes(panel, syncFeature) {
+		for (const id of STANDALONE_IDS_LIST) detectStandalone(id).then((found) => {
+			if (!panel.isConnected) return;
+			const card = panel.querySelector(`.ala-feature[data-feature="${id}"]`);
+			if (!card) return;
+			card.querySelector(".ala-standalone-note")?.remove();
+			if (!found) return;
+			const toggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
+			if (toggle) {
+				toggle.dataset.standaloneLocked = "1";
+				toggle.checked = false;
+				toggle.disabled = true;
+				syncFeature(card);
+			}
+			const note = document.createElement("div");
+			note.className = "ala-standalone-note";
+			note.setAttribute("role", "note");
+			note.innerHTML = standaloneNote(id);
+			card.querySelector(".ala-row--main")?.insertAdjacentElement("afterend", note);
+		});
+	}
+	function closePanel() {
+		const b = document.getElementById("ala-settings-backdrop");
+		if (!b) return;
+		if (b._onKey) document.removeEventListener("keydown", b._onKey);
+		if (b._onFocus) window.removeEventListener("focus", b._onFocus);
+		b.remove();
+		document.documentElement.style.overflow = prevOverflow || "";
+		prevOverflow = null;
+	}
+	function showPanel() {
+		if (document.getElementById("ala-settings-backdrop")) return;
+		const backdrop = document.createElement("div");
+		backdrop.id = "ala-settings-backdrop";
+		backdrop.innerHTML = `<div id="ala-settings-panel" role="dialog" aria-modal="true" aria-labelledby="ala-settings-title" tabindex="-1">
+    <header class="ala-sheet-head">
+      <div><h2 id="ala-settings-title">AL Additions</h2><div class="ala-help">Changes apply after the page reloads.</div></div>
+      <button class="ala-icon-btn ala-close" type="button" aria-label="Close settings">${icon("close", 20)}</button>
+    </header>
+    <div class="ala-sheet-body">
+      ${accountsHtml()}
+      ${sectionsHtml()}
+      ${backupRestoreHtml()}
+      ${creditsDropdownHtml()}
+    </div>
+    <footer class="ala-sheet-foot">
+      <button class="ala-btn ala-btn--primary ala-save" type="button">Save and reload</button>
+      <button class="ala-btn ala-reset" type="button">Reset to defaults</button>
+      <span class="ala-status" role="status"></span>
+    </footer>
+  </div>`;
+		const panel = backdrop.firstElementChild;
+		const status = panel.querySelector(".ala-status");
+		const setStatus = (msg, isError = false) => {
+			status.textContent = msg;
+			status.classList.toggle("is-error", isError);
+		};
+		const controls = () => panel.querySelectorAll("[data-key]");
+		const syncFeature = (card) => {
+			const toggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
+			if (!toggle) return;
+			const on = toggle.checked;
+			card.classList.toggle("is-off", !on);
+			const optionsCollapsible = card.querySelector(":scope > .ala-options-collapsible");
+			if (optionsCollapsible) optionsCollapsible.classList.toggle("is-open", on);
+			card.querySelectorAll(".ala-child-option").forEach((childWrap) => {
+				const parentKey = childWrap.dataset.childFor;
+				const parentInput = parentKey ? card.querySelector(`[data-key="${parentKey}"]`) : null;
+				const childOpen = on && !!parentInput?.checked;
+				childWrap.classList.toggle("is-open", childOpen);
+				childWrap.querySelectorAll("[data-key]").forEach((el) => {
+					el.disabled = !childOpen;
+				});
+			});
+			card.querySelectorAll(".ala-options [data-key]").forEach((el) => {
+				if (el.closest(".ala-child-option")) return;
+				el.disabled = !on;
+			});
+		};
+		const devRow = panel.querySelector("#ala-row-export-raw");
+		const syncDevBackupVisibility = () => {
+			if (!devRow) return;
+			const devToggle = panel.querySelector("input[data-key=\"devModeEnabled\"]");
+			const isDevOn = devToggle ? devToggle.checked : !!Settings.get("devModeEnabled");
+			devRow.style.display = isDevOn ? "" : "none";
+		};
+		panel.querySelectorAll(".ala-feature").forEach(syncFeature);
+		syncDevBackupVisibility();
+		initDropdownAnimations(panel);
+		panel.addEventListener("change", (e) => {
+			const card = e.target?.closest(".ala-feature");
+			if (card) syncFeature(card);
+			syncDevBackupVisibility();
+		});
+		panel.querySelector(".ala-save")?.addEventListener("click", () => {
+			controls().forEach((el) => {
+				const r = ROWS[el.dataset.key];
+				if (r) {
+					if (r.key === "syncManualOverrides") return;
+					if (el.dataset.standaloneLocked) return;
+					Settings.set(r.key, TYPES$1[r.type].read(el));
+				}
+			});
+			setStatus("Saved. Reloading…");
+			setTimeout(() => location.reload(), 350);
+		});
+		panel.querySelector(".ala-reset")?.addEventListener("click", () => {
+			controls().forEach((el) => {
+				const r = ROWS[el.dataset.key];
+				if (r) {
+					if (r.key === "syncManualOverrides") return;
+					if (el.dataset.standaloneLocked) return;
+					TYPES$1[r.type].write(el, r.def);
+				}
+			});
+			panel.querySelectorAll(".ala-feature").forEach(syncFeature);
+			syncDevBackupVisibility();
+			setStatus("Defaults restored. Press Save to apply them.");
+		});
+		panel.querySelector(".ala-close")?.addEventListener("click", closePanel);
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) closePanel();
+		});
+		backdrop._onKey = (e) => {
+			if (e.key === "Escape") closePanel();
+		};
+		document.addEventListener("keydown", backdrop._onKey);
+		const updateAccountUI = () => {
+			const malBtn = panel.querySelector("#ala-btn-mal");
+			const malStatus = panel.querySelector("#ala-status-mal");
+			const malConnected = !!store$1.get("mal_token", null);
+			if (malBtn && malStatus) {
+				malBtn.textContent = malConnected ? "Disconnect" : "Connect to MAL";
+				malBtn.className = `ala-btn ${malConnected ? "ala-btn--danger" : "ala-btn--primary"}`;
+				malStatus.textContent = malConnected ? "Connected" : "Not connected";
+			}
+		};
+		panel.querySelector("#ala-btn-mal")?.addEventListener("click", () => {
+			if (!!store$1.get("mal_token", null)) {
+				if (confirm("Disconnect MyAnimeList? You will need to reconnect to use AniList → MAL Sync.")) {
+					clearMalAuth();
+					updateAccountUI();
+					setStatus("MyAnimeList disconnected.");
+				}
+			} else {
+				malConnect();
+				setStatus("Opened MyAnimeList authorization tab…");
+			}
+		});
+		const getPanelOverrides = () => {
+			const overrides = {};
+			controls().forEach((el) => {
+				const r = ROWS[el.dataset.key];
+				if (r) {
+					if (r.key === "syncManualOverrides") {
+						overrides[r.key] = getManualOverrides();
+						return;
+					}
+					overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES$1[r.type].read(el);
+				}
+			});
+			return overrides;
+		};
+		panel.querySelector("#ala-btn-export")?.addEventListener("click", async () => {
+			const pwd = await promptPasswordModal({
+				title: "Export Settings",
+				description: "Optional: Set a password to encrypt your backup file. Leave blank for an unencrypted backup.",
+				submitText: "Export",
+				allowEmpty: true,
+				confirm: true,
+				placeholder: "Optional encryption password"
+			});
+			if (pwd === null) return;
+			try {
+				setStatus("Generating backup…");
+				downloadBackupFile(await createBackup(false, pwd, getPanelOverrides()));
+				setStatus("Settings exported successfully.");
+			} catch (e) {
+				setStatus("Export failed: " + (e.message || e), true);
+			}
+		});
+		panel.querySelector("#ala-btn-export-secrets")?.addEventListener("click", async () => {
+			if (!confirm("⚠️ Warning: This export includes your MyAnimeList authentication credentials.\n\nAnyone with access to this file will have full access to your connected MyAnimeList account.\n\nDo you want to continue?")) return;
+			const pwd = await promptPasswordModal({
+				title: "Export Credentials (Encrypted)",
+				description: "A password is required to encrypt your credentials and protect your accounts.",
+				submitText: "Encrypt & Export",
+				allowEmpty: false,
+				confirm: true,
+				placeholder: "Choose an encryption password"
+			});
+			if (pwd === null) return;
+			if (!pwd.trim()) {
+				setStatus("A password is required to export credentials.", true);
+				return;
+			}
+			try {
+				setStatus("Generating backup…");
+				downloadBackupFile(await createBackup(true, pwd, getPanelOverrides()));
+				setStatus("Settings and credentials exported successfully.");
+			} catch (e) {
+				setStatus("Export failed: " + (e.message || e), true);
+			}
+		});
+		panel.querySelector("#ala-btn-export-raw")?.addEventListener("click", () => {
+			try {
+				setStatus("Generating raw backup…");
+				const rawJson = createRawBackup(getPanelOverrides());
+				downloadBackupFile(new TextEncoder().encode(rawJson));
+				setStatus("Raw JSON settings exported successfully.");
+			} catch (e) {
+				setStatus("Export failed: " + (e.message || e), true);
+			}
+		});
+		const fileInput = panel.querySelector("#ala-import-file");
+		panel.querySelector("#ala-btn-import")?.addEventListener("click", () => {
+			fileInput?.click();
+		});
+		fileInput?.addEventListener("change", async () => {
+			const file = fileInput.files?.[0];
+			if (!file) return;
+			try {
+				setStatus("Reading backup file…");
+				const result = await importBackup(await readFileAsBytes(file));
+				if (result.cancelled) {
+					setStatus("Import cancelled.");
+					fileInput.value = "";
+					return;
+				}
+				const parts = [`${result.applied} setting(s)`];
+				if (result.secretsApplied) parts.push(`${result.secretsApplied} credential(s)`);
+				setStatus(`Imported ${parts.join(" and ")}. Reloading…`);
+				setTimeout(() => location.reload(), 600);
+			} catch (e) {
+				setStatus("Import failed: " + (e.message || e), true);
+				fileInput.value = "";
+			}
+		});
+		panel.querySelector("#ala-btn-edit-tierLabels")?.addEventListener("click", (e) => {
+			e.preventDefault();
+			const inputEl = panel.querySelector("input[data-key=\"tierLabels\"]");
+			if (inputEl) openTierEditor(inputEl);
+		});
+		panel.querySelector("#ala-btn-edit-syncManualOverrides")?.addEventListener("click", (e) => {
+			e.preventDefault();
+			openOverridesModal();
+		});
+		panel.querySelector("#ala-btn-edit-aniSongsProviders")?.addEventListener("click", (e) => {
+			e.preventDefault();
+			const inputEl = panel.querySelector("input[data-key=\"aniSongsProviders\"]");
+			if (inputEl) openAniSongsModal(inputEl);
+		});
+		const onFocus = () => {
+			updateAccountUI();
+			maybeAutoSync();
+		};
+		backdrop._onFocus = onFocus;
+		window.addEventListener("focus", onFocus);
+		prevOverflow = document.documentElement.style.overflow;
+		document.documentElement.style.overflow = "hidden";
+		document.body.appendChild(backdrop);
+		panel.focus();
+		showStandaloneNotes(panel, syncFeature);
+	}
+	function ensureLauncher() {
+		if (document.getElementById("ala-settings-mobile-launcher")) return;
+		const b = document.createElement("button");
+		b.id = "ala-settings-mobile-launcher";
+		b.type = "button";
+		b.innerHTML = `${icon("sliders", 18)}<span>AL Additions</span>`;
+		b.setAttribute("aria-label", "Open AL Additions settings");
+		b.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			showPanel();
+		});
+		document.body.appendChild(b);
+	}
+	function installSidebar() {
+		if (document.getElementById("ala-settings-nav-section")) return;
+		if (!findExactText("Profile")) return;
+		const dev = findExactText("Developer");
+		if (!dev) return;
+		let nav = dev.parentElement;
+		while (nav && nav !== document.body && nav.children.length <= 1) nav = nav.parentElement;
+		if (!nav || nav === document.body || !nav.parentElement) return;
+		const section = document.createElement("div");
+		section.id = "ala-settings-nav-section";
+		section.className = "ala-settings-nav-section";
+		section.innerHTML = "<div class=\"ala-settings-nav-heading\">AL Additions</div><a href=\"#\" class=\"ala-settings-nav-link\">Settings</a>";
+		section.querySelector("a")?.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			e.currentTarget.classList.add("is-active");
+			showPanel();
+		});
+		nav.parentElement.insertBefore(section, nav.nextSibling);
+	}
+	function initSettingsPage() {
+		addStyle("ala-settings-style", CSS$1);
+		const attempt = debounce(() => {
+			if (!onSettingsPage()) return;
+			installSidebar();
+			ensureLauncher();
+		}, 100);
+		Core.ready(attempt);
+		Core.onBodyMutation(() => {
+			if (onSettingsPage() && !(document.getElementById("ala-settings-nav-section") && document.getElementById("ala-settings-mobile-launcher"))) attempt();
+		});
+		Core.onNavigate(() => {
+			if (onSettingsPage()) return attempt();
+			closePanel();
+			document.getElementById("ala-settings-mobile-launcher")?.remove();
+		});
+	}
 	defineModule("settings", null, initSettingsPage);
 	Settings.migrate();
 	safe(captureCredentials, "credential capture");

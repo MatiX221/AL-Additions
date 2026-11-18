@@ -7,7 +7,7 @@ import '../src/modules/nyaa';
 import '../src/modules/keyframe';
 import '../src/modules/mediaInfo';
 import '../src/modules/airingDots';
-import '../src/modules/anisongs/anisongs';
+import '../src/modules/anisongs';
 import '../src/modules/tierLabels';
 import '../src/modules/compareView';
 import '../src/modules/sync';

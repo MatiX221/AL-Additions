@@ -1,10 +1,10 @@
-import { defineFeature } from '../core/registry';
-import { Core } from '../core/observer';
-import { Settings, PREFIX } from '../settings/settings';
-import { addStyle } from '../utils/dom';
-import { store, logDebug } from '../utils/helpers';
-import { PROBE_ATTR, detectStandalone } from '../utils/standalone';
-import { DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from '../utils/tiers';
+import { defineFeature } from '../../core/registry';
+import { Core } from '../../core/observer';
+import { Settings, PREFIX } from '../../settings/settings';
+import { addStyle } from '../../utils/dom';
+import { store, logDebug } from '../../utils/helpers';
+import { detectStandalone } from '../../utils/standalone';
+import { PROBE_ATTR, DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from './tiers';
 
 export { DEFAULT_TIERS, getTier, validateTiers, type TierConfig };
 

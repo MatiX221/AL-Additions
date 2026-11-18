@@ -1,9 +1,9 @@
-import { defineFeature } from '../core/registry';
-import { Core } from '../core/observer';
-import { addStyle } from '../utils/dom';
-import { debounce, logDebug, store, esc } from '../utils/helpers';
+import { defineFeature } from '../../core/registry';
+import { Core } from '../../core/observer';
+import { addStyle } from '../../utils/dom';
+import { debounce, logDebug, store, esc } from '../../utils/helpers';
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
-import { AniList, type MediaListEntryItem } from '../api/anilist';
+import { AniList, type MediaListEntryItem } from '../../api/anilist';
 
 export interface EntryData {
   el: HTMLElement;
