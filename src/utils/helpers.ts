@@ -1,4 +1,14 @@
-import { GM_getValue, GM_setValue, GM_deleteValue, GM_xmlhttpRequest, unsafeWindow } from 'vite-plugin-monkey/dist/client';
+import {
+  GM_getValue,
+  GM_setValue,
+  GM_deleteValue,
+  GM_listValues,
+  GM_addValueChangeListener,
+  GM_removeValueChangeListener,
+  GM_xmlhttpRequest,
+  unsafeWindow
+} from 'vite-plugin-monkey/dist/client';
+import { SETTING_PREFIX } from '../types';
 
 export const HOST = location.hostname;
 
@@ -8,6 +18,8 @@ export const clean = (s: unknown): string => String(s || '').replace(/\s+/g, ' '
 
 export const esc = (s: unknown): string =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+
+export const parseToggle = (v: unknown): boolean => (v === 'false' ? false : !!v);
 
 export const safe = <T>(fn: () => T, label?: string): T | undefined => {
   try {
@@ -92,37 +104,103 @@ export function openTab(url: string): void {
   a.remove();
 }
 
+function resolveGm<T extends (...args: any[]) => any>(
+  name: 'GM_listValues' | 'GM_addValueChangeListener' | 'GM_removeValueChangeListener',
+  imported: T | undefined
+): T | null {
+  const g = globalThis as any;
+  if (Object.prototype.hasOwnProperty.call(g, name)) {
+    return typeof g[name] === 'function' ? g[name] : null;
+  }
+  if (typeof window !== 'undefined' && Object.prototype.hasOwnProperty.call(window, name)) {
+    const w = window as any;
+    return typeof w[name] === 'function' ? w[name] : null;
+  }
+  return typeof imported === 'function' ? imported : null;
+}
+
+export type StoreWatchCallback = (key: string, oldVal: any, newVal: any, remote: boolean) => void;
+
 export const store = {
   get: <T>(k: string, d?: T): T => GM_getValue(k, d as any),
   set: <T>(k: string, v: T): void => GM_setValue(k, v),
-  del: (k: string): void => GM_deleteValue(k)
+  del: (k: string): void => GM_deleteValue(k),
+  list: (): string[] => {
+    const fn = resolveGm('GM_listValues', GM_listValues);
+    if (!fn) return [];
+    try {
+      const keys = fn();
+      return Array.isArray(keys) ? keys : [];
+    } catch {
+      return [];
+    }
+  },
+  watch: (key: string, cb: StoreWatchCallback): (() => void) => {
+    const addFn = resolveGm('GM_addValueChangeListener', GM_addValueChangeListener);
+    if (!addFn) return () => {};
+    let id: string | number | undefined;
+    try {
+      id = addFn(key, (name: string, oldVal: any, newVal: any, remote?: boolean) => {
+        cb(name, oldVal, newVal, !!remote);
+      });
+    } catch {
+      return () => {};
+    }
+    return () => {
+      if (id === undefined) return;
+      const removeFn = resolveGm('GM_removeValueChangeListener', GM_removeValueChangeListener);
+      if (!removeFn) return;
+      try {
+        removeFn(id);
+      } catch {}
+    };
+  }
 };
 
 export type DebugModule = 'fastLoad' | 'sync' | 'compareView' | 'mediaInfo' | 'tierLabels' | 'general';
 
-const MODULE_SETTING_MAP: Record<string, string> = {
-  fastLoad: 'ala_setting_debugFastLoad',
-  sync: 'ala_setting_debugSync',
-  compareView: 'ala_setting_debugCompareView',
-  mediaInfo: 'ala_setting_debugMediaInfo',
-  tierLabels: 'ala_setting_debugTierLabels',
-  general: 'ala_setting_debugGeneral'
-};
+interface DebugChannelEntry {
+  settingKey: string;
+  def: boolean;
+  pattern?: RegExp;
+}
+
+const debugChannels = new Map<string, DebugChannelEntry>([
+  ['fastLoad', { settingKey: `${SETTING_PREFIX}debugFastLoad`, def: false, pattern: /^\[(?:FASTLOAD|ALFL)/i }],
+  ['sync', { settingKey: `${SETTING_PREFIX}debugSync`, def: false, pattern: /^\[SYNC/i }],
+  ['compareView', { settingKey: `${SETTING_PREFIX}debugCompareView`, def: false, pattern: /^\[COMPARE/i }],
+  ['mediaInfo', { settingKey: `${SETTING_PREFIX}debugMediaInfo`, def: false, pattern: /^\[MEDIAINFO/i }],
+  ['tierLabels', { settingKey: `${SETTING_PREFIX}debugTierLabels`, def: false, pattern: /^\[TIER/i }],
+  ['general', { settingKey: `${SETTING_PREFIX}debugGeneral`, def: false, pattern: /^\[(?:CORE|OBSERVER)/i }]
+]);
+
+export function registerDebugChannel(
+  channel: string,
+  settingKey: string,
+  def = false,
+  prefixPattern?: RegExp
+): void {
+  const existing = debugChannels.get(channel);
+  debugChannels.set(channel, {
+    settingKey,
+    def,
+    pattern: prefixPattern ?? existing?.pattern
+  });
+}
 
 export function isDebug(module?: DebugModule | string): boolean {
   try {
     const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
     if (win.__ALA_DEBUG__ || win.__ALFL_DEBUG__) return true;
 
-    const devMode = store.get('ala_setting_devModeEnabled', false);
+    const devMode = store.get(`${SETTING_PREFIX}devModeEnabled`, false);
     if (!devMode) return false;
 
     if (!module) return true;
 
-    const settingKey = MODULE_SETTING_MAP[module];
-    if (settingKey) {
-      const def = module === 'fastLoad';
-      return store.get(settingKey, def);
+    const channel = debugChannels.get(module);
+    if (channel) {
+      return !!store.get(channel.settingKey, channel.def);
     }
 
     return true;
@@ -133,12 +211,12 @@ export function isDebug(module?: DebugModule | string): boolean {
 
 export function logDebug(moduleOrTag: string, ...args: any[]): void {
   let mod: string | undefined;
-  if (/^\[(?:FASTLOAD|ALFL)/i.test(moduleOrTag)) mod = 'fastLoad';
-  else if (/^\[SYNC/i.test(moduleOrTag)) mod = 'sync';
-  else if (/^\[COMPARE/i.test(moduleOrTag)) mod = 'compareView';
-  else if (/^\[MEDIAINFO/i.test(moduleOrTag)) mod = 'mediaInfo';
-  else if (/^\[TIER/i.test(moduleOrTag)) mod = 'tierLabels';
-  else if (/^\[CORE|OBSERVER/i.test(moduleOrTag)) mod = 'general';
+  for (const [channel, entry] of debugChannels) {
+    if (entry.pattern && entry.pattern.test(moduleOrTag)) {
+      mod = channel;
+      break;
+    }
+  }
 
   if (!isDebug(mod)) return;
   console.debug(moduleOrTag, ...args);
@@ -156,12 +234,35 @@ export function jsonGet<T>(key: string, fallback: T): T {
 
 export const jsonSet = <T>(key: string, value: T): void => store.set(key, JSON.stringify(value));
 
-export function persistent<T extends Record<string, any>>(key: string, prune?: (data: T) => void) {
-  let data = jsonGet<T>(key, {} as T);
-  if (!data || typeof data !== 'object' || Array.isArray(data)) data = {} as T;
-  if (prune) safe(() => prune(data), 'cache prune');
-  const save = debounce(() => safe(() => jsonSet(key, data)), 500);
-  return { data, save };
+export function persistent<T extends Record<string, any>>(
+  key: string,
+  prune?: (data: T) => void
+): { data: T; save: () => void } {
+  let loaded = false;
+  let cacheData = {} as T;
+
+  const ensure = (): T => {
+    if (!loaded) {
+      loaded = true;
+      let d = jsonGet<T>(key, {} as T);
+      if (!d || typeof d !== 'object' || Array.isArray(d)) d = {} as T;
+      if (prune) safe(() => prune(d), 'cache prune');
+      cacheData = d;
+    }
+    return cacheData;
+  };
+
+  const save = debounce(() => safe(() => jsonSet(key, ensure())), 500);
+  return {
+    get data(): T {
+      return ensure();
+    },
+    set data(val: T) {
+      loaded = true;
+      cacheData = val;
+    },
+    save
+  };
 }
 
 export const gm = {

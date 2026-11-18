@@ -3,10 +3,15 @@ import { Blob as NodeBlob } from 'node:buffer';
 import { webcrypto } from 'node:crypto';
 import { CompressionStream, DecompressionStream } from 'node:stream/web';
 
+type ValueChangeCb = (key: string, oldVal: any, newVal: any, remote: boolean) => void;
+
 declare global {
   var GM_getValue: any;
   var GM_setValue: any;
   var GM_deleteValue: any;
+  var GM_listValues: any;
+  var GM_addValueChangeListener: any;
+  var GM_removeValueChangeListener: any;
   var GM_xmlhttpRequest: any;
   var GM_registerMenuCommand: any;
   var GM_download: any;
@@ -14,19 +19,52 @@ declare global {
 }
 
 const storage = new Map<string, any>();
+const valueListeners = new Map<number, { key: string; cb: ValueChangeCb }>();
+let nextListenerId = 1;
 
-globalThis.GM_getValue = vi.fn((key: string, def?: any) => {
+function notifyValueListeners(key: string, oldVal: any, newVal: any): void {
+  for (const entry of [...valueListeners.values()]) {
+    if (entry.key === key) {
+      entry.cb(key, oldVal, newVal, false);
+    }
+  }
+}
+
+const gmGetValue = vi.fn((key: string, def?: any) => {
   return storage.has(key) ? storage.get(key) : def;
 });
 
-globalThis.GM_setValue = vi.fn((key: string, val: any) => {
+const gmSetValue = vi.fn((key: string, val: any) => {
+  const oldVal = storage.has(key) ? storage.get(key) : undefined;
   storage.set(key, val);
+  notifyValueListeners(key, oldVal, val);
 });
 
-globalThis.GM_deleteValue = vi.fn((key: string) => {
+const gmDeleteValue = vi.fn((key: string) => {
+  const had = storage.has(key);
+  const oldVal = had ? storage.get(key) : undefined;
   storage.delete(key);
+  if (had) notifyValueListeners(key, oldVal, undefined);
 });
 
+const gmListValues = vi.fn(() => Array.from(storage.keys()));
+
+const gmAddValueChangeListener = vi.fn((key: string, cb: ValueChangeCb) => {
+  const id = nextListenerId++;
+  valueListeners.set(id, { key, cb });
+  return id;
+});
+
+const gmRemoveValueChangeListener = vi.fn((id: number) => {
+  valueListeners.delete(id);
+});
+
+globalThis.GM_getValue = gmGetValue;
+globalThis.GM_setValue = gmSetValue;
+globalThis.GM_deleteValue = gmDeleteValue;
+globalThis.GM_listValues = gmListValues;
+globalThis.GM_addValueChangeListener = gmAddValueChangeListener;
+globalThis.GM_removeValueChangeListener = gmRemoveValueChangeListener;
 globalThis.GM_xmlhttpRequest = vi.fn();
 globalThis.GM_registerMenuCommand = vi.fn();
 globalThis.GM_download = vi.fn();
@@ -46,6 +84,12 @@ globalThis.CompressionStream = CompressionStream as any;
 globalThis.DecompressionStream = DecompressionStream as any;
 
 if (typeof window !== 'undefined') {
+  (window as any).GM_getValue = gmGetValue;
+  (window as any).GM_setValue = gmSetValue;
+  (window as any).GM_deleteValue = gmDeleteValue;
+  (window as any).GM_listValues = gmListValues;
+  (window as any).GM_addValueChangeListener = gmAddValueChangeListener;
+  (window as any).GM_removeValueChangeListener = gmRemoveValueChangeListener;
   (window as any).unsafeWindow = window;
   (window as any).Blob = NodeBlob;
   (window as any).CompressionStream = CompressionStream;
@@ -57,14 +101,15 @@ if (typeof window !== 'undefined') {
     configurable: true
   });
 
-  if (typeof (globalThis as any).Response === 'undefined' && typeof (global as any).Response !== 'undefined') {
-    (window as any).Response = (global as any).Response;
-    (globalThis as any).Response = (global as any).Response;
+  if (typeof (globalThis as any).Response === 'undefined' && typeof (globalThis as any).Response !== 'undefined') {
+    (window as any).Response = (globalThis as any).Response;
+    (globalThis as any).Response = (globalThis as any).Response;
   }
 }
 
 beforeEach(() => {
   storage.clear();
+  valueListeners.clear();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
 });

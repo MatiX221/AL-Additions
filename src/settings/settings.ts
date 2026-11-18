@@ -1,7 +1,8 @@
-import { store, safe, esc } from '../utils/helpers';
-import type { SettingRow, SettingType, FeatureMeta, RegisteredFeature } from '../types';
+import { store, safe, esc, parseToggle } from '../utils/helpers';
+import { SETTING_PREFIX, type SettingRow, type SettingType, type FeatureMeta, type RegisteredFeature } from '../types';
 
-export const PREFIX = 'ala_setting_';
+export { SETTING_PREFIX as PREFIX };
+const PREFIX = SETTING_PREFIX;
 export const features: RegisteredFeature[] = [];
 export const ROWS: Record<string, SettingRow> = {};
 
@@ -22,7 +23,7 @@ export const TYPES: Record<
   }
 > = {
   toggle: {
-    normalize: (v) => (v === 'false' ? false : !!v),
+    normalize: (v) => parseToggle(v),
     html: (r, v) =>
       `<span class="ala-switch"><input type="checkbox" data-key="${r.key}" ${v ? 'checked' : ''}><span class="ala-slider"></span></span>`,
     read: (el: HTMLInputElement) => el.checked,

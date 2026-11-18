@@ -6,6 +6,11 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    environmentOptions: {
+      jsdom: {
+        url: 'https://anilist.co/'
+      }
+    },
     globals: true,
     setupFiles: ['./__tests__/setup.ts'],
     include: ['__tests__/**/*.test.ts'],

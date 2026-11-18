@@ -23,10 +23,13 @@
 // @connect      www.mangaupdates.com
 // @connect      www.novelupdates.com
 // @connect      s4.anilist.co
+// @grant        GM_addValueChangeListener
 // @grant        GM_deleteValue
 // @grant        GM_download
 // @grant        GM_getValue
+// @grant        GM_listValues
 // @grant        GM_registerMenuCommand
+// @grant        GM_removeValueChangeListener
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -37,13 +40,17 @@
 
 (function() {
 	"use strict";
+	var _GM_addValueChangeListener = (() => typeof GM_addValueChangeListener != "undefined" ? GM_addValueChangeListener : void 0)();
 	var _GM_deleteValue = (() => typeof GM_deleteValue != "undefined" ? GM_deleteValue : void 0)();
 	var _GM_download = (() => typeof GM_download != "undefined" ? GM_download : void 0)();
 	var _GM_getValue = (() => typeof GM_getValue != "undefined" ? GM_getValue : void 0)();
+	var _GM_listValues = (() => typeof GM_listValues != "undefined" ? GM_listValues : void 0)();
 	var _GM_registerMenuCommand = (() => typeof GM_registerMenuCommand != "undefined" ? GM_registerMenuCommand : void 0)();
+	var _GM_removeValueChangeListener = (() => typeof GM_removeValueChangeListener != "undefined" ? GM_removeValueChangeListener : void 0)();
 	var _GM_setValue = (() => typeof GM_setValue != "undefined" ? GM_setValue : void 0)();
 	var _GM_xmlhttpRequest = (() => typeof GM_xmlhttpRequest != "undefined" ? GM_xmlhttpRequest : void 0)();
 	var _unsafeWindow = (() => typeof unsafeWindow != "undefined" ? unsafeWindow : void 0)();
+	var SETTING_PREFIX = "ala_setting_";
 	var HOST = location.hostname;
 	var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 	var clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
@@ -54,6 +61,7 @@
 		"\"": "&quot;",
 		"'": "&#39;"
 	})[c]);
+	var parseToggle = (v) => v === "false" ? false : !!v;
 	var safe = (fn, label) => {
 		try {
 			return fn();
@@ -116,30 +124,90 @@
 		a.click();
 		a.remove();
 	}
+	function resolveGm(name, imported) {
+		const g = globalThis;
+		if (Object.prototype.hasOwnProperty.call(g, name)) return typeof g[name] === "function" ? g[name] : null;
+		if (typeof window !== "undefined" && Object.prototype.hasOwnProperty.call(window, name)) {
+			const w = window;
+			return typeof w[name] === "function" ? w[name] : null;
+		}
+		return typeof imported === "function" ? imported : null;
+	}
 	var store$1 = {
 		get: (k, d) => _GM_getValue(k, d),
 		set: (k, v) => _GM_setValue(k, v),
-		del: (k) => _GM_deleteValue(k)
+		del: (k) => _GM_deleteValue(k),
+		list: () => {
+			const fn = resolveGm("GM_listValues", _GM_listValues);
+			if (!fn) return [];
+			try {
+				const keys = fn();
+				return Array.isArray(keys) ? keys : [];
+			} catch {
+				return [];
+			}
+		},
+		watch: (key, cb) => {
+			const addFn = resolveGm("GM_addValueChangeListener", _GM_addValueChangeListener);
+			if (!addFn) return () => {};
+			let id;
+			try {
+				id = addFn(key, (name, oldVal, newVal, remote) => {
+					cb(name, oldVal, newVal, !!remote);
+				});
+			} catch {
+				return () => {};
+			}
+			return () => {
+				if (id === void 0) return;
+				const removeFn = resolveGm("GM_removeValueChangeListener", _GM_removeValueChangeListener);
+				if (!removeFn) return;
+				try {
+					removeFn(id);
+				} catch {}
+			};
+		}
 	};
-	var MODULE_SETTING_MAP = {
-		fastLoad: "ala_setting_debugFastLoad",
-		sync: "ala_setting_debugSync",
-		compareView: "ala_setting_debugCompareView",
-		mediaInfo: "ala_setting_debugMediaInfo",
-		tierLabels: "ala_setting_debugTierLabels",
-		general: "ala_setting_debugGeneral"
-	};
+	var debugChannels = new Map([
+		["fastLoad", {
+			settingKey: `${SETTING_PREFIX}debugFastLoad`,
+			def: false,
+			pattern: /^\[(?:FASTLOAD|ALFL)/i
+		}],
+		["sync", {
+			settingKey: `${SETTING_PREFIX}debugSync`,
+			def: false,
+			pattern: /^\[SYNC/i
+		}],
+		["compareView", {
+			settingKey: `${SETTING_PREFIX}debugCompareView`,
+			def: false,
+			pattern: /^\[COMPARE/i
+		}],
+		["mediaInfo", {
+			settingKey: `${SETTING_PREFIX}debugMediaInfo`,
+			def: false,
+			pattern: /^\[MEDIAINFO/i
+		}],
+		["tierLabels", {
+			settingKey: `${SETTING_PREFIX}debugTierLabels`,
+			def: false,
+			pattern: /^\[TIER/i
+		}],
+		["general", {
+			settingKey: `${SETTING_PREFIX}debugGeneral`,
+			def: false,
+			pattern: /^\[(?:CORE|OBSERVER)/i
+		}]
+	]);
 	function isDebug(module) {
 		try {
 			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 			if (win.__ALA_DEBUG__ || win.__ALFL_DEBUG__) return true;
-			if (!store$1.get("ala_setting_devModeEnabled", false)) return false;
+			if (!store$1.get(`ala_setting_devModeEnabled`, false)) return false;
 			if (!module) return true;
-			const settingKey = MODULE_SETTING_MAP[module];
-			if (settingKey) {
-				const def = module === "fastLoad";
-				return store$1.get(settingKey, def);
-			}
+			const channel = debugChannels.get(module);
+			if (channel) return !!store$1.get(channel.settingKey, channel.def);
 			return true;
 		} catch {
 			return false;
@@ -147,12 +215,10 @@
 	}
 	function logDebug(moduleOrTag, ...args) {
 		let mod;
-		if (/^\[(?:FASTLOAD|ALFL)/i.test(moduleOrTag)) mod = "fastLoad";
-		else if (/^\[SYNC/i.test(moduleOrTag)) mod = "sync";
-		else if (/^\[COMPARE/i.test(moduleOrTag)) mod = "compareView";
-		else if (/^\[MEDIAINFO/i.test(moduleOrTag)) mod = "mediaInfo";
-		else if (/^\[TIER/i.test(moduleOrTag)) mod = "tierLabels";
-		else if (/^\[CORE|OBSERVER/i.test(moduleOrTag)) mod = "general";
+		for (const [channel, entry] of debugChannels) if (entry.pattern && entry.pattern.test(moduleOrTag)) {
+			mod = channel;
+			break;
+		}
 		if (!isDebug(mod)) return;
 		console.debug(moduleOrTag, ...args);
 	}
@@ -167,13 +233,27 @@
 	}
 	var jsonSet = (key, value) => store$1.set(key, JSON.stringify(value));
 	function persistent(key, prune) {
-		let data = jsonGet(key, {});
-		if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
-		if (prune) safe(() => prune(data), "cache prune");
-		const save = debounce(() => safe(() => jsonSet(key, data)), 500);
+		let loaded = false;
+		let cacheData = {};
+		const ensure = () => {
+			if (!loaded) {
+				loaded = true;
+				let d = jsonGet(key, {});
+				if (!d || typeof d !== "object" || Array.isArray(d)) d = {};
+				if (prune) safe(() => prune(d), "cache prune");
+				cacheData = d;
+			}
+			return cacheData;
+		};
 		return {
-			data,
-			save
+			get data() {
+				return ensure();
+			},
+			set data(val) {
+				loaded = true;
+				cacheData = val;
+			},
+			save: debounce(() => safe(() => jsonSet(key, ensure())), 500)
 		};
 	}
 	var gm = {
@@ -206,7 +286,7 @@
 		for (let i = 0; i < len; i++) out += chars[arr[i] % 62];
 		return out;
 	}
-	var PREFIX = "ala_setting_";
+	var PREFIX = SETTING_PREFIX;
 	var features = [];
 	var ROWS = {};
 	var textIO = {
@@ -217,7 +297,7 @@
 	};
 	var TYPES$1 = {
 		toggle: {
-			normalize: (v) => v === "false" ? false : !!v,
+			normalize: (v) => parseToggle(v),
 			html: (r, v) => `<span class="ala-switch"><input type="checkbox" data-key="${r.key}" ${v ? "checked" : ""}><span class="ala-slider"></span></span>`,
 			read: (el) => el.checked,
 			write: (el, v) => {
@@ -324,7 +404,7 @@
 		safe(() => {
 			store$1.del("al_token");
 			for (const r of Object.values(ROWS)) {
-				if (store$1.get("ala_setting_" + r.key, void 0) !== void 0) continue;
+				if (store$1.get(PREFIX + r.key, void 0) !== void 0) continue;
 				for (const name of r.legacy) {
 					let v = store$1.get(PREFIX + name, void 0);
 					if (v === void 0) {
@@ -6568,7 +6648,7 @@
 	});
 	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
 	function getManualOverrides() {
-		let raw = store$1.get(PREFIX + OVERRIDES_SETTING_KEY, {});
+		let raw = store$1.get(SETTING_PREFIX + OVERRIDES_SETTING_KEY, {});
 		if (typeof raw === "string") try {
 			raw = JSON.parse(raw);
 		} catch (_) {
@@ -6578,7 +6658,7 @@
 		return raw;
 	}
 	function saveManualOverrides(overrides) {
-		store$1.set(PREFIX + OVERRIDES_SETTING_KEY, overrides);
+		store$1.set(SETTING_PREFIX + OVERRIDES_SETTING_KEY, overrides);
 		const hiddenInput = document.querySelector(`#ala-settings-panel input[data-key="${OVERRIDES_SETTING_KEY}"]`);
 		if (hiddenInput) hiddenInput.value = JSON.stringify(overrides);
 	}
@@ -9341,7 +9421,7 @@
 		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
 		const data = {};
 		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(PREFIX + r.key, r.def);
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
 			data[r.key] = rawVal;
 		}
 		if (includeSecrets) for (const key of SENSITIVE_KEYS) {
@@ -9384,7 +9464,7 @@
 	function createRawBackup(overrides) {
 		const data = {};
 		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(PREFIX + r.key, r.def);
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
 			data[r.key] = rawVal;
 		}
 		for (const key of SENSITIVE_KEYS) {
@@ -9422,11 +9502,11 @@
 				}
 				continue;
 			}
-			const settingKey = key.startsWith("ala_setting_") ? key.slice(PREFIX.length) : key;
+			const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
 			const r = ROWS[settingKey];
 			if (r) {
 				const normalized = TYPES$1[r.type].normalize(rawValue, r);
-				store$1.set(PREFIX + settingKey, normalized);
+				store$1.set(SETTING_PREFIX + settingKey, normalized);
 				applied++;
 			}
 		}
@@ -10431,9 +10511,9 @@
 				const parsed = JSON.parse(legacy);
 				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
 					const check = validateTiers(parsed.tiers);
-					if (check.valid && check.tiers) store$1.set(PREFIX + "tierLabels", check.tiers);
+					if (check.valid && check.tiers) store$1.set(SETTING_PREFIX + "tierLabels", check.tiers);
 				}
-				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
+				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(SETTING_PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
 			}
 		} catch (_) {}
 		addStyle("ala-tier-labels-css", `

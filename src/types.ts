@@ -1,3 +1,13 @@
+export const SETTING_PREFIX = 'ala_setting_';
+
+export const ANILIST_SESSION_KEYS = [
+  'al_token',
+  'al_username',
+  'al_user_id',
+  'al_score_format',
+  'al_token_auth'
+] as const;
+
 export type SettingType = 'toggle' | 'number' | 'select' | 'list' | 'json';
 
 export type ModuleLayer = 'intercept' | 'preload' | 'service' | 'feature' | 'shell';

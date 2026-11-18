@@ -23,6 +23,9 @@ export default defineConfig({
             'GM_setValue',
             'GM_registerMenuCommand',
             'GM_deleteValue',
+            'GM_listValues',
+            'GM_addValueChangeListener',
+            'GM_removeValueChangeListener',
             'GM_xmlhttpRequest',
             'GM_download',
             'unsafeWindow'
