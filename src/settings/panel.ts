@@ -14,7 +14,8 @@ import { openOverridesModal } from '../modules/sync/overridesModal';
 import { OVERRIDES_SETTING_KEY, getManualOverrides } from '../modules/sync/overrides';
 import { openAniSongsModal } from '../modules/anisongs/anisongModal';
 
-const SECTIONS = ['Sync', 'AniList Enhancements', 'External Links, Downloads & Mappings', 'Advanced'];
+const PINNED_FIRST = ['Sync', 'General'];
+const PINNED_LAST = ['Advanced'];
 
 const CSS = `
   .ala-settings-nav-section{margin-top:26px}
@@ -235,10 +236,18 @@ function backupRestoreHtml(): string {
 }
 
 function sectionsHtml(): string {
-  const order = [...new Set([...SECTIONS, ...features.map((f) => f.section)])];
+  const all = [...new Set(features.map((f) => f.section))];
+  const pinned = new Set([...PINNED_FIRST, ...PINNED_LAST]);
+  const order = [
+    ...PINNED_FIRST.filter((s) => all.includes(s)),
+    ...all.filter((s) => !pinned.has(s)).sort((a, b) => a.localeCompare(b)),
+    ...PINNED_LAST.filter((s) => all.includes(s))
+  ];
   return order
     .map((name) => {
-      const items = features.filter((f) => f.section === name);
+      const items = features
+        .filter((f) => f.section === name)
+        .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
       return items.length
         ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
             <summary class="ala-section-summary">

@@ -36,7 +36,7 @@ defineFeature(
     id: 'fastLoad',
     key: 'fastLoadEnabled',
     section: 'AniList Enhancements',
-    early: true,
+    layer: 'intercept',
     def: false,
     title: 'AniList Fast Load',
     help: 'Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.'

@@ -7,7 +7,7 @@ defineFeature(
     id: 'tagPercent',
     key: 'tagFilterEnabled',
     section: 'AniList Enhancements',
-    early: true,
+    layer: 'intercept',
     def: false,
     legacy: ['tagFilterEnabled', 'browseTagRankFilterEnabled'],
     title: 'Browse Tag Rank Filter',

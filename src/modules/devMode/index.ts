@@ -5,6 +5,7 @@ defineFeature(
     id: 'devMode',
     key: 'devModeEnabled',
     section: 'Advanced',
+    layer: 'service',
     def: false,
     title: 'Developer Mode',
     help: 'Enable developer diagnostics and verbose module logging in the browser console.',

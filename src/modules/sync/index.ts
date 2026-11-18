@@ -28,6 +28,7 @@ defineFeature(
     key: 'syncEnabled',
     section: 'Sync',
     hosts: ['anilist.co', 'myanimelist.net'],
+    layer: 'service',
     alwaysRun: true,
     def: false,
     legacy: ['syncEnabled', 'syncOn'],
@@ -150,6 +151,7 @@ defineFeature(
     type: 'json',
     def: {},
     section: 'External Links, Downloads & Mappings',
+    layer: 'service',
     title: 'Manual Mappings & Sync Audit',
     help: 'Manage custom MyAnimeList ID overrides, entries ignored from sync, and review database discrepancies.'
   },

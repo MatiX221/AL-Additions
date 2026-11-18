@@ -350,24 +350,163 @@
 		migrate
 	};
 	var modules = [];
-	var defineModule = (name, setting, init, hosts = ["anilist.co"], early = false) => {
+	var LAYER_ORDER = {
+		intercept: 0,
+		preload: 1,
+		service: 2,
+		feature: 3,
+		shell: 4
+	};
+	var ID_RE = /^[a-z][A-Za-z0-9]*$/;
+	var registeredIds = new Set();
+	var defineModule = (name, setting, init, hosts = ["anilist.co"], early = false, layer, dependsOn = [], after = []) => {
+		const resolvedLayer = layer ?? (early ? "intercept" : "feature");
+		const resolvedEarly = resolvedLayer === "intercept" || resolvedLayer === "preload";
 		modules.push({
 			name,
 			setting,
 			init,
 			hosts,
-			early
+			early: resolvedEarly,
+			layer: resolvedLayer,
+			dependsOn: dependsOn.slice(),
+			after: after.slice()
 		});
 	};
-	var defineFeature = (meta, init) => {
-		Settings.register(meta);
-		defineModule(meta.id, meta.alwaysRun ? null : meta.key, init, meta.hosts, meta.early);
+	var registerShellModule = (name, init, hosts = ["anilist.co"]) => {
+		if (!ID_RE.test(name)) {
+			console.error(`[AL-Additions] Invalid shell module ID "${name}". Must match ${ID_RE}.`);
+			return;
+		}
+		if (registeredIds.has(name)) {
+			console.error(`[AL-Additions] Duplicate module ID "${name}" ignored.`);
+			return;
+		}
+		registeredIds.add(name);
+		defineModule(name, null, init, hosts, false, "shell");
 	};
-	function startModules(early) {
-		for (const m of modules) {
-			if (m.early !== early || !m.hosts.includes(HOST)) continue;
+	var defineFeature = (meta, init) => {
+		if (!ID_RE.test(meta.id)) {
+			console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+			return;
+		}
+		if (registeredIds.has(meta.id)) {
+			console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
+			return;
+		}
+		registeredIds.add(meta.id);
+		Settings.register(meta);
+		const layer = meta.layer ?? (meta.early ? "intercept" : "feature");
+		defineModule(meta.id, meta.alwaysRun ? null : meta.key, init, meta.hosts, layer === "intercept" || layer === "preload", layer, meta.dependsOn || [], meta.after || []);
+	};
+	function hasHardDepPath(byId, startId, targetId, seen = new Set()) {
+		if (startId === targetId) return true;
+		if (seen.has(startId)) return false;
+		seen.add(startId);
+		const mod = byId.get(startId);
+		if (!mod) return false;
+		for (const dep of mod.dependsOn) if (hasHardDepPath(byId, dep, targetId, seen)) return true;
+		return false;
+	}
+	function resolveBootOrder(all) {
+		const active = new Map();
+		for (const m of all) {
+			if (!m.hosts.includes("*") && !m.hosts.includes(HOST)) continue;
 			if (m.setting && !Settings.get(m.setting)) continue;
-			logDebug("[CORE]", `Initializing module "${m.name}" (early=${early})`);
+			active.set(m.name, m);
+		}
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const [id, m] of active) {
+				const invalidDep = m.dependsOn.find((depId) => {
+					const dep = active.get(depId);
+					if (!dep) return true;
+					return LAYER_ORDER[dep.layer] > LAYER_ORDER[m.layer];
+				});
+				if (invalidDep !== void 0) {
+					console.warn(`[AL-Additions] Module "${id}" disabled: dependency "${invalidDep}" is unavailable or in a later layer.`);
+					active.delete(id);
+					changed = true;
+				}
+			}
+		}
+		const hardIn = new Map();
+		const hardOut = new Map();
+		for (const id of active.keys()) {
+			hardIn.set(id, 0);
+			hardOut.set(id, []);
+		}
+		for (const [id, m] of active) for (const depId of new Set(m.dependsOn)) {
+			hardIn.set(id, (hardIn.get(id) || 0) + 1);
+			hardOut.get(depId).push(id);
+		}
+		const q = [];
+		for (const [id, deg] of hardIn) if (deg === 0) q.push(id);
+		const acyclicIds = new Set();
+		while (q.length) {
+			const id = q.shift();
+			acyclicIds.add(id);
+			for (const next of hardOut.get(id) || []) {
+				const d = (hardIn.get(next) || 0) - 1;
+				hardIn.set(next, d);
+				if (d === 0) q.push(next);
+			}
+		}
+		for (const id of [...active.keys()]) if (!acyclicIds.has(id)) {
+			console.warn(`[AL-Additions] Module "${id}" disabled due to dependency cycle.`);
+			active.delete(id);
+		}
+		const ordered = [];
+		for (const layer of [
+			"intercept",
+			"preload",
+			"service",
+			"feature",
+			"shell"
+		]) {
+			const layerMods = [...active.values()].filter((m) => m.layer === layer);
+			if (!layerMods.length) continue;
+			const layerSet = new Set(layerMods.map((m) => m.name));
+			const hardDeps = new Map();
+			const allDeps = new Map();
+			const dependents = new Map();
+			for (const m of layerMods) {
+				hardDeps.set(m.name, new Set());
+				allDeps.set(m.name, new Set());
+				dependents.set(m.name, new Set());
+			}
+			for (const m of layerMods) for (const depId of m.dependsOn) if (layerSet.has(depId) && depId !== m.name) {
+				hardDeps.get(m.name).add(depId);
+				allDeps.get(m.name).add(depId);
+				dependents.get(depId).add(m.name);
+			}
+			for (const m of layerMods) for (const afterId of m.after) {
+				if (!layerSet.has(afterId) || afterId === m.name) continue;
+				if (hasHardDepPath(active, afterId, m.name)) continue;
+				allDeps.get(m.name).add(afterId);
+				dependents.get(afterId).add(m.name);
+			}
+			const remaining = new Set(layerSet);
+			while (remaining.size) {
+				const ready = [...remaining].filter((id) => allDeps.get(id).size === 0).sort((a, b) => a.localeCompare(b));
+				let pick;
+				if (ready.length) pick = ready[0];
+				else pick = [...remaining].filter((id) => hardDeps.get(id).size === 0).sort((a, b) => a.localeCompare(b))[0] || [...remaining].sort((a, b) => a.localeCompare(b))[0];
+				remaining.delete(pick);
+				ordered.push(active.get(pick));
+				for (const next of dependents.get(pick) || []) {
+					hardDeps.get(next)?.delete(pick);
+					allDeps.get(next)?.delete(pick);
+				}
+			}
+		}
+		return ordered;
+	}
+	function startModules(early) {
+		const ordered = resolveBootOrder(modules).filter((m) => m.early === early);
+		for (const m of ordered) {
+			logDebug("[CORE]", `Initializing module "${m.name}" (layer=${m.layer}, early=${early})`);
 			try {
 				Promise.resolve(m.init()).catch((e) => console.error("[AL-Additions]", m.name, e));
 			} catch (e) {
@@ -3928,6 +4067,7 @@
 		id: "devMode",
 		key: "devModeEnabled",
 		section: "Advanced",
+		layer: "service",
 		def: false,
 		title: "Developer Mode",
 		help: "Enable developer diagnostics and verbose module logging in the browser console.",
@@ -5709,7 +5849,7 @@
 		id: "fastLoad",
 		key: "fastLoadEnabled",
 		section: "AniList Enhancements",
-		early: true,
+		layer: "intercept",
 		def: false,
 		title: "AniList Fast Load",
 		help: "Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start."
@@ -9906,6 +10046,7 @@
 		key: "syncEnabled",
 		section: "Sync",
 		hosts: ["anilist.co", "myanimelist.net"],
+		layer: "service",
 		alwaysRun: true,
 		def: false,
 		legacy: ["syncEnabled", "syncOn"],
@@ -10021,6 +10162,7 @@
 		type: "json",
 		def: {},
 		section: "External Links, Downloads & Mappings",
+		layer: "service",
 		title: "Manual Mappings & Sync Audit",
 		help: "Manage custom MyAnimeList ID overrides, entries ignored from sync, and review database discrepancies."
 	}, () => {});
@@ -10028,7 +10170,7 @@
 		id: "tagPercent",
 		key: "tagFilterEnabled",
 		section: "AniList Enhancements",
-		early: true,
+		layer: "intercept",
 		def: false,
 		legacy: ["tagFilterEnabled", "browseTagRankFilterEnabled"],
 		title: "Browse Tag Rank Filter",
@@ -10579,12 +10721,8 @@
 	];
 	var creditLink = (url, text, cls = "") => `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
 	var creditsHtml = () => CREDITS.map((c) => `<div class="ala-credit"><b>${c.url ? creditLink(c.url, c.name) : esc(c.name)}</b> — ${esc(c.note)}${c.works ? `<ul>${c.works.map(([label, url]) => `<li>${creditLink(url, label)}</li>`).join("")}</ul>` : ""}</div>`).join("");
-	var SECTIONS = [
-		"Sync",
-		"AniList Enhancements",
-		"External Links, Downloads & Mappings",
-		"Advanced"
-	];
+	var PINNED_FIRST = ["Sync", "General"];
+	var PINNED_LAST = ["Advanced"];
 	var CSS$1 = `
   .ala-settings-nav-section{margin-top:26px}
   .ala-settings-nav-heading{color:rgb(var(--color-text-lighter));margin-bottom:12px}
@@ -10789,8 +10927,14 @@
   </details>`;
 	}
 	function sectionsHtml() {
-		return [...new Set([...SECTIONS, ...features.map((f) => f.section)])].map((name) => {
-			const items = features.filter((f) => f.section === name);
+		const all = [...new Set(features.map((f) => f.section))];
+		const pinned = new Set([...PINNED_FIRST, ...PINNED_LAST]);
+		return [
+			...PINNED_FIRST.filter((s) => all.includes(s)),
+			...all.filter((s) => !pinned.has(s)).sort((a, b) => a.localeCompare(b)),
+			...PINNED_LAST.filter((s) => all.includes(s))
+		].map((name) => {
+			const items = features.filter((f) => f.section === name).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
 			return items.length ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
             <summary class="ala-section-summary">
               <span class="ala-section-title">${esc(name)}</span>
@@ -11340,7 +11484,7 @@
 			document.getElementById("ala-settings-mobile-launcher")?.remove();
 		});
 	}
-	defineModule("settings", null, initSettingsPage);
+	registerShellModule("settings", initSettingsPage);
 	Settings.migrate();
 	safe(captureCredentials, "credential capture");
 	startModules(true);

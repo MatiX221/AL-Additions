@@ -1,5 +1,8 @@
 export type SettingType = 'toggle' | 'number' | 'select' | 'list' | 'json';
 
+export type ModuleLayer = 'intercept' | 'preload' | 'service' | 'feature' | 'shell';
+export type FeatureLayer = Exclude<ModuleLayer, 'shell'>;
+
 export interface SettingOption {
   key: string;
   type: SettingType;
@@ -29,6 +32,9 @@ export interface FeatureMeta {
   legacy?: string[];
   options?: SettingOption[];
   hosts?: string[];
+  layer?: FeatureLayer;
+  dependsOn?: string[];
+  after?: string[];
   early?: boolean;
   alwaysRun?: boolean;
 }
@@ -54,4 +60,7 @@ export interface ModuleDef {
   init: () => void | Promise<void>;
   hosts: string[];
   early: boolean;
+  layer: ModuleLayer;
+  dependsOn: string[];
+  after: string[];
 }
