@@ -549,16 +549,28 @@
 	};
 	var EventBusImpl = class {
 		listeners = new Map();
-		emit(event, ...args) {
-			const key = String(event);
+		retained = new Map();
+		dispatch(key, payload) {
 			const set = this.listeners.get(key);
 			if (!set) return;
-			const [payload] = args;
 			for (const cb of [...set]) try {
 				cb(payload);
 			} catch (e) {
 				console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
 			}
+		}
+		emit(event, ...args) {
+			const key = String(event);
+			const [payload] = args;
+			const existing = this.retained.get(key);
+			if (existing) existing.payload = payload;
+			this.dispatch(key, payload);
+		}
+		emitRetained(event, ...args) {
+			const key = String(event);
+			const [payload] = args;
+			this.retained.set(key, { payload });
+			this.dispatch(key, payload);
 		}
 		on(event, cb) {
 			const key = String(event);
@@ -573,9 +585,47 @@
 				if (set && set.size === 0) this.listeners.delete(key);
 			};
 		}
+		onRetained(event, cb) {
+			const key = String(event);
+			const unsub = this.on(event, cb);
+			if (this.retained.has(key)) {
+				const entry = this.retained.get(key);
+				try {
+					cb(entry.payload);
+				} catch (e) {
+					console.error(`[AL-Additions] Retained event listener for "${key}" failed:`, e);
+				}
+			}
+			return unsub;
+		}
+		emitRetainedOwned(owner, event, ...args) {
+			const key = String(event);
+			const [payload] = args;
+			this.retained.set(key, {
+				payload,
+				owner
+			});
+			this.dispatch(key, payload);
+		}
+		clearRetainedByOwner(owner) {
+			for (const [key, entry] of [...this.retained]) if (entry.owner === owner) this.retained.delete(key);
+		}
 	};
 	var ServiceRegistry = new ServiceRegistryImpl();
 	var EventBus = new EventBusImpl();
+	function isUrlLike(input, win) {
+		if (!input || typeof input !== "object") return false;
+		if (typeof URL !== "undefined" && input instanceof URL) return true;
+		const WinURL = win?.URL;
+		if (typeof WinURL === "function" && input instanceof WinURL) return true;
+		return typeof input.href === "string" && typeof input.url !== "string";
+	}
+	function isRequestLike(input, win) {
+		if (!input || typeof input !== "object") return false;
+		if (typeof Request !== "undefined" && input instanceof Request) return true;
+		const WinRequest = win?.Request;
+		return typeof WinRequest === "function" && input instanceof WinRequest;
+	}
 	function resolvePageWindow() {
 		return typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 	}
@@ -584,7 +634,7 @@
 		if (rawUrl === "/graphql") return true;
 		try {
 			const u = new URL(rawUrl, location.href);
-			return u.pathname === "/graphql" && (u.hostname === "anilist.co" || u.hostname === "graphql.anilist.co");
+			return u.origin === "https://graphql.anilist.co" || u.hostname === "anilist.co" && u.pathname.replace(/\/$/, "") === "/graphql";
 		} catch {
 			return false;
 		}
@@ -634,12 +684,12 @@
 				const baseFetch = origFetch;
 				const curHost = win?.location?.hostname || location.hostname;
 				if (fetchOwnerActive || gqlListeners.size === 0 || curHost !== "anilist.co") return baseFetch.apply(this, arguments);
-				const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input && typeof input.url === "string" ? input.url : "";
+				const rawUrl = typeof input === "string" ? input : isUrlLike(input, win) ? input.href : typeof input?.url === "string" ? input.url : "";
 				if ((init?.method || (input && typeof input.method === "string" ? input.method : "GET")).toUpperCase() !== "POST" || !isAniListGraphqlUrl(rawUrl)) return baseFetch.apply(this, arguments);
 				let parsedBody = null;
 				try {
 					if (typeof init?.body === "string") parsedBody = JSON.parse(init.body);
-					else if (typeof Request !== "undefined" && input instanceof Request) {
+					else if (isRequestLike(input, win) && !input.bodyUsed && typeof input.clone === "function") {
 						const text = await input.clone().text();
 						if (text) parsedBody = JSON.parse(text);
 					}
@@ -657,7 +707,7 @@
 				const res = await baseFetch.apply(this, arguments);
 				if (query && !fetchOwnerActive && gqlListeners.size > 0) {
 					let data = void 0;
-					try {
+					if (res && !res.bodyUsed && typeof res.clone === "function") try {
 						data = (await res.clone().json())?.data;
 					} catch {}
 					emitGqlFetch({
@@ -1510,6 +1560,8 @@
 			isPrefetchSuppressed: () => CoreHooks.isPrefetchSuppressed()
 		};
 		const debugChannel = rec.debugChannel || rec.id;
+		const eventOwner = Symbol(`events:${rec.id}`);
+		let retainedTracked = false;
 		return {
 			id: rec.id,
 			get: (key) => Settings.get(key),
@@ -1582,7 +1634,16 @@
 			},
 			events: {
 				emit: (event, ...args) => EventBus.emit(event, ...args),
-				on: (event, cb) => track(EventBus.on(event, cb))
+				emitRetained: (event, ...args) => {
+					if (disposed) return;
+					if (!retainedTracked) {
+						retainedTracked = true;
+						track(() => EventBus.clearRetainedByOwner(eventOwner));
+					}
+					EventBus.emitRetainedOwned(eventOwner, event, ...args);
+				},
+				on: (event, cb) => track(EventBus.on(event, cb)),
+				onRetained: (event, cb) => track(EventBus.onRetained(event, cb))
 			},
 			hooks: trackedHooks,
 			debug: {
@@ -1590,7 +1651,9 @@
 				log: (...args) => logDebug(`[${debugChannel.toUpperCase()}]`, ...args)
 			},
 			setStandalonePaused: (paused) => {
-				rec.standalonePaused = !!paused;
+				const next = !!paused;
+				rec.standalonePaused = next;
+				if (next) cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
 				syncAllLiveStatuses(resolveAllStates().statuses);
 			}
 		};
@@ -1604,6 +1667,45 @@
 		rec.runtimeError = void 0;
 		if (resetStandalone) rec.standalonePaused = false;
 	}
+	function cascadeDispose(seedIds, opts = {}) {
+		const seedSet = new Set(seedIds);
+		const toStop = new Set();
+		for (const rec of records) if (rec.booted && seedSet.has(rec.id)) toStop.add(rec.id);
+		let added = true;
+		while (added) {
+			added = false;
+			for (const rec of records) if (rec.booted && !toStop.has(rec.id) && rec.dependsOn.some((d) => toStop.has(d))) {
+				toStop.add(rec.id);
+				added = true;
+			}
+		}
+		if (toStop.size === 0) return;
+		const stopOrdered = [...toStop].sort((a, b) => {
+			const ra = recordsById.get(a);
+			const rb = recordsById.get(b);
+			if (LAYER_ORDER[ra.layer] !== LAYER_ORDER[rb.layer]) return LAYER_ORDER[rb.layer] - LAYER_ORDER[ra.layer];
+			return rb.id.localeCompare(ra.id);
+		});
+		const finalStopOrder = [];
+		const stoppedSet = new Set();
+		const visitStop = (id, stack = new Set()) => {
+			if (stoppedSet.has(id) || stack.has(id)) return;
+			stack.add(id);
+			for (const candidate of stopOrdered) {
+				const cr = recordsById.get(candidate);
+				if (cr && cr.dependsOn.includes(id)) visitStop(candidate, stack);
+			}
+			stack.delete(id);
+			stoppedSet.add(id);
+			finalStopOrder.push(id);
+		};
+		for (const id of stopOrdered) visitStop(id);
+		for (const id of finalStopOrder) {
+			const rec = recordsById.get(id);
+			if (!rec) continue;
+			disposeRecord(rec, !(opts.preserveStandaloneSeeds && seedSet.has(id)));
+		}
+	}
 	function bootRecord(rec) {
 		if (rec.booted) return Promise.resolve();
 		const seq = ++rec.bootSeq;
@@ -1616,15 +1718,12 @@
 		const ctx = createContextForRecord(rec, cleanups, ac);
 		logDebug("[CORE]", `Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
 		const handleFailure = (err) => {
+			if (rec.bootSeq !== seq) return;
 			const msg = err instanceof Error ? err.message : String(err);
 			console.error(`[AL-Additions] Module "${rec.id}" failed during setup:`, err);
-			runCleanupsReverse(rec.id, cleanups);
-			if (rec.bootSeq === seq) {
-				rec.booted = false;
-				rec.abortController = null;
-				rec.runtimeError = msg;
-				syncAllLiveStatuses(resolveAllStates().statuses);
-			}
+			cascadeDispose([rec.id]);
+			rec.runtimeError = msg;
+			syncAllLiveStatuses(resolveAllStates().statuses);
 		};
 		try {
 			const res = rec.setup(ctx);
@@ -1814,39 +1913,13 @@
 				const targetSet = new Set(ids);
 				const graph = resolveAllStates();
 				const nextActiveIds = new Set(graph.ordered.map((r) => r.id));
-				const toStop = new Set();
-				for (const rec of records) if (rec.booted && (targetSet.has(rec.id) || !nextActiveIds.has(rec.id))) toStop.add(rec.id);
-				let added = true;
-				while (added) {
-					added = false;
-					for (const rec of records) if (rec.booted && !toStop.has(rec.id) && rec.dependsOn.some((d) => toStop.has(d))) {
-						toStop.add(rec.id);
-						added = true;
-					}
-				}
-				const stopOrdered = [...toStop].sort((a, b) => {
-					const ra = recordsById.get(a);
-					const rb = recordsById.get(b);
-					if (LAYER_ORDER[ra.layer] !== LAYER_ORDER[rb.layer]) return LAYER_ORDER[rb.layer] - LAYER_ORDER[ra.layer];
-					return rb.id.localeCompare(ra.id);
-				});
-				const finalStopOrder = [];
-				const stoppedSet = new Set();
-				const visitStop = (id, stack = new Set()) => {
-					if (stoppedSet.has(id) || stack.has(id)) return;
-					stack.add(id);
-					for (const candidate of stopOrdered) {
-						const cr = recordsById.get(candidate);
-						if (cr && cr.dependsOn.includes(id)) visitStop(candidate, stack);
-					}
-					stack.delete(id);
-					stoppedSet.add(id);
-					finalStopOrder.push(id);
-				};
-				for (const id of stopOrdered) visitStop(id);
-				for (const id of finalStopOrder) {
+				cascadeDispose(records.filter((rec) => rec.booted && (targetSet.has(rec.id) || !nextActiveIds.has(rec.id))).map((rec) => rec.id));
+				for (const id of targetSet) {
 					const rec = recordsById.get(id);
-					if (rec) disposeRecord(rec, true);
+					if (rec && !rec.booted) {
+						rec.runtimeError = void 0;
+						rec.standalonePaused = false;
+					}
 				}
 				const freshGraph = resolveAllStates();
 				syncAllLiveStatuses(freshGraph.statuses);
@@ -1892,6 +1965,7 @@
 					found = false;
 				}
 				rec.standalonePaused = found;
+				if (found) cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
 				syncAllLiveStatuses(resolveAllStates().statuses);
 				return found;
 			}
@@ -5760,7 +5834,8 @@
 	}
 	var isGraphQL = (u) => {
 		try {
-			const url = new URL(u, win.location.href);
+			const raw = u && typeof u === "object" && typeof u.href === "string" ? u.href : u;
+			const url = new URL(raw, win.location.href);
 			return url.origin === "https://graphql.anilist.co" || url.origin === win.location.origin && url.pathname.replace(/\/$/, "") === "/graphql";
 		} catch {
 			return false;
@@ -5882,10 +5957,10 @@
 		if (res.status === 429) setPausedUntil(Date.now() + 6e4);
 	};
 	async function classify(input, init) {
-		const isRequest = input instanceof (win.Request || Request);
-		const method = String(init?.method || (isRequest ? input.method : "GET")).toUpperCase();
+		const isRequest = Boolean(input && typeof input === "object") && (typeof win.Request === "function" && input instanceof win.Request || typeof Request === "function" && input instanceof Request);
+		const method = String(init?.method || (typeof input?.method === "string" ? input.method : "GET")).toUpperCase();
 		if (method !== "POST") return null;
-		const rawUrl = isRequest ? input.url : input instanceof URL ? input.href : String(input);
+		const rawUrl = typeof input === "string" ? input : typeof input?.url === "string" ? input.url : typeof input?.href === "string" ? input.href : String(input);
 		if (!isGraphQL(rawUrl)) return null;
 		let resolvedUrl = rawUrl;
 		try {
@@ -5893,7 +5968,7 @@
 		} catch {}
 		let body = null;
 		if (typeof init?.body === "string") body = init.body;
-		else if (isRequest) try {
+		else if (isRequest && !input.bodyUsed && typeof input.clone === "function") try {
 			body = await input.clone().text();
 		} catch {}
 		if (typeof body !== "string") return null;
@@ -5987,8 +6062,8 @@
 		const original = trackedNativeFetch(nativeFetch, job, input, init);
 		const snapshot = original.then(async (res) => {
 			note429(res);
-			if (res.status !== 200) {
-				logDebug("[FASTLOAD] Response not 200:", res.status, opName);
+			if (res.status !== 200 || res.bodyUsed || typeof res.clone !== "function") {
+				logDebug("[FASTLOAD] Response not cacheable:", res.status, opName);
 				throw new Error("not cacheable");
 			}
 			const buf = await res.clone().arrayBuffer();
@@ -6047,7 +6122,7 @@
 		const p = nativeFetch(input, init);
 		if (subscribeActive && query) p.then(async (res) => {
 			let data = void 0;
-			try {
+			if (res && !res.bodyUsed && typeof res.clone === "function") try {
 				data = (await res.clone().json())?.data;
 			} catch {}
 			coreHooks?.emitGqlFetch({

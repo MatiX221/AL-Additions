@@ -875,4 +875,307 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     registry.startModules(false);
     expect(checked).toBe(true);
   });
+
+  it('cascades teardown on async setup rejection, ignores stale bootSeq, and cascades standalone pauses', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+    const log: string[] = [];
+
+    let rejectFirstSvc!: (e: Error) => void;
+    let svcAttempt = 0;
+    let triggerLatePause!: () => void;
+    let probeResult = false;
+
+    registry.defineModule({
+      id: 'asyncDep',
+      key: 'asyncDepEnabled',
+      layer: 'service',
+      title: 'Async Dep',
+      help: 'Test',
+      setup(ctx) {
+        const attempt = ++svcAttempt;
+        log.push(`asyncDep:setup:${attempt}`);
+        ctx.onCleanup(() => log.push(`asyncDep:cleanup:${attempt}`));
+        if (attempt === 1) {
+          return new Promise<void>((_res, rej) => {
+            rejectFirstSvc = rej;
+          });
+        }
+        return Promise.resolve();
+      }
+    });
+
+    registry.defineModule({
+      id: 'asyncChild',
+      key: 'asyncChildEnabled',
+      layer: 'feature',
+      dependsOn: ['asyncDep'],
+      title: 'Async Child',
+      help: 'Test',
+      setup(ctx) {
+        const run = svcAttempt;
+        log.push(`asyncChild:setup:${run}`);
+        ctx.onCleanup(() => log.push(`asyncChild:cleanup:${run}`));
+      }
+    });
+
+    settings.Settings.set('asyncDepEnabled', true);
+    settings.Settings.set('asyncChildEnabled', true);
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      registry.startModules(false);
+      expect(log).toEqual(['asyncDep:setup:1', 'asyncChild:setup:1']);
+
+      // Reload before stale attempt 1 rejects -> attempt 2 boots both; stale rejection must NOT tear down attempt 2.
+      host.reload(['asyncDep']);
+      expect(log).toContain('asyncChild:cleanup:1');
+      expect(log).toContain('asyncDep:cleanup:1');
+      expect(log).toContain('asyncDep:setup:2');
+      expect(log).toContain('asyncChild:setup:2');
+
+      rejectFirstSvc(new Error('stale rejection'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(host.getStatus('asyncDep')).toEqual({ active: true });
+      expect(host.getStatus('asyncChild')).toEqual({ active: true });
+      expect(log).not.toContain('asyncChild:cleanup:2');
+
+      // Fresh async rejection on reload tears down both asyncDep and already-booted asyncChild.
+      svcAttempt = 0;
+      host.reload(['asyncDep']);
+      rejectFirstSvc(new Error('async boom'));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(host.getStatus('asyncDep')).toEqual({ active: false, reason: 'error', error: 'async boom' });
+      expect(host.getStatus('asyncChild')).toEqual({
+        active: false,
+        reason: 'dep-unavailable',
+        missingDeps: ['asyncDep']
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    // Late setStandalonePaused(true) + probeStandalone(true) cascade to dependents too.
+    registry.defineModule({
+      id: 'stParent',
+      key: 'stParentEnabled',
+      layer: 'service',
+      title: 'Standalone Parent',
+      help: 'Test',
+      standalone: { name: 'Standalone', probe: () => probeResult },
+      setup(ctx) {
+        log.push('stParent:setup');
+        ctx.onCleanup(() => log.push('stParent:cleanup'));
+        triggerLatePause = () => ctx.setStandalonePaused(true);
+      }
+    });
+    registry.defineModule({
+      id: 'stChild',
+      key: 'stChildEnabled',
+      layer: 'feature',
+      dependsOn: ['stParent'],
+      title: 'Standalone Child',
+      help: 'Test',
+      setup(ctx) {
+        log.push('stChild:setup');
+        ctx.onCleanup(() => log.push('stChild:cleanup'));
+      }
+    });
+    settings.Settings.set('stParentEnabled', true);
+    settings.Settings.set('stChildEnabled', true);
+    registry.startModules(false);
+
+    triggerLatePause();
+    expect(log.slice(-2)).toEqual(['stChild:cleanup', 'stParent:cleanup']);
+    expect(host.getStatus('stParent')).toEqual({ active: false, reason: 'standalone-paused' });
+    expect(host.getStatus('stChild')).toEqual({
+      active: false,
+      reason: 'dep-unavailable',
+      missingDeps: ['stParent']
+    });
+
+    // Re-boot via reload and test async probeStandalone cascade
+    host.reload(['stParent']);
+    expect(host.getStatus('stParent')).toEqual({ active: true });
+    expect(host.getStatus('stChild')).toEqual({ active: true });
+    probeResult = true;
+    await host.probeStandalone('stParent');
+    expect(host.getStatus('stParent')).toEqual({ active: false, reason: 'standalone-paused' });
+    expect(host.getStatus('stChild')).toEqual({
+      active: false,
+      reason: 'dep-unavailable',
+      missingDeps: ['stParent']
+    });
+  });
+
+  it('handles cross-realm URL/Request objects and bodyUsed guards in CoreHooks fallback fetch', async () => {
+    const { bus } = await loadFreshKernel();
+    const events: any[] = [];
+
+    class ForeignURL {
+      href: string;
+      constructor(raw: string) {
+        this.href = raw;
+      }
+    }
+    class ForeignRequest {
+      url: string;
+      method: string;
+      bodyUsed: boolean;
+      private readonly rawBody: string;
+      constructor(url: string, rawBody: string, bodyUsed = false) {
+        this.url = url;
+        this.method = 'POST';
+        this.rawBody = rawBody;
+        this.bodyUsed = bodyUsed;
+      }
+      clone() {
+        return {
+          text: async () => this.rawBody
+        };
+      }
+    }
+
+    const origWinRequest = (window as any).Request;
+    const origWinFetch = window.fetch;
+
+    try {
+      (window as any).Request = ForeignRequest;
+      window.fetch = (async (input: any) => {
+        const reqUrl = typeof input === 'string' ? input : input.href || input.url;
+        if (reqUrl.includes('used-res')) {
+          return {
+            status: 200,
+            ok: true,
+            bodyUsed: true,
+            clone() {
+              throw new Error('should not clone when bodyUsed is true');
+            }
+          } as any;
+        }
+        return new Response(JSON.stringify({ data: { Viewer: { id: 7 } } }), { status: 200 });
+      }) as any;
+
+      const unsub = bus.CoreHooks.onGqlFetch((ev) => events.push(ev));
+
+      // 1. Cross-realm URL-like (not instanceof URL) + string init.body
+      await window.fetch(new ForeignURL('https://anilist.co/graphql') as any, {
+        method: 'POST',
+        body: JSON.stringify({ query: 'query UrlTest { Viewer { id } }' })
+      });
+      // 2. Foreign Request with custom constructor + .clone()
+      await window.fetch(
+        new ForeignRequest(
+          'https://graphql.anilist.co',
+          JSON.stringify({ query: 'query ReqTest { Viewer { id } }', variables: { ok: true } })
+        ) as any
+      );
+      // 3. bodyUsed Response must skip res.clone(), and bodyUsed Request must skip input.clone()
+      const resUsed = await window.fetch(new ForeignURL('https://anilist.co/graphql?used-res') as any, {
+        method: 'POST',
+        body: JSON.stringify({ query: 'query BodyUsedTest { Viewer { id } }' })
+      });
+      expect(resUsed.status).toBe(200);
+      await window.fetch(
+        new ForeignRequest(
+          'https://anilist.co/graphql',
+          JSON.stringify({ query: 'query SkippedReq { Viewer { id } }' }),
+          true
+        ) as any
+      );
+
+      expect(events.map((e) => [e.phase, e.query.slice(0, 13), e.data])).toEqual([
+        ['request', 'query UrlTest', undefined],
+        ['response', 'query UrlTest', { Viewer: { id: 7 } }],
+        ['request', 'query ReqTest', undefined],
+        ['response', 'query ReqTest', { Viewer: { id: 7 } }],
+        ['request', 'query BodyUse', undefined],
+        ['response', 'query BodyUse', undefined]
+      ]);
+
+      unsub();
+    } finally {
+      window.fetch = origWinFetch;
+      (window as any).Request = origWinRequest;
+    }
+  });
+
+  it('supports emitRetained/onRetained across boot phases with emit() coherence and owner cleanup', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+    const received: number[] = [];
+
+    let emitterVersion = 0;
+    let secondModuleUpdate!: () => void;
+
+    registry.defineModule({
+      id: 'retainedEarly',
+      key: 'retainedEarlyEnabled',
+      layer: 'preload',
+      title: 'Retained Early',
+      help: 'Test',
+      setup(ctx) {
+        emitterVersion++;
+        ctx.events.emitRetained('manualOverrides:changed', emitterVersion * 100);
+        // Normal emit updates retained payload in place.
+        ctx.events.emit('manualOverrides:changed', emitterVersion * 100 + 1);
+      }
+    });
+
+    registry.defineModule({
+      id: 'retainedOther',
+      key: 'retainedOtherEnabled',
+      layer: 'feature',
+      title: 'Retained Other',
+      help: 'Test',
+      setup(ctx) {
+        secondModuleUpdate = () => ctx.events.emitRetained('manualOverrides:changed', 999);
+      }
+    });
+
+    registry.defineModule({
+      id: 'retainedLate',
+      key: 'retainedLateEnabled',
+      layer: 'feature',
+      title: 'Retained Late',
+      help: 'Test',
+      setup(ctx) {
+        ctx.events.onRetained('manualOverrides:changed', (id) => received.push(id));
+      }
+    });
+
+    settings.Settings.set('retainedEarlyEnabled', true);
+    settings.Settings.set('retainedOtherEnabled', true);
+    settings.Settings.set('retainedLateEnabled', true);
+
+    // Phase 1 (early preload) emits 100 -> 101 before feature modules boot.
+    registry.startModules(true);
+    // Phase 2 (feature) subscribes later and immediately replays 101.
+    registry.startModules(false);
+    expect(received).toEqual([101]);
+
+    // Overwrite ownership from retainedOther -> reloading retainedEarly clears only its old generation, keeping 999.
+    secondModuleUpdate();
+    expect(received).toEqual([101, 999]);
+    settings.Settings.set('retainedEarlyEnabled', false);
+    host.reload(['retainedEarly']);
+
+    const lateCheck: number[] = [];
+    const { bus } = await import('../src/core/bus').then((m) => ({ bus: m }));
+    const unsubCheck = bus.EventBus.onRetained('manualOverrides:changed', (id) => lateCheck.push(id));
+    expect(lateCheck).toEqual([999]);
+    unsubCheck();
+
+    // Disabling the owner clears its own retained entry cleanly.
+    settings.Settings.set('retainedOtherEnabled', false);
+    host.reload(['retainedOther']);
+
+    const afterDisable: number[] = [];
+    const unsubNone = bus.EventBus.onRetained('manualOverrides:changed', (id) => afterDisable.push(id));
+    expect(afterDisable).toEqual([]);
+    unsubNone();
+  });
 });

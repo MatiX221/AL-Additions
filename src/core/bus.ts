@@ -98,12 +98,11 @@ class ServiceRegistryImpl {
 
 class EventBusImpl {
   private readonly listeners = new Map<string, Set<(payload?: any) => void>>();
+  private readonly retained = new Map<string, { payload: unknown; owner?: symbol }>();
 
-  emit<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void {
-    const key = String(event);
+  private dispatch(key: string, payload: unknown): void {
     const set = this.listeners.get(key);
     if (!set) return;
-    const [payload] = args;
     for (const cb of [...set]) {
       try {
         cb(payload);
@@ -111,6 +110,23 @@ class EventBusImpl {
         console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
       }
     }
+  }
+
+  emit<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void {
+    const key = String(event);
+    const [payload] = args;
+    const existing = this.retained.get(key);
+    if (existing) {
+      existing.payload = payload;
+    }
+    this.dispatch(key, payload);
+  }
+
+  emitRetained<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void {
+    const key = String(event);
+    const [payload] = args;
+    this.retained.set(key, { payload });
+    this.dispatch(key, payload);
   }
 
   on<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn {
@@ -126,10 +142,56 @@ class EventBusImpl {
       if (set && set.size === 0) this.listeners.delete(key);
     };
   }
+
+  onRetained<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn {
+    const key = String(event);
+    const unsub = this.on(event, cb);
+    if (this.retained.has(key)) {
+      const entry = this.retained.get(key)!;
+      try {
+        cb(entry.payload as EventMap[K]);
+      } catch (e) {
+        console.error(`[AL-Additions] Retained event listener for "${key}" failed:`, e);
+      }
+    }
+    return unsub;
+  }
+
+  /** @internal */
+  emitRetainedOwned<K extends keyof EventMap>(owner: symbol, event: K, ...args: EventArgs<EventMap[K]>): void {
+    const key = String(event);
+    const [payload] = args;
+    this.retained.set(key, { payload, owner });
+    this.dispatch(key, payload);
+  }
+
+  /** @internal */
+  clearRetainedByOwner(owner: symbol): void {
+    for (const [key, entry] of [...this.retained]) {
+      if (entry.owner === owner) {
+        this.retained.delete(key);
+      }
+    }
+  }
 }
 
 export const ServiceRegistry = new ServiceRegistryImpl();
 export const EventBus = new EventBusImpl();
+
+function isUrlLike(input: unknown, win: any): input is URL | { href: string } {
+  if (!input || typeof input !== 'object') return false;
+  if (typeof URL !== 'undefined' && input instanceof URL) return true;
+  const WinURL = win?.URL;
+  if (typeof WinURL === 'function' && input instanceof WinURL) return true;
+  return typeof (input as any).href === 'string' && typeof (input as any).url !== 'string';
+}
+
+function isRequestLike(input: unknown, win: any): input is Request {
+  if (!input || typeof input !== 'object') return false;
+  if (typeof Request !== 'undefined' && input instanceof Request) return true;
+  const WinRequest = win?.Request;
+  return typeof WinRequest === 'function' && input instanceof WinRequest;
+}
 
 function resolvePageWindow(): Window {
   return (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window;
@@ -141,8 +203,8 @@ function isAniListGraphqlUrl(rawUrl: string): boolean {
   try {
     const u = new URL(rawUrl, location.href);
     return (
-      u.pathname === '/graphql' &&
-      (u.hostname === 'anilist.co' || u.hostname === 'graphql.anilist.co')
+      u.origin === 'https://graphql.anilist.co' ||
+      (u.hostname === 'anilist.co' && u.pathname.replace(/\/$/, '') === '/graphql')
     );
   } catch {
     return false;
@@ -208,9 +270,9 @@ export const CoreHooks: CoreHooksApi = (() => {
       const rawUrl =
         typeof input === 'string'
           ? input
-          : input instanceof URL
-          ? input.toString()
-          : input && typeof (input as Request).url === 'string'
+          : isUrlLike(input, win)
+          ? input.href
+          : typeof (input as Request)?.url === 'string'
           ? (input as Request).url
           : '';
       const method = (
@@ -226,8 +288,12 @@ export const CoreHooks: CoreHooksApi = (() => {
       try {
         if (typeof init?.body === 'string') {
           parsedBody = JSON.parse(init.body);
-        } else if (typeof Request !== 'undefined' && input instanceof Request) {
-          const text = await input.clone().text();
+        } else if (
+          isRequestLike(input, win) &&
+          !(input as Request).bodyUsed &&
+          typeof (input as Request).clone === 'function'
+        ) {
+          const text = await (input as Request).clone().text();
           if (text) parsedBody = JSON.parse(text);
         }
       } catch {}
@@ -252,10 +318,12 @@ export const CoreHooks: CoreHooksApi = (() => {
 
       if (query && !fetchOwnerActive && gqlListeners.size > 0) {
         let data: any = undefined;
-        try {
-          const json = await res.clone().json();
-          data = json?.data;
-        } catch {}
+        if (res && !res.bodyUsed && typeof res.clone === 'function') {
+          try {
+            const json = await res.clone().json();
+            data = json?.data;
+          } catch {}
+        }
         emitGqlFetch({
           phase: 'response',
           url: rawUrl,

@@ -32,28 +32,37 @@ main.ts          ──▶ composition root (imports all modules via import.meta
 
 When modules need to coordinate, pick the simplest mechanism that fits:
 
-### 1. Services (`ctx.services`): Request & Capability Exchange
-Use services when Module B provides a capability (like opening a modal or querying a shared feature state) that Module A uses optionally:
+### 1. Services (`ctx.services`): Typed Request & Capability Exchange
+Use services when Module B provides a capability (like opening a modal or querying a shared feature state) that Module A uses optionally. The provider declares its contract in `ServiceMap` via TypeScript declaration merging (`declare module '../../types'`), so consumers infer the exact signature automatically with zero manual generic casts:
 
 **Provider (`service` layer, e.g. `myProvider`):**
 ```ts
-setup(ctx) {
-  // Published globally under `'myProvider:openDialog'`
-  // Cleanup removes the service automatically when myProvider stops or disables.
-  ctx.services.provide('openDialog', (mediaId: number) => {
-    showDialog(mediaId, ctx.addStyle);
-  });
+declare module '../../types' {
+  interface ServiceMap {
+    'myProvider:openDialog': (mediaId: number) => void;
+  }
 }
+
+defineModule({
+  id: 'myProvider',
+  // ...
+  setup(ctx) {
+    // Type-checked against ServiceMap['myProvider:openDialog']
+    // Cleanup removes the service automatically when myProvider stops or disables.
+    ctx.services.provide('openDialog', (mediaId) => {
+      showDialog(mediaId, ctx.addStyle);
+    });
+  }
+});
 ```
 
 **Consumer (`feature` layer, e.g. `myConsumer`):**
 ```ts
 setup(ctx) {
-  type DialogFn = (mediaId: number) => void;
-  let openFn: DialogFn | null = ctx.services.get<DialogFn>('myProvider:openDialog') ?? null;
+  let openFn = ctx.services.get('myProvider:openDialog') ?? null;
 
   // React dynamically as the provider boots, reloads, or gets disabled live:
-  ctx.services.onAvailable<DialogFn>('myProvider:openDialog', (fn) => {
+  ctx.services.onAvailable('myProvider:openDialog', (fn) => {
     openFn = fn;
     renderButton(fn);
 
@@ -66,12 +75,20 @@ setup(ctx) {
 }
 ```
 
-Notice how neither module imports the other, and if the user turns off `myProvider` in Settings without reloading the page, `myConsumer`'s button vanishes automatically.
+Notice how neither module imports the other, deleting the provider immediately surfaces a compile error in consumers referencing its key, and if the user turns off `myProvider` in Settings without reloading the page, `myConsumer`'s button vanishes automatically.
 
-### 2. Event Bus (`ctx.events`): Broadcasts
-For loose fire-and-forget notifications across modules:
+### 2. Event Bus (`ctx.events`): Typed Broadcasts & Retained State
+Declare event payloads on `EventMap` inside the emitting module using `declare module '../../types'`. Payloads typed as `void` take no payload argument on `emit` / `emitRetained`.
 
+**Edge-triggered broadcasts (`emit` / `on`):**
 ```ts
+declare module '../../types' {
+  interface EventMap {
+    'myModule:updated': { mediaId: number };
+    'myModule:ready': void;
+  }
+}
+
 // Emitter
 ctx.events.emit('myModule:updated', { mediaId: 123 });
 
@@ -81,10 +98,24 @@ ctx.events.on('myModule:updated', (payload) => {
 });
 ```
 
+**Sticky cross-boot-phase state (`emitRetained` / `onRetained`):**
+Because `intercept`/`preload` modules run before `DOMContentLoaded` (`startModules(true)`) while `service`/`feature` modules run later (`startModules(false)`), use `emitRetained` / `onRetained` when late subscribers should immediately receive the latest emitted value:
+
+```ts
+// Early module
+ctx.events.emitRetained('myModule:ready');
+
+// Later feature module (replays immediately if already emitted, plus future updates)
+ctx.events.onRetained('myModule:ready', () => initWidget());
+```
+
+- Subsequent `emit()` calls on the same key update the retained payload in place so late `onRetained` subscribers always see the latest state.
+- When the owning module disposes or disables, retained entries still owned by that module context are automatically cleared without disturbing newer values emitted by another module or a reloaded generation.
+
 ### 3. Core Hooks (`ctx.hooks`): Pipeline & GraphQL Coordination
 Lower-level runtime hooks (`src/types.ts` -> `CoreHooksApi`) let intercept/preload/service modules coordinate without touching each other or stacking duplicate monkey-patches on `window.fetch`:
 
-- **`ctx.hooks.onGqlFetch((ev) => ...)`**: Observe AniList `/graphql` requests (`phase: 'request'`) and parsed JSON responses (`phase: 'response'`), including both `fetch` calls and AniList Worker RPC mutations. When a dedicated fetch-owner module (such as Fast Load) is active, it emits `GqlFetchEvent`s directly via `markFetchOwner(true)` + `emitGqlFetch`; otherwise `CoreHooks` installs a single shared fallback `fetch` wrapper cleanly on `anilist.co`.
+- **`ctx.hooks.onGqlFetch((ev) => ...)`**: Observe AniList `/graphql` requests (`phase: 'request'`) and parsed JSON responses (`phase: 'response'`), including cross-realm page `Request` / `URL` inputs, unconsumed response bodies (`!bodyUsed`), and AniList Worker RPC mutations. When a dedicated fetch-owner module (such as Fast Load) is active, it emits `GqlFetchEvent`s directly via `markFetchOwner(true)` + `emitGqlFetch`; otherwise `CoreHooks` installs a single shared fallback `fetch` wrapper cleanly on `anilist.co`.
 - **`ctx.hooks.blockRpc(predicate)`**: Suppresses matching AniList GraphQL/RPC requests before they hit the network (returns cleanup).
 - **`ctx.hooks.setPrefetchPaused(true)`**: Temporarily pauses background navigation/hover prefetching during heavy user actions (returns release function).
 - **`ctx.hooks.registerCacheBridge(bridge)` / `getCacheBridge()`**: Exposes shared runtime caches cleanly across `fastLoad`, `api/anilist.ts`, and `compareView` without page-window globals.

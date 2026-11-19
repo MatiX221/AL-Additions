@@ -30,7 +30,8 @@ import { logDebug, store as gmStore } from '../../utils/helpers';
 
 export const isGraphQL = (u: any): boolean => {
   try {
-    const url = new URL(u, win.location.href);
+    const raw = u && typeof u === 'object' && typeof u.href === 'string' ? u.href : u;
+    const url = new URL(raw, win.location.href);
     return (
       url.origin === 'https://graphql.anilist.co' ||
       (url.origin === win.location.origin && url.pathname.replace(/\/$/, '') === '/graphql')
@@ -179,12 +180,21 @@ const note429 = (res: Response) => {
 };
 
 export async function classify(input: any, init?: RequestInit) {
-  const RequestCtor = win.Request || Request;
-  const isRequest = input instanceof RequestCtor;
-  const method = String(init?.method || (isRequest ? input.method : 'GET')).toUpperCase();
+  const isRequest =
+    Boolean(input && typeof input === 'object') &&
+    ((typeof win.Request === 'function' && input instanceof win.Request) ||
+      (typeof Request === 'function' && input instanceof Request));
+  const method = String(init?.method || (typeof input?.method === 'string' ? input.method : 'GET')).toUpperCase();
   if (method !== 'POST') return null;
 
-  const rawUrl = isRequest ? input.url : input instanceof URL ? input.href : String(input);
+  const rawUrl =
+    typeof input === 'string'
+      ? input
+      : typeof input?.url === 'string'
+      ? input.url
+      : typeof input?.href === 'string'
+      ? input.href
+      : String(input);
   if (!isGraphQL(rawUrl)) return null;
 
   let resolvedUrl = rawUrl;
@@ -195,7 +205,7 @@ export async function classify(input: any, init?: RequestInit) {
   let body: string | null = null;
   if (typeof init?.body === 'string') {
     body = init.body;
-  } else if (isRequest) {
+  } else if (isRequest && !input.bodyUsed && typeof input.clone === 'function') {
     try {
       body = await input.clone().text();
     } catch {}
@@ -331,8 +341,8 @@ export function cachedFetch(
 
   const snapshot = original.then(async (res: Response) => {
     note429(res);
-    if (res.status !== 200) {
-      logDebug('[FASTLOAD] Response not 200:', res.status, opName);
+    if (res.status !== 200 || res.bodyUsed || typeof res.clone !== 'function') {
+      logDebug('[FASTLOAD] Response not cacheable:', res.status, opName);
       throw new Error('not cacheable');
     }
     const copy = res.clone();
@@ -415,10 +425,12 @@ function trackedNativeFetch(nativeFetch: any, job: any, input: any, init?: Reque
     p.then(
       async (res: Response) => {
         let data: any = undefined;
-        try {
-          const json = await res.clone().json();
-          data = json?.data;
-        } catch {}
+        if (res && !res.bodyUsed && typeof res.clone === 'function') {
+          try {
+            const json = await res.clone().json();
+            data = json?.data;
+          } catch {}
+        }
         coreHooks?.emitGqlFetch({
           phase: 'response',
           url,

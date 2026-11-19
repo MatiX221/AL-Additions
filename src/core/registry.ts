@@ -619,6 +619,8 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
   };
 
   const debugChannel = rec.debugChannel || rec.id;
+  const eventOwner = Symbol(`events:${rec.id}`);
+  let retainedTracked = false;
 
   const ctx: FeatureContext = {
     id: rec.id,
@@ -696,7 +698,16 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     },
     events: {
       emit: (event, ...args) => EventBus.emit(event, ...args),
-      on: (event, cb) => track(EventBus.on(event, cb))
+      emitRetained: (event, ...args) => {
+        if (disposed) return;
+        if (!retainedTracked) {
+          retainedTracked = true;
+          track(() => EventBus.clearRetainedByOwner(eventOwner));
+        }
+        EventBus.emitRetainedOwned(eventOwner, event, ...args);
+      },
+      on: (event, cb) => track(EventBus.on(event, cb)),
+      onRetained: (event, cb) => track(EventBus.onRetained(event, cb))
     },
     hooks: trackedHooks,
     debug: {
@@ -704,7 +715,11 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       log: (...args: any[]) => logDebug(`[${debugChannel.toUpperCase()}]`, ...args)
     },
     setStandalonePaused: (paused: boolean) => {
-      rec.standalonePaused = !!paused;
+      const next = !!paused;
+      rec.standalonePaused = next;
+      if (next) {
+        cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
+      }
       const graph = resolveAllStates();
       syncAllLiveStatuses(graph.statuses);
     }
@@ -725,6 +740,58 @@ function disposeRecord(rec: ModuleRecord, resetStandalone = true): void {
   if (resetStandalone) rec.standalonePaused = false;
 }
 
+function cascadeDispose(seedIds: string[], opts: { preserveStandaloneSeeds?: boolean } = {}): void {
+  const seedSet = new Set(seedIds);
+  const toStop = new Set<string>();
+  for (const rec of records) {
+    if (rec.booted && seedSet.has(rec.id)) {
+      toStop.add(rec.id);
+    }
+  }
+  let added = true;
+  while (added) {
+    added = false;
+    for (const rec of records) {
+      if (rec.booted && !toStop.has(rec.id) && rec.dependsOn.some((d) => toStop.has(d))) {
+        toStop.add(rec.id);
+        added = true;
+      }
+    }
+  }
+  if (toStop.size === 0) return;
+
+  // Tear down dependents before dependencies (reverse layer + topological order).
+  const stopOrdered = [...toStop].sort((a, b) => {
+    const ra = recordsById.get(a)!;
+    const rb = recordsById.get(b)!;
+    if (LAYER_ORDER[ra.layer] !== LAYER_ORDER[rb.layer]) {
+      return LAYER_ORDER[rb.layer] - LAYER_ORDER[ra.layer];
+    }
+    return rb.id.localeCompare(ra.id);
+  });
+  const finalStopOrder: string[] = [];
+  const stoppedSet = new Set<string>();
+  const visitStop = (id: string, stack = new Set<string>()) => {
+    if (stoppedSet.has(id) || stack.has(id)) return;
+    stack.add(id);
+    for (const candidate of stopOrdered) {
+      const cr = recordsById.get(candidate);
+      if (cr && cr.dependsOn.includes(id)) visitStop(candidate, stack);
+    }
+    stack.delete(id);
+    stoppedSet.add(id);
+    finalStopOrder.push(id);
+  };
+  for (const id of stopOrdered) visitStop(id);
+
+  for (const id of finalStopOrder) {
+    const rec = recordsById.get(id);
+    if (!rec) continue;
+    const resetStandalone = !(opts.preserveStandaloneSeeds && seedSet.has(id));
+    disposeRecord(rec, resetStandalone);
+  }
+}
+
 function bootRecord(rec: ModuleRecord): Promise<void> {
   if (rec.booted) return Promise.resolve();
   const seq = ++rec.bootSeq;
@@ -739,16 +806,13 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
   logDebug('[CORE]', `Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
 
   const handleFailure = (err: unknown) => {
+    if (rec.bootSeq !== seq) return;
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[AL-Additions] Module "${rec.id}" failed during setup:`, err);
-    runCleanupsReverse(rec.id, cleanups);
-    if (rec.bootSeq === seq) {
-      rec.booted = false;
-      rec.abortController = null;
-      rec.runtimeError = msg;
-      const graph = resolveAllStates();
-      syncAllLiveStatuses(graph.statuses);
-    }
+    cascadeDispose([rec.id]);
+    rec.runtimeError = msg;
+    const graph = resolveAllStates();
+    syncAllLiveStatuses(graph.statuses);
   };
 
   try {
@@ -979,52 +1043,19 @@ export function createModuleHost(): ModuleHost {
       const graph = resolveAllStates();
       const nextActiveIds = new Set(graph.ordered.map((r) => r.id));
 
-      // Include any booted module that is no longer active or transitively depends on a target/stopped module.
-      const toStop = new Set<string>();
-      for (const rec of records) {
-        if (rec.booted && (targetSet.has(rec.id) || !nextActiveIds.has(rec.id))) {
-          toStop.add(rec.id);
-        }
-      }
-      let added = true;
-      while (added) {
-        added = false;
-        for (const rec of records) {
-          if (rec.booted && !toStop.has(rec.id) && rec.dependsOn.some((d) => toStop.has(d))) {
-            toStop.add(rec.id);
-            added = true;
-          }
-        }
-      }
+      // Seed both explicitly targeted modules and any booted module no longer active (e.g. disabled via settings).
+      const seedIds = records
+        .filter((rec) => rec.booted && (targetSet.has(rec.id) || !nextActiveIds.has(rec.id)))
+        .map((rec) => rec.id);
+      cascadeDispose(seedIds);
 
-      // Tear down dependents before dependencies (reverse layer + topological order).
-      const stopOrdered = [...toStop].sort((a, b) => {
-        const ra = recordsById.get(a)!;
-        const rb = recordsById.get(b)!;
-        if (LAYER_ORDER[ra.layer] !== LAYER_ORDER[rb.layer]) {
-          return LAYER_ORDER[rb.layer] - LAYER_ORDER[ra.layer];
-        }
-        return rb.id.localeCompare(ra.id);
-      });
-      // Topological refinement: ensure any dependent stops before its dependency.
-      const finalStopOrder: string[] = [];
-      const stoppedSet = new Set<string>();
-      const visitStop = (id: string, stack = new Set<string>()) => {
-        if (stoppedSet.has(id) || stack.has(id)) return;
-        stack.add(id);
-        for (const candidate of stopOrdered) {
-          const cr = recordsById.get(candidate);
-          if (cr && cr.dependsOn.includes(id)) visitStop(candidate, stack);
-        }
-        stack.delete(id);
-        stoppedSet.add(id);
-        finalStopOrder.push(id);
-      };
-      for (const id of stopOrdered) visitStop(id);
-
-      for (const id of finalStopOrder) {
+      // Reset error/standalone flags on explicitly targeted stopped modules so reload retries them cleanly.
+      for (const id of targetSet) {
         const rec = recordsById.get(id);
-        if (rec) disposeRecord(rec, true);
+        if (rec && !rec.booted) {
+          rec.runtimeError = undefined;
+          rec.standalonePaused = false;
+        }
       }
 
       const freshGraph = resolveAllStates();
@@ -1068,6 +1099,9 @@ export function createModuleHost(): ModuleHost {
         found = false;
       }
       rec.standalonePaused = found;
+      if (found) {
+        cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
+      }
       const graph = resolveAllStates();
       syncAllLiveStatuses(graph.statuses);
       return found;

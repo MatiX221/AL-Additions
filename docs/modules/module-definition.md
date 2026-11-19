@@ -11,8 +11,8 @@ import { defineModule } from '../../core/registry';
 ## Complete Schema Reference
 
 ```ts
-export interface ModuleMeta {
-  id: string;
+export interface ModuleMeta<TId extends string = string> {
+  id: TId;
   key: string;
   legacy?: string[];
   section?: string;
@@ -28,9 +28,11 @@ export interface ModuleMeta {
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
   migrate?: () => void;
-  setup: (ctx: FeatureContext) => void | Promise<void>;
+  setup: (ctx: ScopedFeatureContext<TId>) => void | Promise<void>;
 }
 ```
+
+`ScopedFeatureContext<TId>` extends `FeatureContext`, scoping `ctx.services.provide(localName, impl)` to keys registered under `${id}:*` in `ServiceMap` while remaining assignable to helpers taking `FeatureContext`.
 
 ---
 
@@ -182,8 +184,9 @@ standalone: {
 }
 ```
 
-- When `ModuleHost.probeStandalone(id)` resolves `true`, or when your `setup(ctx)` calls `ctx.setStandalonePaused(true)` at runtime:
-  - The module status transitions to `'standalone-paused'` cleanly.
+- When `ModuleHost.probeStandalone(id)` resolves `true`, or when your module calls `ctx.setStandalonePaused(true)` (during `setup` or later at runtime):
+  - The module and any already-booted `dependsOn` hard dependents are torn down in reverse dependency order (`cascadeDispose`) while keeping the paused module's `standalonePaused` flag set.
+  - The module status transitions to `'standalone-paused'` cleanly (and hard dependents become `'dep-unavailable'`).
   - Any live open Settings panel automatically disables the toggle and displays the orange standalone notice banner while keeping the user's underlying preference intact until the external script is uninstalled.
 
 ---
@@ -197,5 +200,6 @@ standalone: {
 ### Fault Isolation
 If `migrate()`, synchronous `setup(ctx)`, asynchronous `setup(ctx)` rejection, or any individual `CleanupFn` throws:
 - The kernel catches and logs the error cleanly.
+- If `setup(ctx)` fails asynchronously after downstream `dependsOn` modules have already booted (and the failed attempt was not superseded by a newer reload), the kernel cascades cleanup across those booted dependents (`'dep-unavailable'`) so active UI does not remain attached to a failed dependency.
 - Your module enters `{ active: false, reason: 'error', error: message }` (shown with an **Error** badge & note in Settings).
-- Remaining modules across the current and later layers (including `shell`) continue booting normally, and sibling cleanup callbacks continue executing in reverse order.
+- Remaining unrelated modules across the current and later layers (including `shell`) continue booting normally, and sibling cleanup callbacks continue executing in reverse order.

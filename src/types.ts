@@ -294,7 +294,9 @@ export interface FeatureServices {
 
 export interface FeatureEvents {
   emit<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void;
+  emitRetained<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void;
   on<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn;
+  onRetained<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn;
 }
 
 export interface FeatureContext {
