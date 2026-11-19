@@ -4,6 +4,7 @@ import './settings/devMode';
 import { initSettingsPage } from './settings/panel';
 import {
   configureCoreServices,
+  createModuleHost,
   registerShellModule,
   runMigrations,
   startModules
@@ -19,7 +20,7 @@ configureCoreServices({
 
 import.meta.glob('./modules/*/index.ts', { eager: true });
 
-registerShellModule('settings', initSettingsPage);
+registerShellModule('settings', () => initSettingsPage(createModuleHost()));
 
 runMigrations();
 void runAccountAuthCallbacks();

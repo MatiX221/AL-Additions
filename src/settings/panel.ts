@@ -1,23 +1,31 @@
 import { Settings, TYPES, ROWS, features } from './settings';
+import { DEV_MODE_DEF } from './devMode';
 import { creditsHtml } from './credits';
 import { addStyle } from '../core/styles';
+import { listAccountProviders } from '../core/accounts';
 import { findExactText, icon } from '../utils/dom';
-import { debounce, store, esc } from '../utils/helpers';
-import { malConnect, clearMalAuth } from '../api/mal';
+import { debounce, esc } from '../utils/helpers';
 import { Core } from '../core/observer';
-import { STANDALONE, STANDALONE_IDS_LIST, detectStandalone, type StandaloneId } from '../utils/standalone';
-import { maybeAutoSync } from '../modules/sync/engine';
 import { createBackup, createRawBackup, downloadBackupFile, importBackup, readFileAsBytes } from './backup';
 import { promptPasswordModal } from './passwordModal';
-import type { SettingRow, RegisteredFeature } from '../types';
-import { openTierEditor } from '../modules/tierLabels/tierModal';
-import { openOverridesModal } from '../modules/sync/overridesModal';
-import { OVERRIDES_SETTING_KEY, getManualOverrides } from '../api/malOverrides';
-import { openAniSongsModal } from '../modules/anisongs/anisongModal';
-import { DEV_MODE_DEF } from './devMode';
+import type { SettingRow, RegisteredFeature, ModuleHost, ModuleStatus } from '../types';
 
 const PINNED_FIRST = ['Sync', 'General'];
 const PINNED_LAST = ['Advanced'];
+
+const NOOP_HOST: ModuleHost = {
+  reload: () => {},
+  getStatus: () => ({ active: false }),
+  resolveStagedStates: (stagedEnabled) => {
+    const out: Record<string, ModuleStatus> = {};
+    for (const [id, on] of Object.entries(stagedEnabled)) {
+      out[id] = { active: !!on, reason: on ? undefined : 'disabled' };
+    }
+    return out;
+  },
+  onStatusChange: () => () => {},
+  probeStandalone: async () => false
+};
 
 const CSS = `
   .ala-settings-nav-section{margin-top:26px}
@@ -33,23 +41,21 @@ const CSS = `
   #ala-settings-panel h2,#ala-settings-panel h3{margin:0;font-family:inherit}
 
   .ala-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 10px}
-  .ala-sheet-head h2{font-size:19px;font-weight:600;line-height:1.3}
-  .ala-sheet-body{flex:1 1 auto;min-height:0;padding:0 20px 8px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .ala-sheet-head h2{font-size:18px;font-weight:700}
+  .ala-sheet-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 20px 12px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
   .ala-sheet-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-status{flex:1 1 160px;color:rgb(var(--color-text-lighter));font-size:12px;transition:color .15s}
-  .ala-status.is-error{color:rgb(var(--color-red,224,85,85));font-weight:600}
+  .ala-status{margin-left:auto;font-size:12px;color:rgb(var(--color-text-lighter))}
+  .ala-status.is-error{color:rgb(var(--color-red,224,85,85))}
 
-  #ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
+  .ala-section-title{margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:rgb(var(--color-text-lighter))}
   .ala-section{border-radius:6px;background:rgb(var(--color-background));overflow:hidden}
-  .ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}
-  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;min-height:48px;cursor:pointer;user-select:none;list-style:none;transition:background .15s}
+  .ala-section-dropdown{margin-top:22px}
+  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;list-style:none;cursor:pointer;padding:6px 2px;user-select:none}
   .ala-section-summary::-webkit-details-marker{display:none}
-  .ala-section-summary:hover{background:rgba(var(--color-text-lighter),.06)}
-  .ala-section-summary:focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:-2px}
-  .ala-section-summary .ala-section-title{margin:0!important;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
-  .ala-chevron{display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--color-text-lighter));transition:transform .22s cubic-bezier(0.4,0,0.2,1);will-change:transform}
-  .ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}
-  .ala-section-collapsible .ala-collapsible-inner{border-top:1px solid rgba(var(--color-text-lighter),.12)}
+  .ala-section-summary .ala-section-title{margin:0}
+  .ala-chevron{display:inline-flex;align-items:center;color:rgb(var(--color-text-lighter));transition:transform .2s cubic-bezier(0.4,0,0.2,1);transform:rotate(-90deg)}
+  .ala-section-dropdown.is-expanded>.ala-section-summary .ala-chevron{transform:rotate(0deg)}
+  .ala-section-collapsible{margin-top:6px}
 
   .ala-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden}
   .ala-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
@@ -58,7 +64,7 @@ const CSS = `
   .ala-feature+.ala-feature{border-top:1px solid rgba(var(--color-text-lighter),.12)}
   .ala-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:12px 14px;cursor:pointer}
   .ala-text{display:flex;flex-direction:column;gap:3px;min-width:0}
-  .ala-title{font-size:14px;color:rgb(var(--color-text))}
+  .ala-title{display:flex;align-items:center;gap:8px;font-size:14px;color:rgb(var(--color-text))}
   .ala-help{color:rgb(var(--color-text-lighter));font-size:12px;line-height:1.4}
   .ala-options-collapsible{margin:0;padding:0}
   .ala-options{margin:0 14px 12px 20px;padding-left:12px;border-left:2px solid rgba(var(--color-blue),.4)}
@@ -67,7 +73,13 @@ const CSS = `
   .ala-child-option{margin-left:8px}
   .ala-child-option .ala-collapsible-inner{border-left:2px solid rgba(var(--color-blue),.25);padding-left:10px}
   .ala-child-option .ala-row{min-height:44px;padding:6px 0}
-  .ala-standalone-note{margin:0 14px 12px;padding:8px 10px;border-radius:4px;border-left:3px solid rgb(var(--color-orange,255,152,0));background:rgba(var(--color-orange,255,152,0),.12);color:rgb(var(--color-text));font-size:12px;line-height:1.45}
+  .ala-note{margin:0 14px 12px;padding:8px 10px;border-radius:4px;font-size:12px;line-height:1.45;color:rgb(var(--color-text))}
+  .ala-standalone-note{border-left:3px solid rgb(var(--color-orange,255,152,0));background:rgba(var(--color-orange,255,152,0),.12)}
+  .ala-dep-note{border-left:3px solid rgba(var(--color-text-lighter),.6);background:rgba(var(--color-text-lighter),.1)}
+  .ala-host-note{border-left:3px solid rgb(var(--color-blue));background:rgba(var(--color-blue),.1)}
+  .ala-error-note{border-left:3px solid rgb(var(--color-red,224,85,85));background:rgba(var(--color-red,224,85,85),.12)}
+  .ala-badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+  .ala-badge--error{background:rgba(var(--color-red,224,85,85),.18);color:rgb(var(--color-red,224,85,85))}
 
   #ala-settings-panel input[type=number],#ala-settings-panel input[type=text],#ala-settings-panel select{width:170px;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
   #ala-settings-panel input:disabled,#ala-settings-panel select:disabled{cursor:not-allowed}
@@ -98,29 +110,10 @@ const CSS = `
   .ala-credit a{color:rgb(var(--color-blue));text-decoration:none}
   .ala-credit a:hover{text-decoration:underline}
 
-  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
-  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
-  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
-  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
-  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
-  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
-  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
-  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
-  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
-  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
-  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
-  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
-  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
-
   @media (max-width:700px){
     .ala-settings-nav-section{display:none!important}
     #ala-settings-backdrop{align-items:flex-end;padding:0}
     #ala-settings-panel{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
-    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    .ala-tier-table-wrap{max-height:45vh}
-    .ala-tier-table th,.ala-tier-table td{padding:4px}
     .ala-sheet-head{padding:16px 16px 8px}
     .ala-sheet-body{padding:0 16px 8px}
     .ala-sheet-foot{padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
@@ -158,12 +151,12 @@ const optionHtml = (r: SettingRow): string => {
 
 const featureHtml = (f: RegisteredFeature): string => {
   if (f.toggle.type === 'json') {
-    return `<div class="ala-feature" data-feature="${f.id}">
+    return `<div class="ala-feature" data-feature="${esc(f.id)}">
       <div class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES.json.html(f.toggle, Settings.get(f.toggle.key))}</div>
     </div>`;
   }
   const isFeatureOn = !!Settings.get(f.toggle.key);
-  return `<div class="ala-feature ${isFeatureOn ? '' : 'is-off'}" data-feature="${f.id}">
+  return `<div class="ala-feature ${isFeatureOn ? '' : 'is-off'}" data-feature="${esc(f.id)}">
     <label class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES.toggle.html(f.toggle, isFeatureOn)}</label>
     ${f.options.length ? `
       <div class="ala-collapsible ala-options-collapsible ${isFeatureOn ? 'is-open' : ''}">
@@ -175,25 +168,32 @@ const featureHtml = (f: RegisteredFeature): string => {
 };
 
 function accountsHtml(): string {
-  const malConnected = !!store.get('mal_token', null);
-  const malStatus = malConnected ? 'Connected' : 'Not connected';
+  const providers = listAccountProviders();
+  if (!providers.length) return '';
+
+  const rowsHtml = providers
+    .map((p, idx) => {
+      const connected = p.isConnected();
+      const border = idx > 0 ? ' style="border-top:1px solid rgba(var(--color-text-lighter),.12)"' : '';
+      const connectLabel = p.id === 'mal' ? 'Connect to MAL' : `Connect to ${esc(p.name)}`;
+      return `<div class="ala-row ala-account-row" data-account-id="${esc(p.id)}"${border}>
+        <span class="ala-text">
+          <span class="ala-title">${esc(p.name)}</span>
+          <span class="ala-help" id="ala-status-${esc(p.id)}">${connected ? 'Connected' : 'Not connected'}</span>
+        </span>
+        <button type="button" class="ala-btn ${connected ? 'ala-btn--danger' : 'ala-btn--primary'}" data-account-btn="${esc(p.id)}">
+          ${connected ? 'Disconnect' : connectLabel}
+        </button>
+      </div>`;
+    })
+    .join('');
 
   return `<h3 class="ala-section-title">Connected Accounts</h3>
-  <div class="ala-section">
-    <div class="ala-row ala-account-row">
-      <span class="ala-text">
-        <span class="ala-title">MyAnimeList</span>
-        <span class="ala-help" id="ala-status-mal">${malStatus}</span>
-      </span>
-      <button type="button" class="ala-btn ${malConnected ? 'ala-btn--danger' : 'ala-btn--primary'}" id="ala-btn-mal">
-        ${malConnected ? 'Disconnect' : 'Connect to MAL'}
-      </button>
-    </div>
-  </div>`;
+  <div class="ala-section">${rowsHtml}</div>`;
 }
 
 function backupRestoreHtml(): string {
-  const isDev = !!Settings.get('devModeEnabled');
+  const isDev = !!Settings.get(DEV_MODE_DEF.key);
   return `<details class="ala-section-dropdown" data-section="backup" open>
     <summary class="ala-section-summary">
       <span class="ala-section-title">Backup &amp; Restore</span>
@@ -212,7 +212,7 @@ function backupRestoreHtml(): string {
           <div class="ala-row ala-account-row" style="border-top:1px solid rgba(var(--color-text-lighter),.12)">
             <span class="ala-text">
               <span class="ala-title">Export with Credentials</span>
-              <span class="ala-help">Include MyAnimeList tokens. A password is required.</span>
+              <span class="ala-help">Include connected account tokens. A password is required.</span>
             </span>
             <button type="button" class="ala-btn ala-btn--danger" id="ala-btn-export-secrets">Export with Secrets</button>
           </div>
@@ -301,6 +301,7 @@ function sectionsHtml(): string {
           </details>`
         : '';
     })
+    .filter(Boolean)
     .join('');
 }
 
@@ -334,51 +335,36 @@ function initDropdownAnimations(panel: HTMLElement): void {
 
 let prevOverflow: string | null = null;
 
-function standaloneNote(id: StandaloneId): string {
-  return `<b>Standalone ${STANDALONE[id].name} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.`;
-}
-
-function showStandaloneNotes(panel: HTMLElement, syncFeature: (card: HTMLElement) => void): void {
-  for (const id of STANDALONE_IDS_LIST) {
-    void detectStandalone(id).then((found) => {
-      if (!panel.isConnected) return;
-      const card = panel.querySelector<HTMLElement>(`.ala-feature[data-feature="${id}"]`);
-      if (!card) return;
-      card.querySelector('.ala-standalone-note')?.remove();
-      if (!found) return;
-      const toggle = card.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
-      if (toggle) {
-        toggle.dataset.standaloneLocked = '1';
-        toggle.checked = false;
-        toggle.disabled = true;
-        syncFeature(card);
-      }
-      const note = document.createElement('div');
-      note.className = 'ala-standalone-note';
-      note.setAttribute('role', 'note');
-      note.innerHTML = standaloneNote(id);
-      card.querySelector('.ala-row--main')?.insertAdjacentElement('afterend', note);
-    });
-  }
+function standaloneNoteHtml(f: RegisteredFeature): string {
+  const name = f.standalone?.name || f.title;
+  const extra = f.standalone?.note ? ` ${esc(f.standalone.note)}` : '';
+  return `<b>Standalone ${esc(name)} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.${extra}`;
 }
 
 export function closePanel(): void {
-  const b = document.getElementById('ala-settings-backdrop') as (HTMLElement & { _onKey?: (e: KeyboardEvent) => void; _onFocus?: () => void }) | null;
+  const b = document.getElementById('ala-settings-backdrop') as
+    | (HTMLElement & { _onKey?: (e: KeyboardEvent) => void; _onFocus?: () => void; _onCleanup?: () => void })
+    | null;
   if (!b) return;
   if (b._onKey) document.removeEventListener('keydown', b._onKey);
   if (b._onFocus) window.removeEventListener('focus', b._onFocus);
+  b._onCleanup?.();
   b.remove();
   document.documentElement.style.overflow = prevOverflow || '';
   prevOverflow = null;
 }
 
-export function showPanel(): void {
+export function showPanel(host: ModuleHost = NOOP_HOST): void {
   if (document.getElementById('ala-settings-backdrop')) return;
-  const backdrop = document.createElement('div') as HTMLDivElement & { _onKey?: (e: KeyboardEvent) => void; _onFocus?: () => void };
+  const backdrop = document.createElement('div') as HTMLDivElement & {
+    _onKey?: (e: KeyboardEvent) => void;
+    _onFocus?: () => void;
+    _onCleanup?: () => void;
+  };
   backdrop.id = 'ala-settings-backdrop';
   backdrop.innerHTML = `<div id="ala-settings-panel" role="dialog" aria-modal="true" aria-labelledby="ala-settings-title" tabindex="-1">
     <header class="ala-sheet-head">
-      <div><h2 id="ala-settings-title">AL Additions</h2><div class="ala-help">Changes apply after the page reloads.</div></div>
+      <div><h2 id="ala-settings-title">AL Additions</h2><div class="ala-help">Live modules apply on Save; others require a page reload.</div></div>
       <button class="ala-icon-btn ala-close" type="button" aria-label="Close settings">${icon('close', 20)}</button>
     </header>
     <div class="ala-sheet-body">
@@ -388,108 +374,343 @@ export function showPanel(): void {
       ${creditsDropdownHtml()}
     </div>
     <footer class="ala-sheet-foot">
-      <button class="ala-btn ala-btn--primary ala-save" type="button">Save and reload</button>
+      <button class="ala-btn ala-btn--primary ala-save" type="button">Save</button>
       <button class="ala-btn ala-reset" type="button">Reset to defaults</button>
       <span class="ala-status" role="status"></span>
     </footer>
   </div>`;
 
   const panel = backdrop.firstElementChild as HTMLElement;
-  const status = panel.querySelector('.ala-status') as HTMLElement;
+  const statusEl = panel.querySelector('.ala-status') as HTMLElement;
+  const saveBtn = panel.querySelector<HTMLButtonElement>('.ala-save');
   const setStatus = (msg: string, isError = false) => {
-    status.textContent = msg;
-    status.classList.toggle('is-error', isError);
+    statusEl.textContent = msg;
+    statusEl.classList.toggle('is-error', isError);
   };
-  const controls = () => panel.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]');
 
-  const syncFeature = (card: HTMLElement) => {
-    const toggle = card.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
-    if (!toggle) return;
-    const on = toggle.checked;
-    card.classList.toggle('is-off', !on);
+  const controls = () => Array.from(panel.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]'));
+  const featureById = new Map(features.map((f) => [f.id, f]));
+  const standaloneDetected = new Map<string, boolean>();
+  for (const f of features) {
+    if (host.getStatus(f.id).reason === 'standalone-paused') {
+      standaloneDetected.set(f.id, true);
+    }
+  }
+
+  const snapshotInitial = () => {
+    const vals: Record<string, string> = {};
+    const enabledMap: Record<string, boolean> = {};
+    for (const r of Object.values(ROWS)) {
+      vals[r.key] = JSON.stringify(Settings.get(r.key));
+    }
+    for (const f of features) {
+      enabledMap[f.id] = !!Settings.get(f.toggle.key) && !standaloneDetected.get(f.id);
+    }
+    return { vals, statuses: host.resolveStagedStates(enabledMap) };
+  };
+
+  let baseline = snapshotInitial();
+
+  const readStagedEnabled = (): Record<string, boolean> => {
+    const staged: Record<string, boolean> = {};
+    for (const f of features) {
+      const card = panel.querySelector<HTMLElement>(`.ala-feature[data-feature="${f.id}"]`);
+      const toggle = card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
+      if (standaloneDetected.get(f.id)) {
+        staged[f.id] = false;
+      } else {
+        staged[f.id] = toggle ? toggle.checked : !!Settings.get(f.toggle.key);
+      }
+    }
+    return staged;
+  };
+
+  const computeSavePlan = () => {
+    const changed: Array<{ key: string; value: any }> = [];
+    const changedKeys = new Set<string>();
+
+    controls().forEach((el) => {
+      const r = ROWS[el.dataset.key!];
+      if (!r) return;
+      if (el.dataset.standaloneLocked) return;
+      const val = TYPES[r.type].read(el);
+      const serialized = JSON.stringify(val);
+      if (serialized !== baseline.vals[r.key]) {
+        changed.push({ key: r.key, value: val });
+        changedKeys.add(r.key);
+      }
+    });
+
+    const stagedStatuses = host.resolveStagedStates(readStagedEnabled());
+    const hotReloadIds: string[] = [];
+    let needsPageReload = false;
+
+    for (const f of features) {
+      const wasActive = !!baseline.statuses[f.id]?.active;
+      const isNowActive = !!stagedStatuses[f.id]?.active;
+      const optionChanged = f.options.some((o) => changedKeys.has(o.key));
+
+      if (wasActive !== isNowActive || ((wasActive || isNowActive) && optionChanged)) {
+        if (f.requiresReload) {
+          needsPageReload = true;
+        } else {
+          hotReloadIds.push(f.id);
+        }
+      }
+    }
+
+    return { changed, hotReloadIds, needsPageReload, stagedStatuses };
+  };
+
+  const upsertNote = (
+    card: HTMLElement,
+    className: string,
+    html: string | null
+  ): void => {
+    const existing = card.querySelector<HTMLElement>(`:scope > .${className}`);
+    if (!html) {
+      existing?.remove();
+      return;
+    }
+    const note = existing || document.createElement('div');
+    note.className = `ala-note ${className}`;
+    note.setAttribute('role', 'note');
+    note.innerHTML = html;
+    if (!existing) {
+      card.querySelector('.ala-row--main')?.insertAdjacentElement('afterend', note);
+    }
+  };
+
+  const syncFeatureCard = (
+    card: HTMLElement,
+    stagedStatuses: Record<string, ModuleStatus>
+  ): boolean => {
+    const id = card.dataset.feature || '';
+    const f = featureById.get(id);
+    const mainToggle = card.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
+
+    if (!f) {
+      const on = !mainToggle || mainToggle.checked;
+      card.classList.toggle('is-off', !on);
+      const optionsCollapsible = card.querySelector<HTMLElement>(':scope > .ala-options-collapsible');
+      if (optionsCollapsible) optionsCollapsible.classList.toggle('is-open', on);
+      card.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.ala-options [data-key]').forEach((el) => {
+        if (el.closest('.ala-child-option, [data-debug-for]')) return;
+        el.disabled = !on;
+      });
+      return on;
+    }
+
+    const staged = stagedStatuses[f.id] || { active: !!mainToggle?.checked };
+    const live = host.getStatus(f.id);
+    const isStandalonePaused = !!standaloneDetected.get(f.id) || live.reason === 'standalone-paused';
+
+    if (mainToggle) {
+      if (isStandalonePaused) {
+        mainToggle.dataset.standaloneLocked = '1';
+        mainToggle.checked = false;
+        mainToggle.disabled = true;
+      } else if (mainToggle.dataset.standaloneLocked) {
+        delete mainToggle.dataset.standaloneLocked;
+        mainToggle.checked = !!Settings.get(f.toggle.key);
+      }
+    }
+
+    upsertNote(card, 'ala-standalone-note', isStandalonePaused ? standaloneNoteHtml(f) : null);
+
+    const depLocked =
+      !isStandalonePaused &&
+      (staged.reason === 'dep-off' || staged.reason === 'dep-unavailable' || staged.reason === 'cycle');
+
+    if (mainToggle && !isStandalonePaused) {
+      if (depLocked) {
+        mainToggle.dataset.depLocked = '1';
+        mainToggle.disabled = true;
+      } else {
+        delete mainToggle.dataset.depLocked;
+        mainToggle.disabled = false;
+      }
+    }
+
+    let depMsg: string | null = null;
+    if (depLocked) {
+      if (staged.reason === 'dep-off') {
+        const names = (staged.disabledDeps || f.dependsOn || []).map((depId) => esc(featureById.get(depId)?.title || depId));
+        depMsg = `Requires ${names.join(', ')} to be enabled.`;
+      } else if (staged.reason === 'dep-unavailable') {
+        depMsg = `Requires unavailable module(s): ${(staged.missingDeps || []).map(esc).join(', ')}.`;
+      } else {
+        depMsg = 'Disabled due to a circular module dependency.';
+      }
+    }
+    upsertNote(card, 'ala-dep-note', depMsg);
+
+    const hostMismatch = (staged.reason === 'host-mismatch' || live.reason === 'host-mismatch') && !!f.hosts?.length;
+    upsertNote(
+      card,
+      'ala-host-note',
+      hostMismatch ? `Only active on: ${f.hosts!.map(esc).join(', ')}` : null
+    );
+
+    const titleEl = card.querySelector<HTMLElement>('.ala-row--main .ala-title');
+    titleEl?.querySelector('.ala-badge--error')?.remove();
+    if (live.reason === 'error') {
+      if (titleEl) {
+        const badge = document.createElement('span');
+        badge.className = 'ala-badge ala-badge--error';
+        badge.textContent = 'Error';
+        titleEl.appendChild(badge);
+      }
+      upsertNote(card, 'ala-error-note', `Failed to load: ${esc(live.error || 'Unknown error')}`);
+    } else {
+      upsertNote(card, 'ala-error-note', null);
+    }
+
+    const effectiveOn = !isStandalonePaused && !depLocked && (!mainToggle || mainToggle.checked);
+    card.classList.toggle('is-off', !effectiveOn);
 
     const optionsCollapsible = card.querySelector<HTMLElement>(':scope > .ala-options-collapsible');
     if (optionsCollapsible) {
-      optionsCollapsible.classList.toggle('is-open', on);
+      optionsCollapsible.classList.toggle('is-open', effectiveOn);
     }
 
     card.querySelectorAll<HTMLElement>('.ala-child-option').forEach((childWrap) => {
       const parentKey = childWrap.dataset.childFor;
       const parentInput = parentKey ? card.querySelector<HTMLInputElement>(`[data-key="${parentKey}"]`) : null;
-      const childOpen = on && !!parentInput?.checked;
+      const childOpen = effectiveOn && !!parentInput?.checked;
       childWrap.classList.toggle('is-open', childOpen);
-
       childWrap.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]').forEach((el) => {
         el.disabled = !childOpen;
       });
     });
 
-    card.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.ala-options [data-key]').forEach((el) => {
+    card.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('.ala-options [data-key], .ala-options .ala-btn--edit-json').forEach((el) => {
       if (el.closest('.ala-child-option, [data-debug-for]')) return;
-      el.disabled = !on;
+      el.disabled = !effectiveOn;
     });
+
+    return effectiveOn;
   };
 
-  const syncDebugRows = () => {
-    const devToggle = panel.querySelector<HTMLInputElement>('input[data-key="devModeEnabled"]');
-    const isDevOn = devToggle ? devToggle.checked : !!Settings.get('devModeEnabled');
+  const syncAll = () => {
+    const plan = computeSavePlan();
+    const activeMap = new Map<string, boolean>();
+    panel.querySelectorAll<HTMLElement>('.ala-feature').forEach((card) => {
+      const effectiveOn = syncFeatureCard(card, plan.stagedStatuses);
+      const toggleKey = card.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]')?.dataset.key;
+      if (toggleKey) activeMap.set(toggleKey, effectiveOn);
+    });
+
+    const devToggle = panel.querySelector<HTMLInputElement>(`input[data-key="${DEV_MODE_DEF.key}"]`);
+    const isDevOn = devToggle ? devToggle.checked : !!Settings.get(DEV_MODE_DEF.key);
+
     panel.querySelectorAll<HTMLElement>('[data-debug-for]').forEach((wrap) => {
       const modKey = wrap.dataset.debugFor!;
-      const modInput = panel.querySelector<HTMLInputElement>(`input[data-key="${modKey}"]`);
-      const modOn = modInput ? modInput.checked : !!Settings.get(modKey);
+      const modOn = activeMap.get(modKey) ?? !!Settings.get(modKey);
       wrap.classList.toggle('is-open', modOn);
       wrap.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]').forEach((el) => {
         el.disabled = !(isDevOn && modOn);
       });
     });
+
+    const devRow = panel.querySelector<HTMLElement>('#ala-row-export-raw');
+    if (devRow) {
+      devRow.style.display = isDevOn ? '' : 'none';
+    }
+
+    if (saveBtn) {
+      saveBtn.textContent = plan.needsPageReload ? 'Save and reload' : 'Save';
+    }
+    return plan;
   };
 
-  const devRow = panel.querySelector<HTMLElement>('#ala-row-export-raw');
-  const syncDevBackupVisibility = () => {
-    if (!devRow) return;
-    const devToggle = panel.querySelector<HTMLInputElement>('input[data-key="devModeEnabled"]');
-    const isDevOn = devToggle ? devToggle.checked : !!Settings.get('devModeEnabled');
-    devRow.style.display = isDevOn ? '' : 'none';
-  };
-
-  panel.querySelectorAll<HTMLElement>('.ala-feature').forEach(syncFeature);
-  syncDebugRows();
-  syncDevBackupVisibility();
+  syncAll();
   initDropdownAnimations(panel);
-  panel.addEventListener('change', (e) => {
-    const target = e.target as HTMLElement | null;
-    const card = target?.closest<HTMLElement>('.ala-feature');
-    if (card) syncFeature(card);
-    syncDebugRows();
-    syncDevBackupVisibility();
+
+  const unsubStatus = host.onStatusChange((id, status) => {
+    if (!panel.isConnected) return;
+    if (status.reason === 'standalone-paused') {
+      standaloneDetected.set(id, true);
+    } else if (standaloneDetected.has(id)) {
+      standaloneDetected.set(id, false);
+    }
+    syncAll();
   });
 
-  panel.querySelector('.ala-save')?.addEventListener('click', () => {
-    controls().forEach((el) => {
-      const r = ROWS[el.dataset.key!];
-      if (r) {
-        if (r.key === OVERRIDES_SETTING_KEY) return;
-        if (el.dataset.standaloneLocked) return;
-        Settings.set(r.key, TYPES[r.type].read(el));
-      }
+  for (const f of features) {
+    if (!f.standalone) continue;
+    void host.probeStandalone(f.id).then((found) => {
+      if (!panel.isConnected) return;
+      standaloneDetected.set(f.id, !!found);
+      syncAll();
     });
-    setStatus('Saved. Reloading…');
-    setTimeout(() => location.reload(), 350);
+  }
+
+  panel.addEventListener('change', (e) => {
+    if ((e.target as HTMLElement)?.id === 'ala-import-file') return;
+    syncAll();
+  });
+
+  panel.querySelectorAll<HTMLButtonElement>('.ala-btn--edit-json').forEach((btn) => {
+    const key = btn.id.replace(/^ala-btn-edit-/, '');
+    const r = ROWS[key];
+    if (!r?.editor) return;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const inputEl = panel.querySelector<HTMLInputElement>(`input[data-key="${key}"]`);
+      if (!inputEl) return;
+      r.editor!({
+        value: TYPES.json.read(inputEl),
+        onApply: (nextValue: any) => {
+          TYPES.json.write(inputEl, nextValue);
+          if (
+            key === 'syncManualOverrides' &&
+            nextValue &&
+            typeof nextValue === 'object' &&
+            !Array.isArray(nextValue) &&
+            Object.keys(nextValue).length > 0
+          ) {
+            const card = inputEl.closest<HTMLElement>('.ala-feature');
+            const mainToggle = card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
+            if (mainToggle && !mainToggle.checked && !mainToggle.disabled) {
+              mainToggle.checked = true;
+            }
+          }
+          const plan = syncAll();
+          setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
+        },
+        addStyle
+      });
+    });
+  });
+
+  saveBtn?.addEventListener('click', () => {
+    const plan = computeSavePlan();
+    for (const { key, value } of plan.changed) {
+      Settings.set(key, value);
+    }
+    if (plan.needsPageReload) {
+      setStatus('Saved. Reloading…');
+      setTimeout(() => location.reload(), 350);
+      return;
+    }
+    baseline = snapshotInitial();
+    if (plan.hotReloadIds.length > 0) {
+      host.reload(plan.hotReloadIds);
+    }
+    syncAll();
+    setStatus(plan.hotReloadIds.length > 0 ? 'Saved and applied.' : 'Saved.');
   });
 
   panel.querySelector('.ala-reset')?.addEventListener('click', () => {
     controls().forEach((el) => {
       const r = ROWS[el.dataset.key!];
-      if (r) {
-        if (r.key === OVERRIDES_SETTING_KEY) return;
-        if (el.dataset.standaloneLocked) return;
-        TYPES[r.type].write(el, r.def);
-      }
+      if (!r) return;
+      if (el.dataset.standaloneLocked) return;
+      TYPES[r.type].write(el, r.def);
     });
-    panel.querySelectorAll<HTMLElement>('.ala-feature').forEach(syncFeature);
-    syncDebugRows();
-    syncDevBackupVisibility();
-    setStatus('Defaults restored. Press Save to apply them.');
+    const plan = syncAll();
+    setStatus(`Defaults restored. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply them.`);
   });
 
   panel.querySelector('.ala-close')?.addEventListener('click', closePanel);
@@ -501,43 +722,41 @@ export function showPanel(): void {
   };
   document.addEventListener('keydown', backdrop._onKey);
 
+  const providers = listAccountProviders();
   const updateAccountUI = () => {
-    const malBtn = panel.querySelector<HTMLButtonElement>('#ala-btn-mal');
-    const malStatus = panel.querySelector<HTMLElement>('#ala-status-mal');
-    const malConnected = !!store.get('mal_token', null);
-
-    if (malBtn && malStatus) {
-      malBtn.textContent = malConnected ? 'Disconnect' : 'Connect to MAL';
-      malBtn.className = `ala-btn ${malConnected ? 'ala-btn--danger' : 'ala-btn--primary'}`;
-      malStatus.textContent = malConnected ? 'Connected' : 'Not connected';
+    for (const p of providers) {
+      const btn = panel.querySelector<HTMLButtonElement>(`[data-account-btn="${p.id}"]`);
+      const st = panel.querySelector<HTMLElement>(`#ala-status-${p.id}`);
+      if (!btn || !st) continue;
+      const connected = p.isConnected();
+      const connectLabel = p.id === 'mal' ? 'Connect to MAL' : `Connect to ${p.name}`;
+      btn.textContent = connected ? 'Disconnect' : connectLabel;
+      btn.className = `ala-btn ${connected ? 'ala-btn--danger' : 'ala-btn--primary'}`;
+      st.textContent = connected ? 'Connected' : 'Not connected';
     }
   };
 
-  panel.querySelector('#ala-btn-mal')?.addEventListener('click', () => {
-    const malConnected = !!store.get('mal_token', null);
-    if (malConnected) {
-      if (confirm('Disconnect MyAnimeList? You will need to reconnect to use AniList → MAL Sync.')) {
-        clearMalAuth();
-        updateAccountUI();
-        setStatus('MyAnimeList disconnected.');
+  for (const p of providers) {
+    panel.querySelector(`[data-account-btn="${p.id}"]`)?.addEventListener('click', () => {
+      if (p.isConnected()) {
+        if (confirm(`Disconnect ${p.name}?`)) {
+          p.disconnect();
+          updateAccountUI();
+          setStatus(`${p.name} disconnected.`);
+        }
+      } else {
+        p.connect();
+        setStatus(`Opened ${p.name} authorization tab…`);
       }
-    } else {
-      malConnect();
-      setStatus('Opened MyAnimeList authorization tab…');
-    }
-  });
+    });
+  }
 
   const getPanelOverrides = (): Record<string, any> => {
     const overrides: Record<string, any> = {};
     controls().forEach((el) => {
       const r = ROWS[el.dataset.key!];
-      if (r) {
-        if (r.key === OVERRIDES_SETTING_KEY) {
-          overrides[r.key] = getManualOverrides();
-          return;
-        }
-        overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES[r.type].read(el);
-      }
+      if (!r) return;
+      overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES[r.type].read(el);
     });
     return overrides;
   };
@@ -564,8 +783,8 @@ export function showPanel(): void {
 
   panel.querySelector('#ala-btn-export-secrets')?.addEventListener('click', async () => {
     const confirmed = confirm(
-      '⚠️ Warning: This export includes your MyAnimeList authentication credentials.\n\n' +
-      'Anyone with access to this file will have full access to your connected MyAnimeList account.\n\n' +
+      '⚠️ Warning: This export includes your connected account credentials.\n\n' +
+      'Anyone with access to this file will have full access to your connected accounts.\n\n' +
       'Do you want to continue?'
     );
     if (!confirmed) return;
@@ -622,8 +841,9 @@ export function showPanel(): void {
         fileInput.value = '';
         return;
       }
-      const parts = [`${result.applied} setting(s)`];
-      if (result.secretsApplied) parts.push(`${result.secretsApplied} credential(s)`);
+      const parts = [];
+      if (result.applied > 0) parts.push(`${result.applied} settings`);
+      if (result.secretsApplied > 0) parts.push(`${result.secretsApplied} account credentials`);
       setStatus(`Imported ${parts.join(' and ')}. Reloading…`);
       setTimeout(() => location.reload(), 600);
     } catch (e: any) {
@@ -632,38 +852,22 @@ export function showPanel(): void {
     }
   });
 
-  panel.querySelector('#ala-btn-edit-tierLabels')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    const inputEl = panel.querySelector<HTMLInputElement>('input[data-key="tierLabels"]');
-    if (inputEl) openTierEditor(inputEl);
-  });
-
-  panel.querySelector('#ala-btn-edit-syncManualOverrides')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    openOverridesModal();
-  });
-
-  panel.querySelector('#ala-btn-edit-aniSongsProviders')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    const inputEl = panel.querySelector<HTMLInputElement>('input[data-key="aniSongsProviders"]');
-    if (inputEl) openAniSongsModal(inputEl);
-  });
-
   const onFocus = () => {
     updateAccountUI();
-    maybeAutoSync();
   };
   backdrop._onFocus = onFocus;
   window.addEventListener('focus', onFocus);
+  backdrop._onCleanup = () => {
+    unsubStatus();
+  };
 
   prevOverflow = document.documentElement.style.overflow;
   document.documentElement.style.overflow = 'hidden';
   document.body.appendChild(backdrop);
   panel.focus();
-  showStandaloneNotes(panel, syncFeature);
 }
 
-export function ensureLauncher(): void {
+export function ensureLauncher(host: ModuleHost = NOOP_HOST): void {
   if (document.getElementById('ala-settings-mobile-launcher')) return;
   const b = document.createElement('button');
   b.id = 'ala-settings-mobile-launcher';
@@ -673,12 +877,12 @@ export function ensureLauncher(): void {
   b.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    showPanel();
+    showPanel(host);
   });
   document.body.appendChild(b);
 }
 
-export function installSidebar(): void {
+export function installSidebar(host: ModuleHost = NOOP_HOST): void {
   if (document.getElementById('ala-settings-nav-section')) return;
   if (!findExactText('Profile')) return;
   const dev = findExactText('Developer');
@@ -695,17 +899,17 @@ export function installSidebar(): void {
     e.preventDefault();
     e.stopPropagation();
     (e.currentTarget as HTMLElement).classList.add('is-active');
-    showPanel();
+    showPanel(host);
   });
   nav.parentElement.insertBefore(section, nav.nextSibling);
 }
 
-export function initSettingsPage(): void {
+export function initSettingsPage(host: ModuleHost = NOOP_HOST): void {
   addStyle('ala-settings-style', CSS);
   const attempt = debounce(() => {
     if (!onSettingsPage()) return;
-    installSidebar();
-    ensureLauncher();
+    installSidebar(host);
+    ensureLauncher(host);
   }, 100);
   Core.ready(attempt);
   Core.onBodyMutation(() => {

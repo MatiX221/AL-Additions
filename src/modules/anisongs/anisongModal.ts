@@ -1,5 +1,5 @@
 import { Settings } from '../../settings/settings';
-import { addStyle } from '../../core/styles';
+import type { JsonEditorContext } from '../../types';
 
 export interface SongProviderPreset {
   id: string;
@@ -283,20 +283,16 @@ const MODAL_CSS = `
   }
   `;
 
-export function openAniSongsModal(inputEl?: HTMLInputElement): void {
-  addStyle('ala-anisongs-modal-style', MODAL_CSS);
+export function openAniSongsModal(ctx: JsonEditorContext): void {
+  ctx.addStyle('ala-anisongs-modal-style', MODAL_CSS);
   const existing = document.getElementById(MODAL_ID);
   if (existing) existing.remove();
 
-  let stateConfig: AniSongsConfig;
-  try {
-    const rawVal = inputEl ? inputEl.value : JSON.stringify(Settings.get('aniSongsProviders'));
-    const parsed = JSON.parse(rawVal);
-    const check = validateAniSongsConfig(parsed);
-    stateConfig = check.valid && check.config ? check.config : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-  } catch {
-    stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-  }
+  const checkInit = validateAniSongsConfig(ctx.value);
+  let stateConfig: AniSongsConfig =
+    checkInit.valid && checkInit.config
+      ? JSON.parse(JSON.stringify(checkInit.config))
+      : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
 
   const backdrop = document.createElement('div');
   backdrop.id = MODAL_ID;
@@ -676,14 +672,8 @@ export function openAniSongsModal(inputEl?: HTMLInputElement): void {
     if (!check.valid || !check.config) {
       return alert(check.error || 'Invalid configuration');
     }
-    if (inputEl) inputEl.value = JSON.stringify(check.config);
-    Settings.set('aniSongsProviders', check.config);
+    ctx.onApply(check.config);
     close();
-
-    const panelStatus = document.querySelector('#ala-settings-panel .ala-status');
-    if (panelStatus) {
-      panelStatus.textContent = 'Music providers updated. Press "Save and reload" to activate.';
-    }
   });
 
   renderUI();

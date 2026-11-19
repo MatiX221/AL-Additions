@@ -15,21 +15,6 @@ const cache = new Map<string, { at: number; result: Promise<boolean> }>();
 
 export type StandaloneProbeFn = () => boolean | Promise<boolean>;
 
-// --- Temporary panel/tierLabels shims removed in Phase 5 ---
-export type StandaloneId = 'fastLoad' | 'tierLabels';
-
-export interface StandaloneInfo {
-  name: string;
-  settingKey: string;
-}
-
-export const STANDALONE: Record<StandaloneId, StandaloneInfo> = {
-  fastLoad: { name: 'AniList Fast Load', settingKey: 'fastLoadEnabled' },
-  tierLabels: { name: 'AniList Tier Labels', settingKey: 'tierLabelsEnabled' }
-};
-
-export const STANDALONE_IDS_LIST = Object.keys(STANDALONE) as StandaloneId[];
-
 export const PROBE_ATTR = 'data-ala-probe';
 
 const pageWin = (): any => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);

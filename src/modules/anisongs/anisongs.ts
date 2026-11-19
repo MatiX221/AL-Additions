@@ -6,6 +6,7 @@ import {
   validateAniSongsConfig,
   getValidAniSongsConfig,
   buildProviderUrl,
+  openAniSongsModal,
   type SongProviderPreset,
   type SongParams
 } from './anisongModal';
@@ -776,7 +777,8 @@ defineModule({
       def: DEFAULT_ANISONGS_CONFIG,
       title: 'Song Search Providers',
       help: 'Configure search shortcuts (YouTube, Spotify, etc.) and active music services.',
-      validate: validateAniSongsConfig
+      validate: validateAniSongsConfig,
+      editor: openAniSongsModal
     }
   ],
   setup(ctx) {

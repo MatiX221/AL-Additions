@@ -2,6 +2,8 @@ import { store, logDebug } from '../utils/helpers';
 import { ROWS, TYPES, PREFIX } from './settings';
 import { promptPasswordModal } from './passwordModal';
 import { getAccountSecretKeys } from '../core/accounts';
+import { CoreHooks } from '../core/bus';
+import { ANILIST_SESSION_KEYS } from '../types';
 
 export const BACKUP_VERSION = 1;
 export const BACKUP_FILENAME = 'al-additions.settings';
@@ -11,13 +13,6 @@ export const MAGIC_ENCRYPTED = new Uint8Array([0x41, 0x4c, 0x41, 0x45]); // 'ALA
 export const FORMAT_VERSION = 1;
 export const SALT_LENGTH = 16;
 export const IV_LENGTH = 12;
-
-export const SESSION_CACHE_KEYS = [
-  'al_token',
-  'al_username',
-  'al_user_id',
-  'al_score_format'
-] as const;
 
 export interface CryptoEnvelope {
   salt: string;
@@ -258,28 +253,52 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
   let applied = 0;
   let secretsApplied = 0;
 
-  for (const k of SESSION_CACHE_KEYS) {
-    store.del(k);
-  }
+  CoreHooks.setSessionClearing(true);
+  try {
+    for (const k of ANILIST_SESSION_KEYS) {
+      store.del(k);
+    }
 
-  const secretKeys = new Set(getAccountSecretKeys());
-  for (const [key, rawValue] of Object.entries(data)) {
-    if ((SESSION_CACHE_KEYS as readonly string[]).includes(key)) continue;
-    if (secretKeys.has(key)) {
-      if (rawValue !== undefined && rawValue !== null) {
-        store.set(key, rawValue);
-        secretsApplied++;
+    const secretKeys = new Set(getAccountSecretKeys());
+    for (const [key, rawValue] of Object.entries(data)) {
+      if ((ANILIST_SESSION_KEYS as readonly string[]).includes(key)) continue;
+      if (secretKeys.has(key)) {
+        if (rawValue !== undefined && rawValue !== null) {
+          store.set(key, rawValue);
+          secretsApplied++;
+        }
+        continue;
       }
-      continue;
+
+      const settingKey = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : key;
+      const r = ROWS[settingKey];
+      if (r) {
+        const normalized = TYPES[r.type].normalize(rawValue, r);
+        store.set(PREFIX + settingKey, normalized);
+        applied++;
+      }
     }
 
-    const settingKey = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : key;
-    const r = ROWS[settingKey];
-    if (r) {
-      const normalized = TYPES[r.type].normalize(rawValue, r);
-      store.set(PREFIX + settingKey, normalized);
-      applied++;
+    const hasExplicitOverridesFlag =
+      'manualOverridesEnabled' in data || `${PREFIX}manualOverridesEnabled` in data;
+    const rawOverrides = data.syncManualOverrides ?? data[`${PREFIX}syncManualOverrides`];
+    if (!hasExplicitOverridesFlag && rawOverrides !== undefined && ROWS.syncManualOverrides && ROWS.manualOverridesEnabled) {
+      const normalizedOverrides = TYPES[ROWS.syncManualOverrides.type].normalize(
+        rawOverrides,
+        ROWS.syncManualOverrides
+      );
+      if (
+        normalizedOverrides &&
+        typeof normalizedOverrides === 'object' &&
+        !Array.isArray(normalizedOverrides) &&
+        Object.keys(normalizedOverrides).length > 0
+      ) {
+        store.set(`${PREFIX}manualOverridesEnabled`, true);
+        applied++;
+      }
     }
+  } finally {
+    CoreHooks.setSessionClearing(false);
   }
 
   if (applied === 0 && secretsApplied === 0) {

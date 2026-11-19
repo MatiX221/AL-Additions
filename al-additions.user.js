@@ -463,6 +463,9 @@
 	function getAccountProvider(id) {
 		return providers.get(id);
 	}
+	function listAccountProviders() {
+		return [...providers.values()];
+	}
 	function getAccountSecretKeys(providerId) {
 		if (providerId !== void 0) {
 			const p = providers.get(providerId);
@@ -1585,6 +1588,15 @@
 			}
 		};
 	}
+	function disposeRecord(rec, resetStandalone = true) {
+		rec.bootSeq++;
+		const hadCleanups = rec.cleanups.length > 0;
+		if (rec.booted || hadCleanups) runCleanupsReverse(rec.id, rec.cleanups);
+		rec.abortController = null;
+		rec.booted = false;
+		rec.runtimeError = void 0;
+		if (resetStandalone) rec.standalonePaused = false;
+	}
 	function bootRecord(rec) {
 		if (rec.booted) return Promise.resolve();
 		const seq = ++rec.bootSeq;
@@ -1788,6 +1800,95 @@
 			}
 			bootRecord(rec);
 		}
+	}
+	function createModuleHost() {
+		return {
+			reload(ids) {
+				const targetSet = new Set(ids);
+				const graph = resolveAllStates();
+				const nextActiveIds = new Set(graph.ordered.map((r) => r.id));
+				const toStop = new Set();
+				for (const rec of records) if (rec.booted && (targetSet.has(rec.id) || !nextActiveIds.has(rec.id))) toStop.add(rec.id);
+				let added = true;
+				while (added) {
+					added = false;
+					for (const rec of records) if (rec.booted && !toStop.has(rec.id) && rec.dependsOn.some((d) => toStop.has(d))) {
+						toStop.add(rec.id);
+						added = true;
+					}
+				}
+				const stopOrdered = [...toStop].sort((a, b) => {
+					const ra = recordsById.get(a);
+					const rb = recordsById.get(b);
+					if (LAYER_ORDER[ra.layer] !== LAYER_ORDER[rb.layer]) return LAYER_ORDER[rb.layer] - LAYER_ORDER[ra.layer];
+					return rb.id.localeCompare(ra.id);
+				});
+				const finalStopOrder = [];
+				const stoppedSet = new Set();
+				const visitStop = (id, stack = new Set()) => {
+					if (stoppedSet.has(id) || stack.has(id)) return;
+					stack.add(id);
+					for (const candidate of stopOrdered) {
+						const cr = recordsById.get(candidate);
+						if (cr && cr.dependsOn.includes(id)) visitStop(candidate, stack);
+					}
+					stack.delete(id);
+					stoppedSet.add(id);
+					finalStopOrder.push(id);
+				};
+				for (const id of stopOrdered) visitStop(id);
+				for (const id of finalStopOrder) {
+					const rec = recordsById.get(id);
+					if (rec) disposeRecord(rec, true);
+				}
+				const freshGraph = resolveAllStates();
+				syncAllLiveStatuses(freshGraph.statuses);
+				for (const rec of freshGraph.ordered) {
+					if (rec.booted) continue;
+					if (rec.dependsOn.some((depId) => {
+						const dep = recordsById.get(depId);
+						return !dep || !!dep.runtimeError || dep.standalonePaused || !dep.booted;
+					})) {
+						emitStatusChange(rec.id, {
+							active: false,
+							reason: "dep-unavailable"
+						});
+						continue;
+					}
+					bootRecord(rec);
+				}
+			},
+			getStatus(id) {
+				const live = liveStatuses.get(id);
+				if (live) return live;
+				return resolveAllStates().statuses[id] || {
+					active: false,
+					reason: "disabled"
+				};
+			},
+			resolveStagedStates(stagedEnabled) {
+				return resolveAllStates(stagedEnabled).statuses;
+			},
+			onStatusChange(cb) {
+				statusListeners.add(cb);
+				return () => {
+					statusListeners.delete(cb);
+				};
+			},
+			async probeStandalone(id) {
+				const rec = recordsById.get(id);
+				if (!rec?.standalone) return false;
+				let found = false;
+				try {
+					found = !!await rec.standalone.probe();
+				} catch {
+					found = false;
+				}
+				rec.standalonePaused = found;
+				syncAllLiveStatuses(resolveAllStates().statuses);
+				return found;
+			}
+		};
 	}
 	var ANILIST_SELECTORS = {
 		loginNav: "nav a[href=\"/login\"], .nav a[href=\"/login\"]",
@@ -2398,18 +2499,12 @@
     .ala-as-textarea{height:200px}
   }
   `;
-	function openAniSongsModal(inputEl) {
-		addStyle("ala-anisongs-modal-style", MODAL_CSS$1);
+	function openAniSongsModal(ctx) {
+		ctx.addStyle("ala-anisongs-modal-style", MODAL_CSS$1);
 		const existing = document.getElementById(MODAL_ID$1);
 		if (existing) existing.remove();
-		let stateConfig;
-		try {
-			const rawVal = inputEl ? inputEl.value : JSON.stringify(Settings.get("aniSongsProviders"));
-			const check = validateAniSongsConfig(JSON.parse(rawVal));
-			stateConfig = check.valid && check.config ? check.config : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-		} catch {
-			stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-		}
+		const checkInit = validateAniSongsConfig(ctx.value);
+		let stateConfig = checkInit.valid && checkInit.config ? JSON.parse(JSON.stringify(checkInit.config)) : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
 		const backdrop = document.createElement("div");
 		backdrop.id = MODAL_ID$1;
 		backdrop.innerHTML = `
@@ -2749,11 +2844,8 @@
 		backdrop.querySelector("#ala-as-btn-done")?.addEventListener("click", () => {
 			const check = validateAniSongsConfig(stateConfig);
 			if (!check.valid || !check.config) return alert(check.error || "Invalid configuration");
-			if (inputEl) inputEl.value = JSON.stringify(check.config);
-			Settings.set("aniSongsProviders", check.config);
+			ctx.onApply(check.config);
 			close();
-			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
-			if (panelStatus) panelStatus.textContent = "Music providers updated. Press \"Save and reload\" to activate.";
 		});
 		renderUI();
 	}
@@ -3312,7 +3404,8 @@
 			def: DEFAULT_ANISONGS_CONFIG,
 			title: "Song Search Providers",
 			help: "Configure search shortcuts (YouTube, Spotify, etc.) and active music services.",
-			validate: validateAniSongsConfig
+			validate: validateAniSongsConfig,
+			editor: openAniSongsModal
 		}],
 		setup(ctx) {
 			const API = "https://rs.animethemes.moe/graphql";
@@ -4657,17 +4750,6 @@
 	var isBuiltInRunning = (id) => builtInRunning.has(id);
 	var CACHE_MS = 3e4;
 	var cache = new Map();
-	var STANDALONE = {
-		fastLoad: {
-			name: "AniList Fast Load",
-			settingKey: "fastLoadEnabled"
-		},
-		tierLabels: {
-			name: "AniList Tier Labels",
-			settingKey: "tierLabelsEnabled"
-		}
-	};
-	var STANDALONE_IDS_LIST = Object.keys(STANDALONE);
 	var PROBE_ATTR$1 = "data-ala-probe";
 	var pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 	function detectFastLoad() {
@@ -10002,10 +10084,54 @@
 		});
 	}
 	function openOverridesModal(ctxOrAddStyle) {
-		ensureOverridesStyle(typeof ctxOrAddStyle === "function" ? ctxOrAddStyle : ctxOrAddStyle?.addStyle);
+		const ec = typeof ctxOrAddStyle === "object" ? ctxOrAddStyle : void 0;
+		ensureOverridesStyle(typeof ctxOrAddStyle === "function" ? ctxOrAddStyle : ec?.addStyle);
 		const existing = document.getElementById(MODAL_ID);
 		if (existing) existing.remove();
-		refreshStaleOverrides().then(() => {
+		const staging = typeof ec?.onApply === "function";
+		const initCheck = staging ? validateOverrides(ec.value) : null;
+		let draftOverrides = staging ? JSON.parse(JSON.stringify(initCheck?.valid && initCheck.overrides ? initCheck.overrides : {})) : {};
+		const readOverrides = () => staging ? draftOverrides : getManualOverrides();
+		const writeOverrides = (next) => {
+			if (staging) draftOverrides = next;
+			else saveManualOverrides(next);
+		};
+		const patchOverride = (id, data) => {
+			if (!id) return;
+			if (staging) draftOverrides = {
+				...draftOverrides,
+				[String(id)]: {
+					...data,
+					updatedAt: data.updatedAt || Date.now()
+				}
+			};
+			else setOverride(id, data);
+		};
+		const deleteOverride = (id) => {
+			if (!id) return;
+			if (staging) {
+				const copy = { ...draftOverrides };
+				delete copy[String(id)];
+				draftOverrides = copy;
+			} else removeOverride(id);
+		};
+		const importDraftOverrides = (raw, mode = "replace") => {
+			if (!staging) return importOverrides(raw, mode);
+			const check = validateOverrides(raw);
+			if (!check.valid || !check.overrides) return {
+				success: false,
+				error: check.error || "Validation failed"
+			};
+			draftOverrides = mode === "merge" ? {
+				...draftOverrides,
+				...check.overrides
+			} : check.overrides;
+			return {
+				success: true,
+				count: Object.keys(check.overrides).length
+			};
+		};
+		if (!staging) refreshStaleOverrides().then(() => {
 			if (document.getElementById(MODAL_ID)) renderList();
 		});
 		const backdrop = document.createElement("div");
@@ -10123,13 +10249,27 @@
         </div>
       </div>
       <footer class="ala-ov-foot">
-        <button class="ala-btn ala-btn--primary ala-ov-close" type="button">Done</button>
+        <button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>
       </footer>
     </div>
   `;
 		document.body.appendChild(backdrop);
-		const close = () => backdrop.remove();
+		const onKey = (e) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				close();
+			}
+		};
+		const close = () => {
+			document.removeEventListener("keydown", onKey, true);
+			backdrop.remove();
+		};
+		document.addEventListener("keydown", onKey, true);
 		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
+		backdrop.querySelector("#ala-ov-btn-done")?.addEventListener("click", () => {
+			if (staging) ec.onApply(draftOverrides);
+			close();
+		});
 		backdrop.addEventListener("click", (e) => {
 			if (e.target === backdrop) close();
 		});
@@ -10192,7 +10332,7 @@
 				updatePreviewUI();
 				return;
 			}
-			const existing = getManualOverrides()[String(id)];
+			const existing = readOverrides()[String(id)];
 			if (existing) {
 				activePreview = {
 					mediaId: id,
@@ -10265,11 +10405,11 @@
 			let malId = extractMalId(malInput.value);
 			if (!malId && activePreview?.detectedMalId) malId = activePreview.detectedMalId;
 			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
-			const existing = getManualOverrides()[String(id)];
+			const existing = readOverrides()[String(id)];
 			const title = activePreview?.title || existing?.title || `Media #${id}`;
 			const cover = activePreview?.cover || existing?.cover;
 			const type = activePreview?.type || existing?.type || "ANIME";
-			setOverride(id, {
+			patchOverride(id, {
 				malId,
 				type,
 				title,
@@ -10280,7 +10420,7 @@
 			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
 				const m = res?.Media;
 				if (m) {
-					const current = getManualOverrides();
+					const current = { ...readOverrides() };
 					if (current[String(id)]) {
 						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
 						const c = m.coverImage?.medium || current[String(id)].cover;
@@ -10291,7 +10431,7 @@
 							type: m.type === "MANGA" ? "MANGA" : "ANIME",
 							updatedAt: Date.now()
 						};
-						saveManualOverrides(current);
+						writeOverrides(current);
 						if (document.getElementById(MODAL_ID)) renderList();
 					}
 				}
@@ -10300,12 +10440,13 @@
 		ignoreBtn.addEventListener("click", () => {
 			const id = activePreview?.mediaId || extractAlId(alInput.value);
 			if (!id) return alert("Please enter a valid AniList ID or URL.");
-			const existing = getManualOverrides()[String(id)];
+			const existing = readOverrides()[String(id)];
 			const title = activePreview?.title || existing?.title || `Media #${id}`;
 			const cover = activePreview?.cover || existing?.cover;
-			setOverride(id, {
+			const type = activePreview?.type || existing?.type || "ANIME";
+			patchOverride(id, {
 				malId: 0,
-				type: activePreview?.type || existing?.type || "ANIME",
+				type,
 				title,
 				cover
 			});
@@ -10314,7 +10455,7 @@
 			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
 				const m = res?.Media;
 				if (m) {
-					const current = getManualOverrides();
+					const current = { ...readOverrides() };
 					if (current[String(id)]) {
 						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
 						const c = m.coverImage?.medium || current[String(id)].cover;
@@ -10325,7 +10466,7 @@
 							type: m.type === "MANGA" ? "MANGA" : "ANIME",
 							updatedAt: Date.now()
 						};
-						saveManualOverrides(current);
+						writeOverrides(current);
 						if (document.getElementById(MODAL_ID)) renderList();
 					}
 				}
@@ -10354,7 +10495,7 @@
 			}, 150);
 		});
 		function renderList() {
-			const all = getManualOverrides();
+			const all = readOverrides();
 			const entries = Object.entries(all).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
 			const filtered = entries.filter(([idStr, o]) => {
 				if (statusFilter === "overrides" && o.malId === 0) return false;
@@ -10395,7 +10536,7 @@
 				btn.addEventListener("click", () => {
 					const id = Number(btn.dataset.id);
 					if (id) {
-						removeOverride(id);
+						deleteOverride(id);
 						if (activePreview?.mediaId === id) clearForm();
 						renderList();
 					}
@@ -10434,7 +10575,7 @@
 			}, 150);
 		});
 		function getRawUnmatched() {
-			const configured = getManualOverrides();
+			const configured = readOverrides();
 			const unmatched = [];
 			for (const t of ["ANIME", "MANGA"]) {
 				const data = stores[t].ids.data || {};
@@ -10501,7 +10642,7 @@
 					const id = Number(btn.dataset.id);
 					const type = btn.dataset.type || "ANIME";
 					const meta = unmatchedMetaCache.get(id);
-					setOverride(id, {
+					patchOverride(id, {
 						malId: 0,
 						type,
 						title: meta?.title || `Media #${id}`,
@@ -10615,7 +10756,7 @@
 					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
 					return;
 				}
-				const overrides = getManualOverrides();
+				const overrides = readOverrides();
 				const knownMalIds = new Set();
 				for (const t of ["ANIME", "MANGA"]) try {
 					const alEntries = await alFetchAll(viewer.id, t);
@@ -10662,7 +10803,7 @@
 		const jsonCopyBtn = backdrop.querySelector("#ala-ov-btn-json-copy");
 		const jsonResetBtn = backdrop.querySelector("#ala-ov-btn-json-reset");
 		function renderJsonView() {
-			const current = getManualOverrides();
+			const current = readOverrides();
 			jsonTextarea.value = JSON.stringify(current, null, 2);
 			jsonStatus.style.display = "none";
 		}
@@ -10686,7 +10827,7 @@
 		});
 		jsonResetBtn?.addEventListener("click", renderJsonView);
 		jsonSaveBtn?.addEventListener("click", () => {
-			const res = importOverrides(jsonTextarea.value, "replace");
+			const res = importDraftOverrides(jsonTextarea.value, "replace");
 			if (!res.success) {
 				jsonStatus.className = "ala-ov-status ala-ov-status--error";
 				jsonStatus.textContent = res.error || "Failed to parse JSON";
@@ -10699,14 +10840,14 @@
 			renderList();
 		});
 		jsonMergeBtn?.addEventListener("click", () => {
-			const res = importOverrides(jsonTextarea.value, "merge");
+			const res = importDraftOverrides(jsonTextarea.value, "merge");
 			if (!res.success) {
 				jsonStatus.className = "ala-ov-status ala-ov-status--error";
 				jsonStatus.textContent = res.error || "Failed to parse JSON";
 				jsonStatus.style.display = "block";
 				return;
 			}
-			const current = getManualOverrides();
+			const current = readOverrides();
 			jsonStatus.className = "ala-ov-status ala-ov-status--success";
 			jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
 			jsonStatus.style.display = "block";
@@ -10995,7 +11136,8 @@
 			legacy: [OVERRIDES_SETTING_KEY],
 			title: "Manual Overrides & Audit",
 			help: "Configure custom AniList → MyAnimeList ID mappings, ignore titles, and audit unmatched or orphaned entries.",
-			validate: validateOverrides
+			validate: validateOverrides,
+			editor: openOverridesModal
 		}],
 		migrate() {
 			if (store$1.get("ala_setting_manualOverridesEnabled", void 0) === void 0 && Object.keys(getManualOverrides()).length > 0) store$1.set(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, true);
@@ -11229,6 +11371,213 @@
 			tiers: validated
 		};
 	}
+	var TIER_MODAL_CSS = `
+  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
+  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
+  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
+  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
+  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
+  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
+  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
+  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
+  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
+  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
+  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
+  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
+  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
+  @media (max-width:720px){
+    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
+    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    .ala-tier-table-wrap{max-height:45vh}
+    .ala-tier-table th,.ala-tier-table td{padding:4px}
+  }
+`;
+	function openTierEditor(ctx) {
+		ctx.addStyle("ala-tier-modal-style", TIER_MODAL_CSS);
+		const checkInit = validateTiers(ctx.value);
+		const tiers = checkInit.valid && checkInit.tiers ? checkInit.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		const existing = document.getElementById("ala-tier-editor-backdrop");
+		if (existing) existing.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = "ala-tier-editor-backdrop";
+		backdrop.innerHTML = `
+    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
+      <header class="ala-sheet-head">
+        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
+        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-sheet-body">
+        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
+        <div class="ala-tier-table-wrap">
+          <table class="ala-tier-table">
+            <thead>
+              <tr>
+                <th style="width:75px">Label</th>
+                <th style="width:70px">Min</th>
+                <th style="width:70px">Max</th>
+                <th style="width:48px">Badge</th>
+                <th style="width:48px">Text</th>
+                <th style="width:75px">Preview</th>
+                <th style="width:36px"></th>
+              </tr>
+            </thead>
+            <tbody id="ala-tier-tbody"></tbody>
+          </table>
+        </div>
+        <div class="ala-tier-actions">
+          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
+        </div>
+        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
+          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
+          </div>
+        </div>
+      </div>
+      <footer class="ala-sheet-foot">
+        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
+        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const tbody = backdrop.querySelector("#ala-tier-tbody");
+		const status = backdrop.querySelector("#ala-tier-status");
+		const setModalStatus = (msg, isError = false) => {
+			status.textContent = msg;
+			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
+		};
+		const createRowHtml = (t, idx) => {
+			const badgeColor = normalizeHexColor(t.color) || "#000000";
+			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
+			return `
+    <tr data-idx="${idx}">
+      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
+      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
+      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
+      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
+      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
+      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
+      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
+    </tr>
+  `;
+		};
+		const renderTable = (list) => {
+			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
+		};
+		const getRowsData = () => {
+			const rows = tbody.querySelectorAll("tr");
+			const result = [];
+			rows.forEach((tr) => {
+				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
+				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
+				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
+				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+				result.push({
+					label: label || "Tier",
+					min: isNaN(min) ? 0 : min,
+					max: isNaN(max) ? 100 : max,
+					color,
+					textColor
+				});
+			});
+			return result;
+		};
+		const updatePreview = (tr) => {
+			const label = tr.querySelector(".ala-t-label")?.value || "";
+			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+			const preview = tr.querySelector(".ala-t-preview");
+			if (preview) {
+				preview.textContent = label;
+				preview.style.backgroundColor = color;
+				preview.style.color = textColor;
+			}
+		};
+		tbody.addEventListener("input", (e) => {
+			const tr = e.target.closest("tr");
+			if (tr) updatePreview(tr);
+		});
+		tbody.addEventListener("click", (e) => {
+			const btn = e.target.closest(".ala-tier-del-btn");
+			if (btn) {
+				const tr = btn.closest("tr");
+				if (tr) {
+					tr.remove();
+					setModalStatus("Tier removed.");
+				}
+			}
+		});
+		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
+			const current = getRowsData();
+			current.push({
+				min: 0,
+				max: 0,
+				label: "New",
+				color: "#3db4f2",
+				textColor: "#ffffff"
+			});
+			renderTable(current);
+			setModalStatus("Added new tier.");
+		});
+		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
+			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
+			setModalStatus("Reset to default tiers.");
+		});
+		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
+		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
+		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
+			if (jsonWrap.style.display === "none") {
+				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
+				jsonWrap.style.display = "block";
+			} else jsonWrap.style.display = "none";
+		});
+		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
+			try {
+				const check = validateTiers(JSON.parse(jsonArea.value));
+				if (!check.valid || !check.tiers) {
+					setModalStatus(check.error || "Invalid tier JSON.", true);
+					return;
+				}
+				renderTable(check.tiers);
+				jsonWrap.style.display = "none";
+				setModalStatus("JSON applied successfully.");
+			} catch (e) {
+				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
+			}
+		});
+		const closeModal = () => {
+			document.removeEventListener("keydown", onKey, true);
+			backdrop.remove();
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				closeModal();
+			}
+		};
+		document.addEventListener("keydown", onKey, true);
+		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
+		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) closeModal();
+		});
+		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
+			const check = validateTiers(getRowsData());
+			if (!check.valid || !check.tiers) {
+				setModalStatus(check.error || "Invalid tier configuration.", true);
+				return;
+			}
+			ctx.onApply(check.tiers);
+			closeModal();
+		});
+		renderTable(tiers);
+	}
 	function getValidTiers() {
 		const check = validateTiers(Settings.get("tierLabels"));
 		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
@@ -11287,7 +11636,8 @@
 				def: DEFAULT_TIERS,
 				title: "Tier Ranges & Colors",
 				help: "Customize score ranges, badge labels, and colors.",
-				validate: validateTiers
+				validate: validateTiers,
+				editor: openTierEditor
 			}
 		],
 		migrate: migrateLegacyTierLabels,
@@ -11846,12 +12196,6 @@
 		65,
 		69
 	]);
-	var SESSION_CACHE_KEYS = [
-		"al_token",
-		"al_username",
-		"al_user_id",
-		"al_score_format"
-	];
 	var PBKDF2_ITERATIONS = 1e5;
 	function matchesMagic(bytes, magic) {
 		if (bytes.length < magic.length) return false;
@@ -11977,24 +12321,38 @@
 		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
 		let applied = 0;
 		let secretsApplied = 0;
-		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
-		const secretKeys = new Set(getAccountSecretKeys());
-		for (const [key, rawValue] of Object.entries(data)) {
-			if (SESSION_CACHE_KEYS.includes(key)) continue;
-			if (secretKeys.has(key)) {
-				if (rawValue !== void 0 && rawValue !== null) {
-					store$1.set(key, rawValue);
-					secretsApplied++;
+		CoreHooks.setSessionClearing(true);
+		try {
+			for (const k of ANILIST_SESSION_KEYS) store$1.del(k);
+			const secretKeys = new Set(getAccountSecretKeys());
+			for (const [key, rawValue] of Object.entries(data)) {
+				if (ANILIST_SESSION_KEYS.includes(key)) continue;
+				if (secretKeys.has(key)) {
+					if (rawValue !== void 0 && rawValue !== null) {
+						store$1.set(key, rawValue);
+						secretsApplied++;
+					}
+					continue;
 				}
-				continue;
+				const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
+				const r = ROWS[settingKey];
+				if (r) {
+					const normalized = TYPES$1[r.type].normalize(rawValue, r);
+					store$1.set(SETTING_PREFIX + settingKey, normalized);
+					applied++;
+				}
 			}
-			const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
-			const r = ROWS[settingKey];
-			if (r) {
-				const normalized = TYPES$1[r.type].normalize(rawValue, r);
-				store$1.set(SETTING_PREFIX + settingKey, normalized);
-				applied++;
+			const hasExplicitOverridesFlag = "manualOverridesEnabled" in data || `ala_setting_manualOverridesEnabled` in data;
+			const rawOverrides = data.syncManualOverrides ?? data[`ala_setting_syncManualOverrides`];
+			if (!hasExplicitOverridesFlag && rawOverrides !== void 0 && ROWS.syncManualOverrides && ROWS.manualOverridesEnabled) {
+				const normalizedOverrides = TYPES$1[ROWS.syncManualOverrides.type].normalize(rawOverrides, ROWS.syncManualOverrides);
+				if (normalizedOverrides && typeof normalizedOverrides === "object" && !Array.isArray(normalizedOverrides) && Object.keys(normalizedOverrides).length > 0) {
+					store$1.set(`${SETTING_PREFIX}manualOverridesEnabled`, true);
+					applied++;
+				}
 			}
+		} finally {
+			CoreHooks.setSessionClearing(false);
 		}
 		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
 		return {
@@ -12135,200 +12493,22 @@
 			reader.readAsArrayBuffer(file);
 		});
 	}
-	function openTierEditor(inputEl) {
-		let tiers;
-		try {
-			const check = validateTiers(JSON.parse(inputEl.value));
-			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		} catch {
-			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		}
-		const existing = document.getElementById("ala-tier-editor-backdrop");
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = "ala-tier-editor-backdrop";
-		backdrop.innerHTML = `
-    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
-      <header class="ala-sheet-head">
-        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
-        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-sheet-body">
-        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
-        <div class="ala-tier-table-wrap">
-          <table class="ala-tier-table">
-            <thead>
-              <tr>
-                <th style="width:75px">Label</th>
-                <th style="width:70px">Min</th>
-                <th style="width:70px">Max</th>
-                <th style="width:48px">Badge</th>
-                <th style="width:48px">Text</th>
-                <th style="width:75px">Preview</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="ala-tier-tbody"></tbody>
-          </table>
-        </div>
-        <div class="ala-tier-actions">
-          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
-        </div>
-        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
-          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
-          </div>
-        </div>
-      </div>
-      <footer class="ala-sheet-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
-        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const tbody = backdrop.querySelector("#ala-tier-tbody");
-		const status = backdrop.querySelector("#ala-tier-status");
-		const setModalStatus = (msg, isError = false) => {
-			status.textContent = msg;
-			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
-		};
-		const createRowHtml = (t, idx) => {
-			const badgeColor = normalizeHexColor(t.color) || "#000000";
-			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
-			return `
-    <tr data-idx="${idx}">
-      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
-      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
-      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
-      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
-      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
-      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
-      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
-    </tr>
-  `;
-		};
-		const renderTable = (list) => {
-			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
-		};
-		const getRowsData = () => {
-			const rows = tbody.querySelectorAll("tr");
-			const result = [];
-			rows.forEach((tr) => {
-				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
-				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
-				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
-				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-				result.push({
-					label: label || "Tier",
-					min: isNaN(min) ? 0 : min,
-					max: isNaN(max) ? 100 : max,
-					color,
-					textColor
-				});
-			});
-			return result;
-		};
-		const updatePreview = (tr) => {
-			const label = tr.querySelector(".ala-t-label")?.value || "";
-			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-			const preview = tr.querySelector(".ala-t-preview");
-			if (preview) {
-				preview.textContent = label;
-				preview.style.backgroundColor = color;
-				preview.style.color = textColor;
-			}
-		};
-		tbody.addEventListener("input", (e) => {
-			const tr = e.target.closest("tr");
-			if (tr) updatePreview(tr);
-		});
-		tbody.addEventListener("click", (e) => {
-			const btn = e.target.closest(".ala-tier-del-btn");
-			if (btn) {
-				const tr = btn.closest("tr");
-				if (tr) {
-					tr.remove();
-					setModalStatus("Tier removed.");
-				}
-			}
-		});
-		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
-			const current = getRowsData();
-			current.push({
-				min: 0,
-				max: 0,
-				label: "New",
-				color: "#3db4f2",
-				textColor: "#ffffff"
-			});
-			renderTable(current);
-			setModalStatus("Added new tier.");
-		});
-		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
-			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
-			setModalStatus("Reset to default tiers.");
-		});
-		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
-		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
-		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
-			if (jsonWrap.style.display === "none") {
-				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
-				jsonWrap.style.display = "block";
-			} else jsonWrap.style.display = "none";
-		});
-		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
-			try {
-				const check = validateTiers(JSON.parse(jsonArea.value));
-				if (!check.valid || !check.tiers) {
-					setModalStatus(check.error || "Invalid tier JSON.", true);
-					return;
-				}
-				renderTable(check.tiers);
-				jsonWrap.style.display = "none";
-				setModalStatus("JSON applied successfully.");
-			} catch (e) {
-				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
-			}
-		});
-		const closeModal = () => {
-			document.removeEventListener("keydown", onKey, true);
-			backdrop.remove();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				closeModal();
-			}
-		};
-		document.addEventListener("keydown", onKey, true);
-		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
-		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) closeModal();
-		});
-		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
-			const check = validateTiers(getRowsData());
-			if (!check.valid || !check.tiers) {
-				setModalStatus(check.error || "Invalid tier configuration.", true);
-				return;
-			}
-			inputEl.value = JSON.stringify(check.tiers);
-			Settings.set("tierLabels", check.tiers);
-			closeModal();
-			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
-			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
-		});
-		renderTable(tiers);
-	}
 	var PINNED_FIRST = ["Sync", "General"];
 	var PINNED_LAST = ["Advanced"];
+	var NOOP_HOST = {
+		reload: () => {},
+		getStatus: () => ({ active: false }),
+		resolveStagedStates: (stagedEnabled) => {
+			const out = {};
+			for (const [id, on] of Object.entries(stagedEnabled)) out[id] = {
+				active: !!on,
+				reason: on ? void 0 : "disabled"
+			};
+			return out;
+		},
+		onStatusChange: () => () => {},
+		probeStandalone: async () => false
+	};
 	var CSS$1 = `
   .ala-settings-nav-section{margin-top:26px}
   .ala-settings-nav-heading{color:rgb(var(--color-text-lighter));margin-bottom:12px}
@@ -12343,23 +12523,21 @@
   #ala-settings-panel h2,#ala-settings-panel h3{margin:0;font-family:inherit}
 
   .ala-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 10px}
-  .ala-sheet-head h2{font-size:19px;font-weight:600;line-height:1.3}
-  .ala-sheet-body{flex:1 1 auto;min-height:0;padding:0 20px 8px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .ala-sheet-head h2{font-size:18px;font-weight:700}
+  .ala-sheet-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 20px 12px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
   .ala-sheet-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-status{flex:1 1 160px;color:rgb(var(--color-text-lighter));font-size:12px;transition:color .15s}
-  .ala-status.is-error{color:rgb(var(--color-red,224,85,85));font-weight:600}
+  .ala-status{margin-left:auto;font-size:12px;color:rgb(var(--color-text-lighter))}
+  .ala-status.is-error{color:rgb(var(--color-red,224,85,85))}
 
-  #ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
+  .ala-section-title{margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:rgb(var(--color-text-lighter))}
   .ala-section{border-radius:6px;background:rgb(var(--color-background));overflow:hidden}
-  .ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}
-  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;min-height:48px;cursor:pointer;user-select:none;list-style:none;transition:background .15s}
+  .ala-section-dropdown{margin-top:22px}
+  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;list-style:none;cursor:pointer;padding:6px 2px;user-select:none}
   .ala-section-summary::-webkit-details-marker{display:none}
-  .ala-section-summary:hover{background:rgba(var(--color-text-lighter),.06)}
-  .ala-section-summary:focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:-2px}
-  .ala-section-summary .ala-section-title{margin:0!important;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
-  .ala-chevron{display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--color-text-lighter));transition:transform .22s cubic-bezier(0.4,0,0.2,1);will-change:transform}
-  .ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}
-  .ala-section-collapsible .ala-collapsible-inner{border-top:1px solid rgba(var(--color-text-lighter),.12)}
+  .ala-section-summary .ala-section-title{margin:0}
+  .ala-chevron{display:inline-flex;align-items:center;color:rgb(var(--color-text-lighter));transition:transform .2s cubic-bezier(0.4,0,0.2,1);transform:rotate(-90deg)}
+  .ala-section-dropdown.is-expanded>.ala-section-summary .ala-chevron{transform:rotate(0deg)}
+  .ala-section-collapsible{margin-top:6px}
 
   .ala-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden}
   .ala-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
@@ -12368,7 +12546,7 @@
   .ala-feature+.ala-feature{border-top:1px solid rgba(var(--color-text-lighter),.12)}
   .ala-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:12px 14px;cursor:pointer}
   .ala-text{display:flex;flex-direction:column;gap:3px;min-width:0}
-  .ala-title{font-size:14px;color:rgb(var(--color-text))}
+  .ala-title{display:flex;align-items:center;gap:8px;font-size:14px;color:rgb(var(--color-text))}
   .ala-help{color:rgb(var(--color-text-lighter));font-size:12px;line-height:1.4}
   .ala-options-collapsible{margin:0;padding:0}
   .ala-options{margin:0 14px 12px 20px;padding-left:12px;border-left:2px solid rgba(var(--color-blue),.4)}
@@ -12377,7 +12555,13 @@
   .ala-child-option{margin-left:8px}
   .ala-child-option .ala-collapsible-inner{border-left:2px solid rgba(var(--color-blue),.25);padding-left:10px}
   .ala-child-option .ala-row{min-height:44px;padding:6px 0}
-  .ala-standalone-note{margin:0 14px 12px;padding:8px 10px;border-radius:4px;border-left:3px solid rgb(var(--color-orange,255,152,0));background:rgba(var(--color-orange,255,152,0),.12);color:rgb(var(--color-text));font-size:12px;line-height:1.45}
+  .ala-note{margin:0 14px 12px;padding:8px 10px;border-radius:4px;font-size:12px;line-height:1.45;color:rgb(var(--color-text))}
+  .ala-standalone-note{border-left:3px solid rgb(var(--color-orange,255,152,0));background:rgba(var(--color-orange,255,152,0),.12)}
+  .ala-dep-note{border-left:3px solid rgba(var(--color-text-lighter),.6);background:rgba(var(--color-text-lighter),.1)}
+  .ala-host-note{border-left:3px solid rgb(var(--color-blue));background:rgba(var(--color-blue),.1)}
+  .ala-error-note{border-left:3px solid rgb(var(--color-red,224,85,85));background:rgba(var(--color-red,224,85,85),.12)}
+  .ala-badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+  .ala-badge--error{background:rgba(var(--color-red,224,85,85),.18);color:rgb(var(--color-red,224,85,85))}
 
   #ala-settings-panel input[type=number],#ala-settings-panel input[type=text],#ala-settings-panel select{width:170px;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
   #ala-settings-panel input:disabled,#ala-settings-panel select:disabled{cursor:not-allowed}
@@ -12408,29 +12592,10 @@
   .ala-credit a{color:rgb(var(--color-blue));text-decoration:none}
   .ala-credit a:hover{text-decoration:underline}
 
-  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
-  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
-  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
-  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
-  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
-  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
-  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
-  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
-  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
-  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
-  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
-  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
-  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
-
   @media (max-width:700px){
     .ala-settings-nav-section{display:none!important}
     #ala-settings-backdrop{align-items:flex-end;padding:0}
     #ala-settings-panel{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
-    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    .ala-tier-table-wrap{max-height:45vh}
-    .ala-tier-table th,.ala-tier-table td{padding:4px}
     .ala-sheet-head{padding:16px 16px 8px}
     .ala-sheet-body{padding:0 16px 8px}
     .ala-sheet-foot{padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
@@ -12459,11 +12624,11 @@
 		return rowHtml;
 	};
 	var featureHtml = (f) => {
-		if (f.toggle.type === "json") return `<div class="ala-feature" data-feature="${f.id}">
+		if (f.toggle.type === "json") return `<div class="ala-feature" data-feature="${esc(f.id)}">
       <div class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES$1.json.html(f.toggle, Settings.get(f.toggle.key))}</div>
     </div>`;
 		const isFeatureOn = !!Settings.get(f.toggle.key);
-		return `<div class="ala-feature ${isFeatureOn ? "" : "is-off"}" data-feature="${f.id}">
+		return `<div class="ala-feature ${isFeatureOn ? "" : "is-off"}" data-feature="${esc(f.id)}">
     <label class="ala-row ala-row--main">${rowText(f.title, f.help)}${TYPES$1.toggle.html(f.toggle, isFeatureOn)}</label>
     ${f.options.length ? `
       <div class="ala-collapsible ala-options-collapsible ${isFeatureOn ? "is-open" : ""}">
@@ -12474,22 +12639,26 @@
   </div>`;
 	};
 	function accountsHtml() {
-		const malConnected = !!store$1.get("mal_token", null);
+		const providers = listAccountProviders();
+		if (!providers.length) return "";
 		return `<h3 class="ala-section-title">Connected Accounts</h3>
-  <div class="ala-section">
-    <div class="ala-row ala-account-row">
-      <span class="ala-text">
-        <span class="ala-title">MyAnimeList</span>
-        <span class="ala-help" id="ala-status-mal">${malConnected ? "Connected" : "Not connected"}</span>
-      </span>
-      <button type="button" class="ala-btn ${malConnected ? "ala-btn--danger" : "ala-btn--primary"}" id="ala-btn-mal">
-        ${malConnected ? "Disconnect" : "Connect to MAL"}
-      </button>
-    </div>
-  </div>`;
+  <div class="ala-section">${providers.map((p, idx) => {
+			const connected = p.isConnected();
+			const border = idx > 0 ? " style=\"border-top:1px solid rgba(var(--color-text-lighter),.12)\"" : "";
+			const connectLabel = p.id === "mal" ? "Connect to MAL" : `Connect to ${esc(p.name)}`;
+			return `<div class="ala-row ala-account-row" data-account-id="${esc(p.id)}"${border}>
+        <span class="ala-text">
+          <span class="ala-title">${esc(p.name)}</span>
+          <span class="ala-help" id="ala-status-${esc(p.id)}">${connected ? "Connected" : "Not connected"}</span>
+        </span>
+        <button type="button" class="ala-btn ${connected ? "ala-btn--danger" : "ala-btn--primary"}" data-account-btn="${esc(p.id)}">
+          ${connected ? "Disconnect" : connectLabel}
+        </button>
+      </div>`;
+		}).join("")}</div>`;
 	}
 	function backupRestoreHtml() {
-		const isDev = !!Settings.get("devModeEnabled");
+		const isDev = !!Settings.get(DEV_MODE_DEF.key);
 		return `<details class="ala-section-dropdown" data-section="backup" open>
     <summary class="ala-section-summary">
       <span class="ala-section-title">Backup &amp; Restore</span>
@@ -12508,7 +12677,7 @@
           <div class="ala-row ala-account-row" style="border-top:1px solid rgba(var(--color-text-lighter),.12)">
             <span class="ala-text">
               <span class="ala-title">Export with Credentials</span>
-              <span class="ala-help">Include MyAnimeList tokens. A password is required.</span>
+              <span class="ala-help">Include connected account tokens. A password is required.</span>
             </span>
             <button type="button" class="ala-btn ala-btn--danger" id="ala-btn-export-secrets">Export with Secrets</button>
           </div>
@@ -12574,7 +12743,7 @@
               </div>
             </div>
           </details>` : "";
-		}).join("");
+		}).filter(Boolean).join("");
 	}
 	function creditsDropdownHtml() {
 		return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits" open>
@@ -12602,46 +12771,28 @@
 		});
 	}
 	var prevOverflow = null;
-	function standaloneNote(id) {
-		return `<b>Standalone ${STANDALONE[id].name} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.`;
-	}
-	function showStandaloneNotes(panel, syncFeature) {
-		for (const id of STANDALONE_IDS_LIST) detectStandalone(id).then((found) => {
-			if (!panel.isConnected) return;
-			const card = panel.querySelector(`.ala-feature[data-feature="${id}"]`);
-			if (!card) return;
-			card.querySelector(".ala-standalone-note")?.remove();
-			if (!found) return;
-			const toggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
-			if (toggle) {
-				toggle.dataset.standaloneLocked = "1";
-				toggle.checked = false;
-				toggle.disabled = true;
-				syncFeature(card);
-			}
-			const note = document.createElement("div");
-			note.className = "ala-standalone-note";
-			note.setAttribute("role", "note");
-			note.innerHTML = standaloneNote(id);
-			card.querySelector(".ala-row--main")?.insertAdjacentElement("afterend", note);
-		});
+	function standaloneNoteHtml(f) {
+		const name = f.standalone?.name || f.title;
+		const extra = f.standalone?.note ? ` ${esc(f.standalone.note)}` : "";
+		return `<b>Standalone ${esc(name)} detected.</b> This feature is now built into AL Additions, so you no longer need the separate script. The built-in version is switched off while the standalone script is installed. Your setting is kept and applies again once you uninstall it.${extra}`;
 	}
 	function closePanel() {
 		const b = document.getElementById("ala-settings-backdrop");
 		if (!b) return;
 		if (b._onKey) document.removeEventListener("keydown", b._onKey);
 		if (b._onFocus) window.removeEventListener("focus", b._onFocus);
+		b._onCleanup?.();
 		b.remove();
 		document.documentElement.style.overflow = prevOverflow || "";
 		prevOverflow = null;
 	}
-	function showPanel() {
+	function showPanel(host = NOOP_HOST) {
 		if (document.getElementById("ala-settings-backdrop")) return;
 		const backdrop = document.createElement("div");
 		backdrop.id = "ala-settings-backdrop";
 		backdrop.innerHTML = `<div id="ala-settings-panel" role="dialog" aria-modal="true" aria-labelledby="ala-settings-title" tabindex="-1">
     <header class="ala-sheet-head">
-      <div><h2 id="ala-settings-title">AL Additions</h2><div class="ala-help">Changes apply after the page reloads.</div></div>
+      <div><h2 id="ala-settings-title">AL Additions</h2><div class="ala-help">Live modules apply on Save; others require a page reload.</div></div>
       <button class="ala-icon-btn ala-close" type="button" aria-label="Close settings">${icon("close", 20)}</button>
     </header>
     <div class="ala-sheet-body">
@@ -12651,94 +12802,255 @@
       ${creditsDropdownHtml()}
     </div>
     <footer class="ala-sheet-foot">
-      <button class="ala-btn ala-btn--primary ala-save" type="button">Save and reload</button>
+      <button class="ala-btn ala-btn--primary ala-save" type="button">Save</button>
       <button class="ala-btn ala-reset" type="button">Reset to defaults</button>
       <span class="ala-status" role="status"></span>
     </footer>
   </div>`;
 		const panel = backdrop.firstElementChild;
-		const status = panel.querySelector(".ala-status");
+		const statusEl = panel.querySelector(".ala-status");
+		const saveBtn = panel.querySelector(".ala-save");
 		const setStatus = (msg, isError = false) => {
-			status.textContent = msg;
-			status.classList.toggle("is-error", isError);
+			statusEl.textContent = msg;
+			statusEl.classList.toggle("is-error", isError);
 		};
-		const controls = () => panel.querySelectorAll("[data-key]");
-		const syncFeature = (card) => {
-			const toggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
-			if (!toggle) return;
-			const on = toggle.checked;
-			card.classList.toggle("is-off", !on);
+		const controls = () => Array.from(panel.querySelectorAll("[data-key]"));
+		const featureById = new Map(features.map((f) => [f.id, f]));
+		const standaloneDetected = new Map();
+		for (const f of features) if (host.getStatus(f.id).reason === "standalone-paused") standaloneDetected.set(f.id, true);
+		const snapshotInitial = () => {
+			const vals = {};
+			const enabledMap = {};
+			for (const r of Object.values(ROWS)) vals[r.key] = JSON.stringify(Settings.get(r.key));
+			for (const f of features) enabledMap[f.id] = !!Settings.get(f.toggle.key) && !standaloneDetected.get(f.id);
+			return {
+				vals,
+				statuses: host.resolveStagedStates(enabledMap)
+			};
+		};
+		let baseline = snapshotInitial();
+		const readStagedEnabled = () => {
+			const staged = {};
+			for (const f of features) {
+				const toggle = panel.querySelector(`.ala-feature[data-feature="${f.id}"]`)?.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
+				if (standaloneDetected.get(f.id)) staged[f.id] = false;
+				else staged[f.id] = toggle ? toggle.checked : !!Settings.get(f.toggle.key);
+			}
+			return staged;
+		};
+		const computeSavePlan = () => {
+			const changed = [];
+			const changedKeys = new Set();
+			controls().forEach((el) => {
+				const r = ROWS[el.dataset.key];
+				if (!r) return;
+				if (el.dataset.standaloneLocked) return;
+				const val = TYPES$1[r.type].read(el);
+				if (JSON.stringify(val) !== baseline.vals[r.key]) {
+					changed.push({
+						key: r.key,
+						value: val
+					});
+					changedKeys.add(r.key);
+				}
+			});
+			const stagedStatuses = host.resolveStagedStates(readStagedEnabled());
+			const hotReloadIds = [];
+			let needsPageReload = false;
+			for (const f of features) {
+				const wasActive = !!baseline.statuses[f.id]?.active;
+				const isNowActive = !!stagedStatuses[f.id]?.active;
+				const optionChanged = f.options.some((o) => changedKeys.has(o.key));
+				if (wasActive !== isNowActive || (wasActive || isNowActive) && optionChanged) {
+					if (f.requiresReload) needsPageReload = true;
+					else hotReloadIds.push(f.id);
+				}
+			}
+			return {
+				changed,
+				hotReloadIds,
+				needsPageReload,
+				stagedStatuses
+			};
+		};
+		const upsertNote = (card, className, html) => {
+			const existing = card.querySelector(`:scope > .${className}`);
+			if (!html) {
+				existing?.remove();
+				return;
+			}
+			const note = existing || document.createElement("div");
+			note.className = `ala-note ${className}`;
+			note.setAttribute("role", "note");
+			note.innerHTML = html;
+			if (!existing) card.querySelector(".ala-row--main")?.insertAdjacentElement("afterend", note);
+		};
+		const syncFeatureCard = (card, stagedStatuses) => {
+			const id = card.dataset.feature || "";
+			const f = featureById.get(id);
+			const mainToggle = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
+			if (!f) {
+				const on = !mainToggle || mainToggle.checked;
+				card.classList.toggle("is-off", !on);
+				const optionsCollapsible = card.querySelector(":scope > .ala-options-collapsible");
+				if (optionsCollapsible) optionsCollapsible.classList.toggle("is-open", on);
+				card.querySelectorAll(".ala-options [data-key]").forEach((el) => {
+					if (el.closest(".ala-child-option, [data-debug-for]")) return;
+					el.disabled = !on;
+				});
+				return on;
+			}
+			const staged = stagedStatuses[f.id] || { active: !!mainToggle?.checked };
+			const live = host.getStatus(f.id);
+			const isStandalonePaused = !!standaloneDetected.get(f.id) || live.reason === "standalone-paused";
+			if (mainToggle) {
+				if (isStandalonePaused) {
+					mainToggle.dataset.standaloneLocked = "1";
+					mainToggle.checked = false;
+					mainToggle.disabled = true;
+				} else if (mainToggle.dataset.standaloneLocked) {
+					delete mainToggle.dataset.standaloneLocked;
+					mainToggle.checked = !!Settings.get(f.toggle.key);
+				}
+			}
+			upsertNote(card, "ala-standalone-note", isStandalonePaused ? standaloneNoteHtml(f) : null);
+			const depLocked = !isStandalonePaused && (staged.reason === "dep-off" || staged.reason === "dep-unavailable" || staged.reason === "cycle");
+			if (mainToggle && !isStandalonePaused) {
+				if (depLocked) {
+					mainToggle.dataset.depLocked = "1";
+					mainToggle.disabled = true;
+				} else {
+					delete mainToggle.dataset.depLocked;
+					mainToggle.disabled = false;
+				}
+			}
+			let depMsg = null;
+			if (depLocked) {
+				if (staged.reason === "dep-off") depMsg = `Requires ${(staged.disabledDeps || f.dependsOn || []).map((depId) => esc(featureById.get(depId)?.title || depId)).join(", ")} to be enabled.`;
+				else if (staged.reason === "dep-unavailable") depMsg = `Requires unavailable module(s): ${(staged.missingDeps || []).map(esc).join(", ")}.`;
+				else depMsg = "Disabled due to a circular module dependency.";
+			}
+			upsertNote(card, "ala-dep-note", depMsg);
+			const hostMismatch = (staged.reason === "host-mismatch" || live.reason === "host-mismatch") && !!f.hosts?.length;
+			upsertNote(card, "ala-host-note", hostMismatch ? `Only active on: ${f.hosts.map(esc).join(", ")}` : null);
+			const titleEl = card.querySelector(".ala-row--main .ala-title");
+			titleEl?.querySelector(".ala-badge--error")?.remove();
+			if (live.reason === "error") {
+				if (titleEl) {
+					const badge = document.createElement("span");
+					badge.className = "ala-badge ala-badge--error";
+					badge.textContent = "Error";
+					titleEl.appendChild(badge);
+				}
+				upsertNote(card, "ala-error-note", `Failed to load: ${esc(live.error || "Unknown error")}`);
+			} else upsertNote(card, "ala-error-note", null);
+			const effectiveOn = !isStandalonePaused && !depLocked && (!mainToggle || mainToggle.checked);
+			card.classList.toggle("is-off", !effectiveOn);
 			const optionsCollapsible = card.querySelector(":scope > .ala-options-collapsible");
-			if (optionsCollapsible) optionsCollapsible.classList.toggle("is-open", on);
+			if (optionsCollapsible) optionsCollapsible.classList.toggle("is-open", effectiveOn);
 			card.querySelectorAll(".ala-child-option").forEach((childWrap) => {
 				const parentKey = childWrap.dataset.childFor;
 				const parentInput = parentKey ? card.querySelector(`[data-key="${parentKey}"]`) : null;
-				const childOpen = on && !!parentInput?.checked;
+				const childOpen = effectiveOn && !!parentInput?.checked;
 				childWrap.classList.toggle("is-open", childOpen);
 				childWrap.querySelectorAll("[data-key]").forEach((el) => {
 					el.disabled = !childOpen;
 				});
 			});
-			card.querySelectorAll(".ala-options [data-key]").forEach((el) => {
+			card.querySelectorAll(".ala-options [data-key], .ala-options .ala-btn--edit-json").forEach((el) => {
 				if (el.closest(".ala-child-option, [data-debug-for]")) return;
-				el.disabled = !on;
+				el.disabled = !effectiveOn;
 			});
+			return effectiveOn;
 		};
-		const syncDebugRows = () => {
-			const devToggle = panel.querySelector("input[data-key=\"devModeEnabled\"]");
-			const isDevOn = devToggle ? devToggle.checked : !!Settings.get("devModeEnabled");
+		const syncAll = () => {
+			const plan = computeSavePlan();
+			const activeMap = new Map();
+			panel.querySelectorAll(".ala-feature").forEach((card) => {
+				const effectiveOn = syncFeatureCard(card, plan.stagedStatuses);
+				const toggleKey = card.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]")?.dataset.key;
+				if (toggleKey) activeMap.set(toggleKey, effectiveOn);
+			});
+			const devToggle = panel.querySelector(`input[data-key="${DEV_MODE_DEF.key}"]`);
+			const isDevOn = devToggle ? devToggle.checked : !!Settings.get(DEV_MODE_DEF.key);
 			panel.querySelectorAll("[data-debug-for]").forEach((wrap) => {
 				const modKey = wrap.dataset.debugFor;
-				const modInput = panel.querySelector(`input[data-key="${modKey}"]`);
-				const modOn = modInput ? modInput.checked : !!Settings.get(modKey);
+				const modOn = activeMap.get(modKey) ?? !!Settings.get(modKey);
 				wrap.classList.toggle("is-open", modOn);
 				wrap.querySelectorAll("[data-key]").forEach((el) => {
 					el.disabled = !(isDevOn && modOn);
 				});
 			});
+			const devRow = panel.querySelector("#ala-row-export-raw");
+			if (devRow) devRow.style.display = isDevOn ? "" : "none";
+			if (saveBtn) saveBtn.textContent = plan.needsPageReload ? "Save and reload" : "Save";
+			return plan;
 		};
-		const devRow = panel.querySelector("#ala-row-export-raw");
-		const syncDevBackupVisibility = () => {
-			if (!devRow) return;
-			const devToggle = panel.querySelector("input[data-key=\"devModeEnabled\"]");
-			const isDevOn = devToggle ? devToggle.checked : !!Settings.get("devModeEnabled");
-			devRow.style.display = isDevOn ? "" : "none";
-		};
-		panel.querySelectorAll(".ala-feature").forEach(syncFeature);
-		syncDebugRows();
-		syncDevBackupVisibility();
+		syncAll();
 		initDropdownAnimations(panel);
-		panel.addEventListener("change", (e) => {
-			const card = e.target?.closest(".ala-feature");
-			if (card) syncFeature(card);
-			syncDebugRows();
-			syncDevBackupVisibility();
+		const unsubStatus = host.onStatusChange((id, status) => {
+			if (!panel.isConnected) return;
+			if (status.reason === "standalone-paused") standaloneDetected.set(id, true);
+			else if (standaloneDetected.has(id)) standaloneDetected.set(id, false);
+			syncAll();
 		});
-		panel.querySelector(".ala-save")?.addEventListener("click", () => {
-			controls().forEach((el) => {
-				const r = ROWS[el.dataset.key];
-				if (r) {
-					if (r.key === "syncManualOverrides") return;
-					if (el.dataset.standaloneLocked) return;
-					Settings.set(r.key, TYPES$1[r.type].read(el));
-				}
+		for (const f of features) {
+			if (!f.standalone) continue;
+			host.probeStandalone(f.id).then((found) => {
+				if (!panel.isConnected) return;
+				standaloneDetected.set(f.id, !!found);
+				syncAll();
 			});
-			setStatus("Saved. Reloading…");
-			setTimeout(() => location.reload(), 350);
+		}
+		panel.addEventListener("change", (e) => {
+			if (e.target?.id === "ala-import-file") return;
+			syncAll();
+		});
+		panel.querySelectorAll(".ala-btn--edit-json").forEach((btn) => {
+			const key = btn.id.replace(/^ala-btn-edit-/, "");
+			const r = ROWS[key];
+			if (!r?.editor) return;
+			btn.addEventListener("click", (e) => {
+				e.preventDefault();
+				const inputEl = panel.querySelector(`input[data-key="${key}"]`);
+				if (!inputEl) return;
+				r.editor({
+					value: TYPES$1.json.read(inputEl),
+					onApply: (nextValue) => {
+						TYPES$1.json.write(inputEl, nextValue);
+						if (key === "syncManualOverrides" && nextValue && typeof nextValue === "object" && !Array.isArray(nextValue) && Object.keys(nextValue).length > 0) {
+							const mainToggle = inputEl.closest(".ala-feature")?.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
+							if (mainToggle && !mainToggle.checked && !mainToggle.disabled) mainToggle.checked = true;
+						}
+						const plan = syncAll();
+						setStatus(`Updated. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply.`);
+					},
+					addStyle
+				});
+			});
+		});
+		saveBtn?.addEventListener("click", () => {
+			const plan = computeSavePlan();
+			for (const { key, value } of plan.changed) Settings.set(key, value);
+			if (plan.needsPageReload) {
+				setStatus("Saved. Reloading…");
+				setTimeout(() => location.reload(), 350);
+				return;
+			}
+			baseline = snapshotInitial();
+			if (plan.hotReloadIds.length > 0) host.reload(plan.hotReloadIds);
+			syncAll();
+			setStatus(plan.hotReloadIds.length > 0 ? "Saved and applied." : "Saved.");
 		});
 		panel.querySelector(".ala-reset")?.addEventListener("click", () => {
 			controls().forEach((el) => {
 				const r = ROWS[el.dataset.key];
-				if (r) {
-					if (r.key === "syncManualOverrides") return;
-					if (el.dataset.standaloneLocked) return;
-					TYPES$1[r.type].write(el, r.def);
-				}
+				if (!r) return;
+				if (el.dataset.standaloneLocked) return;
+				TYPES$1[r.type].write(el, r.def);
 			});
-			panel.querySelectorAll(".ala-feature").forEach(syncFeature);
-			syncDebugRows();
-			syncDevBackupVisibility();
-			setStatus("Defaults restored. Press Save to apply them.");
+			const plan = syncAll();
+			setStatus(`Defaults restored. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply them.`);
 		});
 		panel.querySelector(".ala-close")?.addEventListener("click", closePanel);
 		backdrop.addEventListener("click", (e) => {
@@ -12748,39 +13060,37 @@
 			if (e.key === "Escape") closePanel();
 		};
 		document.addEventListener("keydown", backdrop._onKey);
+		const providers = listAccountProviders();
 		const updateAccountUI = () => {
-			const malBtn = panel.querySelector("#ala-btn-mal");
-			const malStatus = panel.querySelector("#ala-status-mal");
-			const malConnected = !!store$1.get("mal_token", null);
-			if (malBtn && malStatus) {
-				malBtn.textContent = malConnected ? "Disconnect" : "Connect to MAL";
-				malBtn.className = `ala-btn ${malConnected ? "ala-btn--danger" : "ala-btn--primary"}`;
-				malStatus.textContent = malConnected ? "Connected" : "Not connected";
+			for (const p of providers) {
+				const btn = panel.querySelector(`[data-account-btn="${p.id}"]`);
+				const st = panel.querySelector(`#ala-status-${p.id}`);
+				if (!btn || !st) continue;
+				const connected = p.isConnected();
+				const connectLabel = p.id === "mal" ? "Connect to MAL" : `Connect to ${p.name}`;
+				btn.textContent = connected ? "Disconnect" : connectLabel;
+				btn.className = `ala-btn ${connected ? "ala-btn--danger" : "ala-btn--primary"}`;
+				st.textContent = connected ? "Connected" : "Not connected";
 			}
 		};
-		panel.querySelector("#ala-btn-mal")?.addEventListener("click", () => {
-			if (!!store$1.get("mal_token", null)) {
-				if (confirm("Disconnect MyAnimeList? You will need to reconnect to use AniList → MAL Sync.")) {
-					clearMalAuth();
+		for (const p of providers) panel.querySelector(`[data-account-btn="${p.id}"]`)?.addEventListener("click", () => {
+			if (p.isConnected()) {
+				if (confirm(`Disconnect ${p.name}?`)) {
+					p.disconnect();
 					updateAccountUI();
-					setStatus("MyAnimeList disconnected.");
+					setStatus(`${p.name} disconnected.`);
 				}
 			} else {
-				malConnect();
-				setStatus("Opened MyAnimeList authorization tab…");
+				p.connect();
+				setStatus(`Opened ${p.name} authorization tab…`);
 			}
 		});
 		const getPanelOverrides = () => {
 			const overrides = {};
 			controls().forEach((el) => {
 				const r = ROWS[el.dataset.key];
-				if (r) {
-					if (r.key === "syncManualOverrides") {
-						overrides[r.key] = getManualOverrides();
-						return;
-					}
-					overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES$1[r.type].read(el);
-				}
+				if (!r) return;
+				overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES$1[r.type].read(el);
 			});
 			return overrides;
 		};
@@ -12803,7 +13113,7 @@
 			}
 		});
 		panel.querySelector("#ala-btn-export-secrets")?.addEventListener("click", async () => {
-			if (!confirm("⚠️ Warning: This export includes your MyAnimeList authentication credentials.\n\nAnyone with access to this file will have full access to your connected MyAnimeList account.\n\nDo you want to continue?")) return;
+			if (!confirm("⚠️ Warning: This export includes your connected account credentials.\n\nAnyone with access to this file will have full access to your connected accounts.\n\nDo you want to continue?")) return;
 			const pwd = await promptPasswordModal({
 				title: "Export Credentials (Encrypted)",
 				description: "A password is required to encrypt your credentials and protect your accounts.",
@@ -12850,8 +13160,9 @@
 					fileInput.value = "";
 					return;
 				}
-				const parts = [`${result.applied} setting(s)`];
-				if (result.secretsApplied) parts.push(`${result.secretsApplied} credential(s)`);
+				const parts = [];
+				if (result.applied > 0) parts.push(`${result.applied} settings`);
+				if (result.secretsApplied > 0) parts.push(`${result.secretsApplied} account credentials`);
 				setStatus(`Imported ${parts.join(" and ")}. Reloading…`);
 				setTimeout(() => location.reload(), 600);
 			} catch (e) {
@@ -12859,33 +13170,20 @@
 				fileInput.value = "";
 			}
 		});
-		panel.querySelector("#ala-btn-edit-tierLabels")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			const inputEl = panel.querySelector("input[data-key=\"tierLabels\"]");
-			if (inputEl) openTierEditor(inputEl);
-		});
-		panel.querySelector("#ala-btn-edit-syncManualOverrides")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			openOverridesModal();
-		});
-		panel.querySelector("#ala-btn-edit-aniSongsProviders")?.addEventListener("click", (e) => {
-			e.preventDefault();
-			const inputEl = panel.querySelector("input[data-key=\"aniSongsProviders\"]");
-			if (inputEl) openAniSongsModal(inputEl);
-		});
 		const onFocus = () => {
 			updateAccountUI();
-			maybeAutoSync();
 		};
 		backdrop._onFocus = onFocus;
 		window.addEventListener("focus", onFocus);
+		backdrop._onCleanup = () => {
+			unsubStatus();
+		};
 		prevOverflow = document.documentElement.style.overflow;
 		document.documentElement.style.overflow = "hidden";
 		document.body.appendChild(backdrop);
 		panel.focus();
-		showStandaloneNotes(panel, syncFeature);
 	}
-	function ensureLauncher() {
+	function ensureLauncher(host = NOOP_HOST) {
 		if (document.getElementById("ala-settings-mobile-launcher")) return;
 		const b = document.createElement("button");
 		b.id = "ala-settings-mobile-launcher";
@@ -12895,11 +13193,11 @@
 		b.addEventListener("click", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			showPanel();
+			showPanel(host);
 		});
 		document.body.appendChild(b);
 	}
-	function installSidebar() {
+	function installSidebar(host = NOOP_HOST) {
 		if (document.getElementById("ala-settings-nav-section")) return;
 		if (!findExactText("Profile")) return;
 		const dev = findExactText("Developer");
@@ -12915,16 +13213,16 @@
 			e.preventDefault();
 			e.stopPropagation();
 			e.currentTarget.classList.add("is-active");
-			showPanel();
+			showPanel(host);
 		});
 		nav.parentElement.insertBefore(section, nav.nextSibling);
 	}
-	function initSettingsPage() {
+	function initSettingsPage(host = NOOP_HOST) {
 		addStyle("ala-settings-style", CSS$1);
 		const attempt = debounce(() => {
 			if (!onSettingsPage()) return;
-			installSidebar();
-			ensureLauncher();
+			installSidebar(host);
+			ensureLauncher(host);
 		}, 100);
 		Core.ready(attempt);
 		Core.onBodyMutation(() => {
@@ -12943,7 +13241,7 @@
 		api: anilistApiClient,
 		session: AniList.session
 	});
-	registerShellModule("settings", initSettingsPage);
+	registerShellModule("settings", () => initSettingsPage(createModuleHost()));
 	runMigrations();
 	runAccountAuthCallbacks();
 	startModules(true);

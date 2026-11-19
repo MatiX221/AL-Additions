@@ -1,16 +1,35 @@
-import { Settings } from '../../settings/settings';
 import { esc } from '../../utils/helpers';
 import { DEFAULT_TIERS, validateTiers, normalizeHexColor, type TierConfig } from './tiers';
+import type { JsonEditorContext } from '../../types';
 
-export function openTierEditor(inputEl: HTMLInputElement): void {
-  let tiers: TierConfig[];
-  try {
-    const parsed = JSON.parse(inputEl.value);
-    const check = validateTiers(parsed);
-    tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
-  } catch {
-    tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
+const TIER_MODAL_CSS = `
+  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
+  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
+  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
+  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
+  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
+  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
+  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
+  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
+  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
+  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
+  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
+  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
+  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
+  @media (max-width:720px){
+    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
+    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    .ala-tier-table-wrap{max-height:45vh}
+    .ala-tier-table th,.ala-tier-table td{padding:4px}
   }
+`;
+
+export function openTierEditor(ctx: JsonEditorContext): void {
+  ctx.addStyle('ala-tier-modal-style', TIER_MODAL_CSS);
+  const checkInit = validateTiers(ctx.value);
+  const tiers: TierConfig[] =
+    checkInit.valid && checkInit.tiers ? checkInit.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
 
   const existing = document.getElementById('ala-tier-editor-backdrop');
   if (existing) existing.remove();
@@ -207,13 +226,8 @@ export function openTierEditor(inputEl: HTMLInputElement): void {
       setModalStatus(check.error || 'Invalid tier configuration.', true);
       return;
     }
-    inputEl.value = JSON.stringify(check.tiers);
-    Settings.set('tierLabels', check.tiers);
+    ctx.onApply(check.tiers);
     closeModal();
-    const panelStatus = document.querySelector('#ala-settings-panel .ala-status');
-    if (panelStatus) {
-      panelStatus.textContent = 'Custom tiers applied. Press "Save and reload" to activate.';
-    }
   });
 
   renderTable(tiers);

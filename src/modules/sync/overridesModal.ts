@@ -8,9 +8,11 @@ import {
   removeOverride,
   refreshStaleOverrides,
   saveManualOverrides,
-  importOverrides
+  importOverrides,
+  validateOverrides
 } from '../../api/malOverrides';
 import { SyncMediaType } from './types';
+import type { JsonEditorContext, ManualOverride, ManualOverrideStore } from '../../types';
 
 const MODAL_ID = 'ala-overrides-backdrop';
 const QUICK_MODAL_ID = 'ala-quick-override-backdrop';
@@ -352,15 +354,69 @@ export async function openQuickOverrideModal(
 }
 
 export function openOverridesModal(
-  ctxOrAddStyle?: { value?: any; onApply?: (next: any) => void; addStyle?: (id: string, css: string) => void } | ((id: string, css: string) => void)
+  ctxOrAddStyle?: Partial<JsonEditorContext> | ((id: string, css: string) => void)
 ): void {
-  ensureOverridesStyle(typeof ctxOrAddStyle === 'function' ? ctxOrAddStyle : ctxOrAddStyle?.addStyle);
+  const ec = typeof ctxOrAddStyle === 'object' ? ctxOrAddStyle : undefined;
+  ensureOverridesStyle(typeof ctxOrAddStyle === 'function' ? ctxOrAddStyle : ec?.addStyle);
   const existing = document.getElementById(MODAL_ID);
   if (existing) existing.remove();
 
-  refreshStaleOverrides().then(() => {
-    if (document.getElementById(MODAL_ID)) renderList();
-  });
+  const staging = typeof ec?.onApply === 'function';
+  const initCheck = staging ? validateOverrides(ec!.value) : null;
+  let draftOverrides: ManualOverrideStore = staging
+    ? JSON.parse(JSON.stringify(initCheck?.valid && initCheck.overrides ? initCheck.overrides : {}))
+    : {};
+
+  const readOverrides = (): ManualOverrideStore => (staging ? draftOverrides : getManualOverrides());
+  const writeOverrides = (next: ManualOverrideStore): void => {
+    if (staging) {
+      draftOverrides = next;
+    } else {
+      saveManualOverrides(next);
+    }
+  };
+  const patchOverride = (
+    id: number,
+    data: Omit<ManualOverride, 'updatedAt'> & { updatedAt?: number }
+  ): void => {
+    if (!id) return;
+    if (staging) {
+      draftOverrides = {
+        ...draftOverrides,
+        [String(id)]: { ...data, updatedAt: data.updatedAt || Date.now() }
+      };
+    } else {
+      setOverride(id, data);
+    }
+  };
+  const deleteOverride = (id: number): void => {
+    if (!id) return;
+    if (staging) {
+      const copy = { ...draftOverrides };
+      delete copy[String(id)];
+      draftOverrides = copy;
+    } else {
+      removeOverride(id);
+    }
+  };
+  const importDraftOverrides = (
+    raw: unknown,
+    mode: 'replace' | 'merge' = 'replace'
+  ): { success: boolean; count?: number; error?: string } => {
+    if (!staging) return importOverrides(raw, mode);
+    const check = validateOverrides(raw);
+    if (!check.valid || !check.overrides) {
+      return { success: false, error: check.error || 'Validation failed' };
+    }
+    draftOverrides = mode === 'merge' ? { ...draftOverrides, ...check.overrides } : check.overrides;
+    return { success: true, count: Object.keys(check.overrides).length };
+  };
+
+  if (!staging) {
+    refreshStaleOverrides().then(() => {
+      if (document.getElementById(MODAL_ID)) renderList();
+    });
+  }
 
   const backdrop = document.createElement('div');
   backdrop.id = MODAL_ID;
@@ -477,15 +533,29 @@ export function openOverridesModal(
         </div>
       </div>
       <footer class="ala-ov-foot">
-        <button class="ala-btn ala-btn--primary ala-ov-close" type="button">Done</button>
+        <button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>
       </footer>
     </div>
   `;
 
   document.body.appendChild(backdrop);
 
-  const close = () => backdrop.remove();
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      close();
+    }
+  };
+  const close = () => {
+    document.removeEventListener('keydown', onKey, true);
+    backdrop.remove();
+  };
+  document.addEventListener('keydown', onKey, true);
   backdrop.querySelectorAll('.ala-ov-close').forEach((btn) => btn.addEventListener('click', close));
+  backdrop.querySelector('#ala-ov-btn-done')?.addEventListener('click', () => {
+    if (staging) ec!.onApply!(draftOverrides);
+    close();
+  });
   backdrop.addEventListener('click', (e) => {
     if (e.target === backdrop) close();
   });
@@ -560,7 +630,7 @@ export function openOverridesModal(
       return;
     }
 
-    const existing = getManualOverrides()[String(id)];
+    const existing = readOverrides()[String(id)];
     if (existing) {
       activePreview = {
         mediaId: id,
@@ -652,12 +722,12 @@ export function openOverridesModal(
     }
     if (!malId) return alert('Please enter a valid MyAnimeList ID or URL.');
 
-    const existing = getManualOverrides()[String(id)];
+    const existing = readOverrides()[String(id)];
     const title = activePreview?.title || existing?.title || `Media #${id}`;
     const cover = activePreview?.cover || existing?.cover;
     const type: SyncMediaType = activePreview?.type || existing?.type || 'ANIME';
 
-    setOverride(id, {
+    patchOverride(id, {
       malId,
       type,
       title,
@@ -675,7 +745,7 @@ export function openOverridesModal(
         .then((res) => {
           const m = res?.Media;
           if (m) {
-            const current = getManualOverrides();
+            const current = { ...readOverrides() };
             if (current[String(id)]) {
               const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
               const c = m.coverImage?.medium || current[String(id)].cover;
@@ -686,7 +756,7 @@ export function openOverridesModal(
                 type: m.type === 'MANGA' ? 'MANGA' : 'ANIME',
                 updatedAt: Date.now()
               };
-              saveManualOverrides(current);
+              writeOverrides(current);
               if (document.getElementById(MODAL_ID)) renderList();
             }
           }
@@ -699,12 +769,12 @@ export function openOverridesModal(
     const id = activePreview?.mediaId || extractAlId(alInput.value);
     if (!id) return alert('Please enter a valid AniList ID or URL.');
 
-    const existing = getManualOverrides()[String(id)];
+    const existing = readOverrides()[String(id)];
     const title = activePreview?.title || existing?.title || `Media #${id}`;
     const cover = activePreview?.cover || existing?.cover;
     const type: SyncMediaType = activePreview?.type || existing?.type || 'ANIME';
 
-    setOverride(id, {
+    patchOverride(id, {
       malId: 0,
       type,
       title,
@@ -722,7 +792,7 @@ export function openOverridesModal(
         .then((res) => {
           const m = res?.Media;
           if (m) {
-            const current = getManualOverrides();
+            const current = { ...readOverrides() };
             if (current[String(id)]) {
               const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
               const c = m.coverImage?.medium || current[String(id)].cover;
@@ -733,7 +803,7 @@ export function openOverridesModal(
                 type: m.type === 'MANGA' ? 'MANGA' : 'ANIME',
                 updatedAt: Date.now()
               };
-              saveManualOverrides(current);
+              writeOverrides(current);
               if (document.getElementById(MODAL_ID)) renderList();
             }
           }
@@ -769,7 +839,7 @@ export function openOverridesModal(
   });
 
   function renderList() {
-    const all = getManualOverrides();
+    const all = readOverrides();
     const entries = Object.entries(all).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
 
     const filtered = entries.filter(([idStr, o]) => {
@@ -824,7 +894,7 @@ export function openOverridesModal(
       btn.addEventListener('click', () => {
         const id = Number(btn.dataset.id);
         if (id) {
-          removeOverride(id);
+          deleteOverride(id);
           if (activePreview?.mediaId === id) {
             clearForm();
           }
@@ -872,7 +942,7 @@ export function openOverridesModal(
   });
 
   function getRawUnmatched(): Array<{ mediaId: number; type: SyncMediaType }> {
-    const configured = getManualOverrides();
+    const configured = readOverrides();
     const unmatched: Array<{ mediaId: number; type: SyncMediaType }> = [];
     for (const t of ['ANIME', 'MANGA'] as const) {
       const data = stores[t].ids.data || {};
@@ -950,7 +1020,7 @@ export function openOverridesModal(
         const id = Number(btn.dataset.id);
         const type = (btn.dataset.type || 'ANIME') as SyncMediaType;
         const meta = unmatchedMetaCache.get(id);
-        setOverride(id, { malId: 0, type, title: meta?.title || `Media #${id}`, cover: meta?.cover });
+        patchOverride(id, { malId: 0, type, title: meta?.title || `Media #${id}`, cover: meta?.cover });
         renderUnmatchedList();
         renderList();
       });
@@ -1090,7 +1160,7 @@ export function openOverridesModal(
         return;
       }
 
-      const overrides = getManualOverrides();
+      const overrides = readOverrides();
       const knownMalIds = new Set<number>();
 
       for (const t of ['ANIME', 'MANGA'] as const) {
@@ -1148,7 +1218,7 @@ export function openOverridesModal(
   const jsonResetBtn = backdrop.querySelector('#ala-ov-btn-json-reset') as HTMLButtonElement;
 
   function renderJsonView() {
-    const current = getManualOverrides();
+    const current = readOverrides();
     jsonTextarea.value = JSON.stringify(current, null, 2);
     jsonStatus.style.display = 'none';
   }
@@ -1175,7 +1245,7 @@ export function openOverridesModal(
   jsonResetBtn?.addEventListener('click', renderJsonView);
 
   jsonSaveBtn?.addEventListener('click', () => {
-    const res = importOverrides(jsonTextarea.value, 'replace');
+    const res = importDraftOverrides(jsonTextarea.value, 'replace');
     if (!res.success) {
       jsonStatus.className = 'ala-ov-status ala-ov-status--error';
       jsonStatus.textContent = res.error || 'Failed to parse JSON';
@@ -1189,14 +1259,14 @@ export function openOverridesModal(
   });
 
   jsonMergeBtn?.addEventListener('click', () => {
-    const res = importOverrides(jsonTextarea.value, 'merge');
+    const res = importDraftOverrides(jsonTextarea.value, 'merge');
     if (!res.success) {
       jsonStatus.className = 'ala-ov-status ala-ov-status--error';
       jsonStatus.textContent = res.error || 'Failed to parse JSON';
       jsonStatus.style.display = 'block';
       return;
     }
-    const current = getManualOverrides();
+    const current = readOverrides();
     jsonStatus.className = 'ala-ov-status ala-ov-status--success';
     jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
     jsonStatus.style.display = 'block';

@@ -4,15 +4,7 @@ import { describe, it, expect } from 'vitest';
 
 const SRC_ROOT = path.resolve(process.cwd(), 'src');
 
-const KNOWN_VIOLATIONS: string[] = [
-  'modules/anisongs/anisongModal.ts -> core/styles.ts',
-  'settings/panel.ts -> api/mal.ts',
-  'settings/panel.ts -> api/malOverrides.ts',
-  'settings/panel.ts -> modules/anisongs/anisongModal.ts',
-  'settings/panel.ts -> modules/sync/engine.ts',
-  'settings/panel.ts -> modules/sync/overridesModal.ts',
-  'settings/panel.ts -> modules/tierLabels/tierModal.ts'
-];
+const KNOWN_VIOLATIONS: string[] = [];
 
 type Layer = 'types' | 'main' | 'utils' | 'core' | 'settings' | 'api' | 'module';
 

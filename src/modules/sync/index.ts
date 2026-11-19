@@ -11,7 +11,7 @@ import { ANILIST_SESSION_KEYS, SETTING_PREFIX, type SyncMediaType } from '../../
 import { TYPES } from './types';
 import { stores, clearCache, PENDING_DELETES_KEY, syncStatus } from './state';
 import { initSyncPanel, renderPanel } from './panel';
-import { configureOverridesModalStyle, openQuickOverrideModal } from './overridesModal';
+import { configureOverridesModalStyle, openQuickOverrideModal, openOverridesModal } from './overridesModal';
 import { initDeletionInterceptor } from './deletionInterceptor';
 
 const SYNC_DATA_KEYS = [
@@ -180,7 +180,8 @@ defineModule({
       legacy: [OVERRIDES_SETTING_KEY],
       title: 'Manual Overrides & Audit',
       help: 'Configure custom AniList → MyAnimeList ID mappings, ignore titles, and audit unmatched or orphaned entries.',
-      validate: validateOverrides
+      validate: validateOverrides,
+      editor: openOverridesModal
     }
   ],
   migrate() {

@@ -3,6 +3,7 @@ import { Settings, PREFIX } from '../../settings/settings';
 import { store } from '../../utils/helpers';
 import { detectStandalone } from '../../utils/standalone';
 import { PROBE_ATTR, DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from './tiers';
+import { openTierEditor } from './tierModal';
 
 export { DEFAULT_TIERS, getTier, validateTiers, type TierConfig };
 
@@ -74,7 +75,8 @@ defineModule({
       def: DEFAULT_TIERS,
       title: 'Tier Ranges & Colors',
       help: 'Customize score ranges, badge labels, and colors.',
-      validate: validateTiers
+      validate: validateTiers,
+      editor: openTierEditor
     }
   ],
   migrate: migrateLegacyTierLabels,
