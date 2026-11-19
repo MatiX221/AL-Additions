@@ -1810,7 +1810,7 @@
 			return s;
 		}
 	}
-	function mediaRoute$1(pathname = location.pathname) {
+	function mediaRoute(pathname = location.pathname) {
 		const m = pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
 		return m ? {
 			kind: m[1],
@@ -3459,7 +3459,7 @@
 				until: 0
 			};
 			const animeId = () => {
-				const r = mediaRoute$1();
+				const r = mediaRoute();
 				return r && r.kind === "anime" ? String(r.id) : null;
 			};
 			async function sync() {
@@ -3533,14 +3533,6 @@
 		chevron: "<polyline points=\"6 9 12 15 18 9\"/>"
 	};
 	var icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
-	var mediaRoute = () => {
-		const m = location.pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
-		return m ? {
-			kind: m[1],
-			type: m[1].toUpperCase(),
-			id: Number(m[2])
-		} : null;
-	};
 	function findExactText(text) {
 		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
 		for (let t; t = walker.nextNode();) {
@@ -3588,13 +3580,13 @@
       @media (pointer:coarse){.ala-banner-dl{right:8px;bottom:8px;height:40px;min-width:40px;border-radius:20px}}
       @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
 			const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
-			const bannerAllowed = () => !!mediaRoute$1() || /^\/user\//.test(location.pathname) && !!ctx.get("bannerProfiles");
+			const bannerAllowed = () => !!mediaRoute() || /^\/user\//.test(location.pathname) && !!ctx.get("bannerProfiles");
 			function download(onSaved) {
 				const banner = findBannerElement();
 				const url = banner && bannerAllowed() && bannerUrl(banner);
 				if (!url) return;
 				const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
-				const name = `anilist-banner-${mediaRoute$1()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
+				const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
 				const fallback = () => {
 					openTab(url);
 					onSaved?.();
@@ -6868,7 +6860,7 @@
 				}
 			}
 			async function render(force = false) {
-				const route = mediaRoute$1();
+				const route = mediaRoute();
 				if (!route) {
 					shown = null;
 					panel()?.remove();
@@ -6888,7 +6880,7 @@
 				}
 				if (!ctx.api.hasAuth()) return renderConnect(key, "none");
 				const g = gen;
-				const stale = () => g !== gen || mediaRoute$1()?.id !== route.id;
+				const stale = () => g !== gen || mediaRoute()?.id !== route.id;
 				rendering = true;
 				ctx.debug.log("Rendering media info panel for:", key);
 				try {
@@ -7082,7 +7074,7 @@
 			ctx.listen(window, "load", () => schedule(500), { once: true });
 			ctx.ready(() => schedule(document.readyState === "complete" ? 500 : 1200));
 			ctx.onNav(() => {
-				const r = mediaRoute$1();
+				const r = mediaRoute();
 				if (r && shown === `${r.type}:${r.id}` && panel()) return;
 				gen++;
 				shown = null;
@@ -7096,7 +7088,7 @@
 				schedule(1200);
 			});
 			ctx.onBodyMutation(() => {
-				const r = mediaRoute$1();
+				const r = mediaRoute();
 				if (!r || panel() || rendering || saving) return;
 				if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
 				schedule(500);
@@ -8153,7 +8145,7 @@
 			let placing = false;
 			async function place() {
 				if (disposed) return;
-				const route = mediaRoute$1();
+				const route = mediaRoute();
 				const key = route && `${route.type}:${route.id}`;
 				if (key && key === placedKey && document.getElementById(ID)) return;
 				activeTimerCleanup?.();
@@ -8167,7 +8159,7 @@
 				placing = true;
 				try {
 					const h1 = await ctx.waitForSelector(ANILIST_SELECTORS.mediaTitle, 8e3);
-					if (disposed || !h1 || mine !== token || mediaRoute$1()?.id !== route.id || document.getElementById(ID)) return;
+					if (disposed || !h1 || mine !== token || mediaRoute()?.id !== route.id || document.getElementById(ID)) return;
 					attach(h1, route);
 					placedKey = key;
 				} finally {
@@ -10771,30 +10763,14 @@
 			malId
 		};
 	}
-	var installed = false;
-	function initDeletionInterceptor() {
-		if (installed || typeof window === "undefined") return;
-		if (location.hostname !== "anilist.co") return;
-		installed = true;
-		const page = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		const origFetch = page.fetch;
-		if (typeof origFetch !== "function") return;
-		page.fetch = async function(input, init) {
-			const url = typeof input === "string" ? input : input?.url || "";
-			const isGraphQL = typeof url === "string" && (url.includes("graphql.anilist.co") || url.includes("/graphql"));
-			let queryStr = "";
-			let variables = null;
-			if (isGraphQL && init?.body) try {
-				const bodyStr = typeof init.body === "string" ? init.body : "";
-				if (bodyStr) {
-					const parsed = JSON.parse(bodyStr);
-					queryStr = parsed.query || parsed.operationName || "";
-					variables = parsed.variables || null;
-				}
-			} catch (_) {}
-			if (queryStr.includes("DeleteMediaListEntry")) {
-				logDebug("[SYNC]", "DeleteMediaListEntry intercepted for variables:", variables);
-				if (Settings.get("syncMode") === "exact") {
+	function initDeletionInterceptor(ctx) {
+		if (typeof window === "undefined" || location.hostname !== "anilist.co") return;
+		ctx.hooks.onGqlFetch((ev) => {
+			const queryStr = ev.query || ev.operationName || "";
+			if (!queryStr) return;
+			if (ev.phase === "request" && queryStr.includes("DeleteMediaListEntry")) {
+				ctx.debug.log("DeleteMediaListEntry intercepted for variables:", ev.variables);
+				if (ctx.get("syncMode") === "exact") {
 					const candidate = activeCandidate || extractDialogMedia(document.body);
 					if (candidate) {
 						addPendingDelete({
@@ -10804,23 +10780,22 @@
 							title: candidate.title,
 							deletedAt: Date.now()
 						});
-						logDebug("[SYNC]", "Queued pending deletion for exact match:", candidate);
+						ctx.debug.log("Queued pending deletion for exact match:", candidate);
 						activeCandidate = null;
 						log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
 					}
 				}
+				return;
 			}
-			const res = await origFetch.call(page, input, init);
-			if (queryStr.includes("SaveMediaListEntry") && variables?.mediaId) {
-				const mediaId = Number(variables.mediaId);
-				logDebug("[SYNC]", "SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
+			if (ev.phase === "response" && queryStr.includes("SaveMediaListEntry") && ev.variables?.mediaId) {
+				const mediaId = Number(ev.variables.mediaId);
+				ctx.debug.log("SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
 				removePendingDelete(mediaId, "ANIME");
 				removePendingDelete(mediaId, "MANGA");
 			}
-			return res;
-		};
-		document.addEventListener("click", (e) => {
-			if (Settings.get("syncMode") !== "exact") return;
+		});
+		ctx.listen(document, "click", (e) => {
+			if (ctx.get("syncMode") !== "exact") return;
 			const target = e.target;
 			if (!target) return;
 			const btnText = ((target.closest(".delete-btn, .delete, button, [role=\"button\"]") || target).textContent || "").trim().toLowerCase();
@@ -10854,6 +10829,9 @@
 				if (candidate) removePendingDelete(candidate.mediaId, candidate.type);
 			}
 		}, true);
+		ctx.onCleanup(() => {
+			activeCandidate = null;
+		});
 	}
 	var SYNC_DATA_KEYS = [
 		...ANILIST_SESSION_KEYS,
@@ -10976,7 +10954,7 @@
 			}, "sync schema upgrade");
 		},
 		setup(ctx) {
-			initDeletionInterceptor();
+			initDeletionInterceptor(ctx);
 			ctx.menuCommand("🗑️ AL→MAL Sync: Reset all data", () => {
 				SYNC_DATA_KEYS.forEach((k) => store$1.del(k));
 				ctx.api.clearViewer();

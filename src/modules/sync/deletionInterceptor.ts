@@ -1,11 +1,9 @@
-import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
-import { Settings } from '../../settings/settings';
-import { mediaRoute } from '../../utils/dom';
+import { mediaRoute } from '../../utils/anilistDom';
 import { log } from '../../api/mal';
-import { logDebug } from '../../utils/helpers';
 import { stores, addPendingDelete, removePendingDelete } from './state';
 import { SyncMediaType, typeLabel } from './types';
 import { getOverride } from '../../api/malOverrides';
+import type { FeatureContext } from '../../types';
 
 let activeCandidate: { mediaId: number; type: SyncMediaType; title: string; malId?: number } | null = null;
 
@@ -70,38 +68,16 @@ export function extractDialogMedia(root: Element = document.body): { mediaId: nu
   return { mediaId, type, title: title || `Media #${mediaId}`, malId };
 }
 
-let installed = false;
+export function initDeletionInterceptor(ctx: FeatureContext): void {
+  if (typeof window === 'undefined' || location.hostname !== 'anilist.co') return;
 
-export function initDeletionInterceptor(): void {
-  if (installed || typeof window === 'undefined') return;
-  if (location.hostname !== 'anilist.co') return;
-  installed = true;
+  ctx.hooks.onGqlFetch((ev) => {
+    const queryStr = ev.query || ev.operationName || '';
+    if (!queryStr) return;
 
-  const page = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-  const origFetch = page.fetch;
-  if (typeof origFetch !== 'function') return;
-
-  page.fetch = async function (input: any, init?: RequestInit) {
-    const url = typeof input === 'string' ? input : input?.url || '';
-    const isGraphQL = typeof url === 'string' && (url.includes('graphql.anilist.co') || url.includes('/graphql'));
-
-    let queryStr = '';
-    let variables: any = null;
-
-    if (isGraphQL && init?.body) {
-      try {
-        const bodyStr = typeof init.body === 'string' ? init.body : '';
-        if (bodyStr) {
-          const parsed = JSON.parse(bodyStr);
-          queryStr = parsed.query || parsed.operationName || '';
-          variables = parsed.variables || null;
-        }
-      } catch (_) {}
-    }
-
-    if (queryStr.includes('DeleteMediaListEntry')) {
-      logDebug('[SYNC]', 'DeleteMediaListEntry intercepted for variables:', variables);
-      if (Settings.get('syncMode') === 'exact') {
+    if (ev.phase === 'request' && queryStr.includes('DeleteMediaListEntry')) {
+      ctx.debug.log('DeleteMediaListEntry intercepted for variables:', ev.variables);
+      if (ctx.get('syncMode') === 'exact') {
         const candidate = activeCandidate || extractDialogMedia(document.body);
         if (candidate) {
           addPendingDelete({
@@ -111,29 +87,27 @@ export function initDeletionInterceptor(): void {
             title: candidate.title,
             deletedAt: Date.now()
           });
-          logDebug('[SYNC]', 'Queued pending deletion for exact match:', candidate);
+          ctx.debug.log('Queued pending deletion for exact match:', candidate);
           activeCandidate = null;
           log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, 'info');
         }
       }
+      return;
     }
 
-    const res = await origFetch.call(page, input, init);
-
-    if (queryStr.includes('SaveMediaListEntry') && variables?.mediaId) {
-      const mediaId = Number(variables.mediaId);
-      logDebug('[SYNC]', 'SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:', mediaId);
+    if (ev.phase === 'response' && queryStr.includes('SaveMediaListEntry') && ev.variables?.mediaId) {
+      const mediaId = Number(ev.variables.mediaId);
+      ctx.debug.log('SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:', mediaId);
       removePendingDelete(mediaId, 'ANIME');
       removePendingDelete(mediaId, 'MANGA');
     }
+  });
 
-    return res;
-  };
-
-  document.addEventListener(
+  ctx.listen(
+    document,
     'click',
     (e) => {
-      if (Settings.get('syncMode') !== 'exact') return;
+      if (ctx.get('syncMode') !== 'exact') return;
       const target = e.target as HTMLElement;
       if (!target) return;
 
@@ -190,4 +164,8 @@ export function initDeletionInterceptor(): void {
     },
     true
   );
+
+  ctx.onCleanup(() => {
+    activeCandidate = null;
+  });
 }

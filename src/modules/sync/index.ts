@@ -131,7 +131,7 @@ defineModule({
     }
   },
   setup(ctx) {
-    initDeletionInterceptor();
+    initDeletionInterceptor(ctx);
 
     ctx.menuCommand('🗑️ AL→MAL Sync: Reset all data', () => {
       SYNC_DATA_KEYS.forEach((k) => store.del(k));
