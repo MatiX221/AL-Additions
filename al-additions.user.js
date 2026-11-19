@@ -7975,6 +7975,234 @@
 			refreshing = false;
 		}
 	}
+	var ID = "ala-find-on-nyaa";
+	var EDIT_ID = "ala-edit-mal-id";
+	var STYLE_ID = "ala-nyaa-style";
+	defineModule({
+		id: "nyaa",
+		key: "nyaaEnabled",
+		section: "External Links, Downloads & Mappings",
+		layer: "feature",
+		requiresReload: false,
+		def: false,
+		legacy: [
+			"nyaaEnabled",
+			"malNyaaLinksEnabled",
+			"malNyaaEnabled"
+		],
+		title: "MyAnimeList & Nyaa Links",
+		help: "Show a MyAnimeList link, with Nyaa search available by Ctrl/Cmd-click on desktop or long-press on mobile.",
+		options: [{
+			key: "nyaaProviders",
+			type: "list",
+			def: ["SubsPlease", "ToonsHub"],
+			legacy: ["nyaaProviders", "nyaaSearchGroups"],
+			title: "Nyaa Search Providers",
+			help: "Comma-separated provider names to include in Nyaa searches. Defaults to SubsPlease and ToonsHub."
+		}],
+		setup(ctx) {
+			const ICON = icon("external", 17);
+			ctx.addStyle(STYLE_ID, `#${ID},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}#${ID}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}#${ID}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`);
+			const nyaaUrl = (title) => {
+				const q = title.trim().replace(/[^a-zA-Z0-9]+/g, "+").replace(/^\++|\++$/g, "");
+				const frag = (ctx.get("nyaaProviders") || []).map(encodeURIComponent).join("&text=");
+				return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
+			};
+			let disposed = false;
+			let activeTimerCleanup = null;
+			let attachedAnchor = null;
+			let quickEditFn = ctx.services.get("manualOverrides:quickEdit") ?? null;
+			const mountEditButton = (h1, route) => {
+				document.getElementById(EDIT_ID)?.remove();
+				if (!quickEditFn || !h1.isConnected) return;
+				const editBtn = document.createElement("a");
+				editBtn.id = EDIT_ID;
+				editBtn.href = "#";
+				editBtn.title = "Set or edit MyAnimeList mapping";
+				editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
+				editBtn.innerHTML = icon("edit", 16);
+				editBtn.addEventListener("click", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					quickEditFn?.(route.id, route.type);
+				});
+				h1.appendChild(editBtn);
+			};
+			ctx.services.onAvailable("manualOverrides:quickEdit", (impl) => {
+				quickEditFn = impl;
+				if (attachedAnchor) mountEditButton(attachedAnchor.h1, attachedAnchor.route);
+				return () => {
+					if (quickEditFn === impl) quickEditFn = null;
+					document.getElementById(EDIT_ID)?.remove();
+				};
+			});
+			function attach(h1, route) {
+				activeTimerCleanup?.();
+				const a = document.createElement("a");
+				a.id = ID;
+				a.href = "#";
+				a.title = isIgnored(route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
+				a.setAttribute("aria-label", "Open on MAL; long-press to search Nyaa");
+				a.innerHTML = ICON;
+				const titleText = () => [...h1.childNodes].filter((n) => n !== a && n?.id !== EDIT_ID).map((n) => n.textContent).join("").trim();
+				const searchNyaa = () => openTab(nyaaUrl(titleText()));
+				ctx.api.media.get(route.id, route.type);
+				let timer = null;
+				let longResetTimer = null;
+				let longPressed = false;
+				let sx = 0;
+				let sy = 0;
+				const cancel = () => {
+					if (timer) clearTimeout(timer);
+					timer = null;
+				};
+				activeTimerCleanup = () => {
+					cancel();
+					if (longResetTimer) clearTimeout(longResetTimer);
+					longResetTimer = null;
+				};
+				a.addEventListener("touchstart", (e) => {
+					if (e.touches.length !== 1) return;
+					sx = e.touches[0].clientX;
+					sy = e.touches[0].clientY;
+					longPressed = false;
+					cancel();
+					timer = setTimeout(() => {
+						timer = null;
+						longPressed = true;
+						searchNyaa();
+						longResetTimer = setTimeout(() => {
+							longPressed = false;
+							longResetTimer = null;
+						}, 800);
+					}, 550);
+				}, { passive: true });
+				a.addEventListener("touchmove", (e) => {
+					if (timer === null || !e.touches.length) return;
+					if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
+				}, { passive: true });
+				a.addEventListener("touchend", cancel, { passive: true });
+				a.addEventListener("touchcancel", cancel, { passive: true });
+				a.addEventListener("contextmenu", (e) => {
+					if (longPressed) e.preventDefault();
+				});
+				a.addEventListener("click", async (e) => {
+					e.preventDefault();
+					if (longPressed) {
+						longPressed = false;
+						e.stopPropagation();
+						return;
+					}
+					const w = window.open("about:blank", "_blank");
+					const title = titleText();
+					const nyaa = nyaaUrl(title);
+					let target = nyaa;
+					if (!e.ctrlKey && !e.metaKey) {
+						if (isIgnored(route.id)) target = nyaa;
+						else {
+							const media = await ctx.api.media.get(route.id, route.type);
+							const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
+							if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
+							else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
+						}
+					}
+					if (w) {
+						w.opener = null;
+						w.location.href = target;
+					} else openTab(target);
+				});
+				h1.appendChild(a);
+				attachedAnchor = {
+					h1,
+					route
+				};
+				mountEditButton(h1, route);
+			}
+			let token = 0;
+			let placedKey = null;
+			let placing = false;
+			async function place() {
+				if (disposed) return;
+				const route = mediaRoute$1();
+				const key = route && `${route.type}:${route.id}`;
+				if (key && key === placedKey && document.getElementById(ID)) return;
+				activeTimerCleanup?.();
+				activeTimerCleanup = null;
+				attachedAnchor = null;
+				document.getElementById(ID)?.remove();
+				document.getElementById(EDIT_ID)?.remove();
+				placedKey = null;
+				if (!route) return;
+				const mine = ++token;
+				placing = true;
+				try {
+					const h1 = await ctx.waitForSelector(ANILIST_SELECTORS.mediaTitle, 8e3);
+					if (disposed || !h1 || mine !== token || mediaRoute$1()?.id !== route.id || document.getElementById(ID)) return;
+					attach(h1, route);
+					placedKey = key;
+				} finally {
+					if (mine === token) placing = false;
+				}
+			}
+			const repair = debounce(() => {
+				if (!disposed && placedKey && !placing && !document.getElementById(ID)) place();
+			}, 400);
+			place();
+			ctx.onNav(() => void place());
+			ctx.onBodyMutation(repair);
+			ctx.onCleanup(() => {
+				disposed = true;
+				token++;
+				activeTimerCleanup?.();
+				activeTimerCleanup = null;
+				attachedAnchor = null;
+				document.getElementById(ID)?.remove();
+				document.getElementById(EDIT_ID)?.remove();
+			});
+		}
+	});
+	defineModule({
+		id: "removeTitle",
+		key: "linkShortenerEnabled",
+		section: "AniList Enhancements",
+		layer: "preload",
+		requiresReload: true,
+		def: false,
+		legacy: [
+			"linkShortenerEnabled",
+			"shortAniListUrlsEnabled",
+			"shortAniListUrls"
+		],
+		title: "Short AniList URLs",
+		help: "Remove the title slug from AniList anime, manga, staff, and character URLs.",
+		setup(ctx) {
+			const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
+			const strip = (s) => s.replace(/^((?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/)[^/?#]+\/?(?=[?#]|$)/, "$1");
+			function fixLocation() {
+				if (!/anilist\.co\/(manga|anime|staff|character)\//.test(location.href) || !/\/\d{1,10}\/./.test(location.href)) return;
+				const cur = location.pathname + location.search + location.hash;
+				const next = strip(cur.replace(/^https:\/\/anilist\.co/, ""));
+				if (cur !== next) ctx.silently(() => history.replaceState(history.state, "", next));
+			}
+			function fixLinks(nodes) {
+				for (const node of Array.from(nodes)) {
+					if (node.nodeType !== 1) continue;
+					const el = node;
+					const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
+					for (const a of links) {
+						const href = a.getAttribute("href");
+						if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
+					}
+				}
+			}
+			fixLocation();
+			ctx.onNav(fixLocation);
+			ctx.onBodyMutation((muts) => {
+				for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
+			});
+			ctx.ready(() => fixLinks([document.body]));
+		}
+	});
 	var MAL_AUTH_URL = "https://myanimelist.net/v1/oauth2/authorize";
 	var MAL_TOKEN_URL = "https://myanimelist.net/v1/oauth2/token";
 	var MAL_API = "https://api.myanimelist.net/v2";
@@ -8314,6 +8542,536 @@
 			}
 		}
 		return 0;
+	}
+	var MODAL_CSS = `
+  #ala-pwd-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 12, 20, 0.75);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 100005;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  .ala-pwd-sheet {
+    width: 100%;
+    max-width: 420px;
+    background: rgb(var(--color-foreground, 31, 38, 49));
+    color: rgb(var(--color-text, 240, 243, 246));
+    border-radius: 10px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: alaModalPop 0.15s ease-out;
+  }
+  @keyframes alaModalPop {
+    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .ala-pwd-desc {
+    margin: 0 0 16px;
+    font-size: 13px;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    line-height: 1.45;
+  }
+  .ala-pwd-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ala-pwd-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+  }
+  .ala-pwd-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+  }
+  .ala-pwd-field {
+    width: 100%;
+    height: 40px;
+    padding: 0 38px 0 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
+    background: rgb(var(--color-background, 15, 23, 42));
+    color: rgb(var(--color-text, 240, 243, 246));
+    font: inherit;
+    font-size: 14px;
+    box-sizing: border-box;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .ala-pwd-field:focus {
+    outline: none;
+    border-color: rgb(var(--color-blue, 61, 180, 242));
+    box-shadow: 0 0 0 2px rgba(var(--color-blue, 61, 180, 242), 0.25);
+  }
+  .ala-pwd-toggle {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+  .ala-pwd-toggle:hover {
+    color: rgb(var(--color-text, 240, 243, 246));
+    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.12);
+  }
+  .ala-pwd-error {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: rgba(var(--color-red, 224, 85, 85), 0.12);
+    border: 1px solid rgba(var(--color-red, 224, 85, 85), 0.3);
+    color: rgb(var(--color-red, 224, 85, 85));
+    font-size: 12px;
+    font-weight: 500;
+  }
+`;
+	var EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+	var EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+	function promptPasswordModal(options) {
+		return new Promise((resolve) => {
+			addStyle("ala-pwd-modal-style", MODAL_CSS);
+			const existing = document.getElementById("ala-pwd-backdrop");
+			if (existing) existing.remove();
+			const backdrop = document.createElement("div");
+			backdrop.id = "ala-pwd-backdrop";
+			backdrop.innerHTML = `
+      <div class="ala-sheet ala-pwd-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-pwd-title">
+        <header class="ala-sheet-head">
+          <h2 id="ala-pwd-title">${esc(options.title)}</h2>
+          <button class="ala-icon-btn ala-pwd-btn-close" type="button" aria-label="Close">✕</button>
+        </header>
+        <div class="ala-sheet-body">
+          ${options.description ? `<p class="ala-pwd-desc">${esc(options.description)}</p>` : ""}
+          <div class="ala-pwd-group">
+            <label for="ala-pwd-input-main" class="ala-pwd-label">Password</label>
+            <div class="ala-pwd-input-wrap">
+              <input
+                id="ala-pwd-input-main"
+                class="ala-pwd-field"
+                type="password"
+                placeholder="${esc(options.placeholder || "Enter password")}"
+                autocomplete="${options.confirm ? "new-password" : "current-password"}"
+              />
+              <button type="button" class="ala-pwd-toggle" title="Show / Hide password" aria-label="Toggle password visibility">
+                ${EYE_OPEN}
+              </button>
+            </div>
+          </div>
+          ${options.confirm ? `
+            <div class="ala-pwd-group" style="margin-top:12px">
+              <label for="ala-pwd-input-confirm" class="ala-pwd-label">Confirm Password</label>
+              <div class="ala-pwd-input-wrap">
+                <input
+                  id="ala-pwd-input-confirm"
+                  class="ala-pwd-field"
+                  type="password"
+                  placeholder="Re-enter password"
+                  autocomplete="new-password"
+                />
+              </div>
+            </div>
+          ` : ""}
+          <div class="ala-pwd-error" id="ala-pwd-err" style="display:none"></div>
+        </div>
+        <footer class="ala-sheet-foot">
+          <button class="ala-btn ala-btn--primary" id="ala-pwd-btn-submit" type="button">
+            ${esc(options.submitText || "Submit")}
+          </button>
+          <button class="ala-btn" id="ala-pwd-btn-cancel" type="button">
+            ${esc(options.cancelText || "Cancel")}
+          </button>
+        </footer>
+      </div>
+    `;
+			document.body.appendChild(backdrop);
+			const input = backdrop.querySelector("#ala-pwd-input-main");
+			const confirmInput = backdrop.querySelector("#ala-pwd-input-confirm");
+			const toggleBtn = backdrop.querySelector(".ala-pwd-toggle");
+			const errBox = backdrop.querySelector("#ala-pwd-err");
+			const submitBtn = backdrop.querySelector("#ala-pwd-btn-submit");
+			const cancelBtn = backdrop.querySelector("#ala-pwd-btn-cancel");
+			const closeBtn = backdrop.querySelector(".ala-pwd-btn-close");
+			let isVisible = false;
+			const cleanup = () => {
+				document.removeEventListener("keydown", onKeyDown);
+				backdrop.remove();
+			};
+			const cancel = () => {
+				cleanup();
+				resolve(null);
+			};
+			const submit = () => {
+				const val = input.value;
+				if (!options.allowEmpty && !val.trim()) {
+					errBox.textContent = "Password cannot be empty.";
+					errBox.style.display = "block";
+					input.focus();
+					return;
+				}
+				if (options.confirm && confirmInput) {
+					if (val && val !== confirmInput.value) {
+						errBox.textContent = "Passwords do not match.";
+						errBox.style.display = "block";
+						confirmInput.focus();
+						return;
+					}
+				}
+				cleanup();
+				resolve(val);
+			};
+			toggleBtn.addEventListener("click", () => {
+				isVisible = !isVisible;
+				const type = isVisible ? "text" : "password";
+				input.type = type;
+				if (confirmInput) confirmInput.type = type;
+				toggleBtn.innerHTML = isVisible ? EYE_OFF : EYE_OPEN;
+				toggleBtn.title = isVisible ? "Hide password" : "Show password";
+			});
+			submitBtn.addEventListener("click", submit);
+			cancelBtn.addEventListener("click", cancel);
+			closeBtn.addEventListener("click", cancel);
+			backdrop.addEventListener("click", (e) => {
+				if (e.target === backdrop) cancel();
+			});
+			const onKeyDown = (e) => {
+				if (e.key === "Escape") {
+					e.preventDefault();
+					cancel();
+				} else if (e.key === "Enter") {
+					e.preventDefault();
+					submit();
+				}
+			};
+			document.addEventListener("keydown", onKeyDown);
+			setTimeout(() => input.focus(), 50);
+		});
+	}
+	var BACKUP_FILENAME = "al-additions.settings";
+	var MAGIC_PLAIN = new Uint8Array([
+		65,
+		76,
+		65,
+		83
+	]);
+	var MAGIC_ENCRYPTED = new Uint8Array([
+		65,
+		76,
+		65,
+		69
+	]);
+	var SENSITIVE_KEYS = [
+		"mal_code_verifier",
+		"mal_token",
+		"mal_refresh_token",
+		"mal_expires_at"
+	];
+	var SESSION_CACHE_KEYS = [
+		"al_token",
+		"al_username",
+		"al_user_id",
+		"al_score_format"
+	];
+	var PBKDF2_ITERATIONS = 1e5;
+	function matchesMagic(bytes, magic) {
+		if (bytes.length < magic.length) return false;
+		for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic[i]) return false;
+		return true;
+	}
+	function base64ToUint8(b64) {
+		const binary = atob(b64.replace(/\s+/g, ""));
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+		return bytes;
+	}
+	async function deriveAesKey(password, salt) {
+		const enc = new TextEncoder();
+		const baseKey = await window.crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+		return window.crypto.subtle.deriveKey({
+			name: "PBKDF2",
+			salt,
+			iterations: PBKDF2_ITERATIONS,
+			hash: "SHA-256"
+		}, baseKey, {
+			name: "AES-GCM",
+			length: 256
+		}, false, ["encrypt", "decrypt"]);
+	}
+	async function decryptData(cryptoData, password) {
+		const salt = base64ToUint8(cryptoData.salt);
+		const iv = base64ToUint8(cryptoData.iv);
+		const ciphertext = base64ToUint8(cryptoData.ciphertext);
+		const key = await deriveAesKey(password, salt);
+		const decryptedBuffer = await window.crypto.subtle.decrypt({
+			name: "AES-GCM",
+			iv
+		}, key, ciphertext);
+		return new TextDecoder().decode(decryptedBuffer);
+	}
+	async function compressDeflateRaw(data) {
+		const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+		const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+		const buffer = await new Response(stream).arrayBuffer();
+		return new Uint8Array(buffer);
+	}
+	async function decompressDeflateRaw(data) {
+		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+		return await new Response(stream).text();
+	}
+	async function decompressGzip(data) {
+		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"));
+		return await new Response(stream).text();
+	}
+	async function createBackup(includeSecrets, password, overrides) {
+		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
+		const data = {};
+		for (const r of Object.values(ROWS)) {
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
+			data[r.key] = rawVal;
+		}
+		if (includeSecrets) for (const key of SENSITIVE_KEYS) {
+			const val = store$1.get(key, void 0);
+			if (val !== void 0 && val !== null) data[key] = val;
+		}
+		const plainPayload = {
+			version: 1,
+			exportedAt: Date.now(),
+			data
+		};
+		const jsonBytes = new TextEncoder().encode(JSON.stringify(plainPayload));
+		const compressedBytes = await compressDeflateRaw(jsonBytes);
+		if (password && password.trim().length > 0) {
+			const salt = window.crypto.getRandomValues(new Uint8Array(16));
+			const iv = window.crypto.getRandomValues(new Uint8Array(12));
+			const key = await deriveAesKey(password, salt);
+			const ciphertextBuffer = await window.crypto.subtle.encrypt({
+				name: "AES-GCM",
+				iv
+			}, key, compressedBytes);
+			const ciphertext = new Uint8Array(ciphertextBuffer);
+			const out = new Uint8Array(33 + ciphertext.length);
+			out.set(MAGIC_ENCRYPTED, 0);
+			out[4] = 1;
+			out.set(salt, 5);
+			out.set(iv, 21);
+			out.set(ciphertext, 33);
+			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			return out;
+		} else {
+			const out = new Uint8Array(5 + compressedBytes.length);
+			out.set(MAGIC_PLAIN, 0);
+			out[4] = 1;
+			out.set(compressedBytes, 5);
+			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			return out;
+		}
+	}
+	function createRawBackup(overrides) {
+		const data = {};
+		for (const r of Object.values(ROWS)) {
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
+			data[r.key] = rawVal;
+		}
+		for (const key of SENSITIVE_KEYS) {
+			const val = store$1.get(key, void 0);
+			if (val !== void 0 && val !== null) data[key] = val;
+		}
+		return JSON.stringify({
+			version: 1,
+			exportedAt: Date.now(),
+			data
+		}, null, 2);
+	}
+	function downloadBackupFile(bytes, filename = BACKUP_FILENAME) {
+		const blob = new Blob([bytes], { type: "application/octet-stream" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 1e3);
+	}
+	function applyVersion1Settings(data) {
+		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
+		let applied = 0;
+		let secretsApplied = 0;
+		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
+		for (const [key, rawValue] of Object.entries(data)) {
+			if (SESSION_CACHE_KEYS.includes(key)) continue;
+			if (SENSITIVE_KEYS.includes(key)) {
+				if (rawValue !== void 0 && rawValue !== null) {
+					store$1.set(key, rawValue);
+					secretsApplied++;
+				}
+				continue;
+			}
+			const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
+			const r = ROWS[settingKey];
+			if (r) {
+				const normalized = TYPES$1[r.type].normalize(rawValue, r);
+				store$1.set(SETTING_PREFIX + settingKey, normalized);
+				applied++;
+			}
+		}
+		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
+		return {
+			applied,
+			secretsApplied
+		};
+	}
+	async function handleLegacyJsonBackup(jsonText, promptPassword) {
+		let payload;
+		try {
+			payload = JSON.parse(jsonText);
+		} catch {
+			throw new Error("Invalid backup file: corrupted JSON content.");
+		}
+		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
+		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
+		if (payload.encrypted === true) {
+			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
+			const password = await promptPassword("Enter password to decrypt your settings backup:");
+			if (password === null) return {
+				applied: 0,
+				secretsApplied: 0,
+				cancelled: true
+			};
+			if (!password) throw new Error("Password cannot be empty.");
+			let decryptedText;
+			try {
+				decryptedText = await decryptData(payload.crypto, password);
+			} catch {
+				throw new Error("Incorrect password or corrupted backup file.");
+			}
+			let data;
+			try {
+				data = JSON.parse(decryptedText);
+			} catch {
+				throw new Error("Decrypted content is not valid JSON.");
+			}
+			return applyVersion1Settings(data);
+		}
+		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
+	}
+	async function importBackup(fileInput, customPromptPassword) {
+		let bytes;
+		if (typeof fileInput === "string") bytes = new TextEncoder().encode(fileInput);
+		else bytes = fileInput;
+		if (!bytes || bytes.length === 0) throw new Error("Backup file is empty.");
+		const promptPassword = customPromptPassword || ((hint) => promptPasswordModal({
+			title: "Decrypt Settings Backup",
+			description: hint || "Enter your password to decrypt your settings backup:",
+			submitText: "Decrypt & Restore",
+			allowEmpty: false,
+			confirm: false,
+			placeholder: "Enter backup password"
+		}));
+		if (matchesMagic(bytes, MAGIC_ENCRYPTED)) {
+			if (bytes.length < 49) throw new Error("Invalid encrypted backup file: file is truncated.");
+			const version = bytes[4];
+			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
+			const password = await promptPassword("Enter password to decrypt your settings backup:");
+			if (password === null) return {
+				applied: 0,
+				secretsApplied: 0,
+				cancelled: true
+			};
+			if (!password) throw new Error("Password cannot be empty.");
+			const salt = bytes.subarray(5, 21);
+			const iv = bytes.subarray(21, 33);
+			const ciphertext = bytes.subarray(33);
+			const key = await deriveAesKey(password, salt);
+			let decryptedBuffer;
+			try {
+				decryptedBuffer = await window.crypto.subtle.decrypt({
+					name: "AES-GCM",
+					iv
+				}, key, ciphertext);
+			} catch {
+				throw new Error("Incorrect password or corrupted backup file.");
+			}
+			let jsonText;
+			try {
+				jsonText = await decompressDeflateRaw(new Uint8Array(decryptedBuffer));
+			} catch {
+				throw new Error("Corrupted decrypted data: failed to decompress.");
+			}
+			let payload;
+			try {
+				payload = JSON.parse(jsonText);
+			} catch {
+				throw new Error("Decrypted content is not valid JSON.");
+			}
+			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
+			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+		}
+		if (matchesMagic(bytes, MAGIC_PLAIN)) {
+			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
+			const version = bytes[4];
+			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
+			let jsonText;
+			try {
+				jsonText = await decompressDeflateRaw(bytes.subarray(5));
+			} catch {
+				throw new Error("Corrupted backup file: failed to decompress.");
+			}
+			let payload;
+			try {
+				payload = JSON.parse(jsonText);
+			} catch {
+				throw new Error("Corrupted backup file: invalid JSON content.");
+			}
+			logDebug("[CORE]", "Imported plain binary backup successfully.");
+			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+		}
+		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
+			let jsonText;
+			try {
+				jsonText = await decompressGzip(bytes);
+			} catch {
+				throw new Error("Corrupted or invalid GZIP backup file.");
+			}
+			logDebug("[CORE]", "Imported legacy GZIP backup.");
+			return handleLegacyJsonBackup(jsonText, promptPassword);
+		}
+		let jsonText;
+		try {
+			jsonText = new TextDecoder().decode(bytes);
+		} catch {
+			throw new Error("Failed to decode backup file as UTF-8 text.");
+		}
+		logDebug("[CORE]", "Imported legacy JSON/text backup.");
+		return handleLegacyJsonBackup(jsonText, promptPassword);
+	}
+	async function readFileAsBytes(file) {
+		if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(new Uint8Array(reader.result));
+			reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+			reader.readAsArrayBuffer(file);
+		});
 	}
 	var TYPES = MEDIA_TYPES;
 	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
@@ -9137,1693 +9895,6 @@
 			syncStatus.autoSyncRetryAfter = Date.now() + 3e5;
 			runSync(dueTypes);
 		} else if (retryAt > 0 && Date.now() >= retryAt) store$1.del("sync_retry_at");
-	}
-	var MODAL_ID = "ala-overrides-backdrop";
-	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
-	var OVERRIDES_CSS = `
-  #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  .ala-ov-sheet *{box-sizing:border-box}
-  .ala-ov-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  .ala-ov-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-ov-head h2{margin:0;font-size:18px;font-weight:600}
-  .ala-ov-body {flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable;}
-  .ala-ov-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-
-  .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
-  .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-  .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
-  .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
-
-  .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
-  .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
-  .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
-  .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
-  .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
-
-  .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
-  .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
-
-  .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
-  .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
-  .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
-
-  .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
-  .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
-  .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
-  .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
-  .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
-
-  .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-
-  .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
-  .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
-  .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-  .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
-  .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
-
-  .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
-  .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
-
-  .ala-ov-list{display:grid;gap:8px;min-width:0;}
-  .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
-  .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
-  .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
-  .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
-  .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
-  .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
-  .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
-  .ala-ov-item-meta a:hover{text-decoration:underline}
-  .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
-
-  .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
-
-  .ala-ov-audit-section{margin-bottom:20px}
-  .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
-
-  @media (max-width:700px){
-    #${MODAL_ID}{align-items:flex-end;padding:0}
-    #${MODAL_ID} .ala-ov-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #${QUICK_MODAL_ID}{align-items:flex-end;padding:0}
-    #${QUICK_MODAL_ID} .ala-ov-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-
-    .ala-ov-head{padding:14px 16px}
-    .ala-ov-body{padding:12px 16px}
-    .ala-ov-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
-    .ala-ov-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
-
-    .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
-    .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
-
-    .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
-    .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
-    .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
-    .ala-ov-filter-group{width:100%;flex-wrap:wrap}
-
-    .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
-    .ala-ov-item-cover{width:36px;height:48px}
-    .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
-    .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
-    .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
-    .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
-  }
-  `;
-	function ensureOverridesStyle() {
-		addStyle("ala-overrides-style", OVERRIDES_CSS);
-	}
-	function extractAlId(raw) {
-		const str = String(raw || "").trim();
-		const match = str.match(/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
-		return match ? Number(match[1]) : 0;
-	}
-	function extractMalId(raw) {
-		const str = String(raw || "").trim();
-		const match = str.match(/myanimelist\.net\/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
-		return match ? Number(match[1]) : 0;
-	}
-	function matchesSearch(text, id, extraId, query) {
-		if (!query) return true;
-		const q = query.trim().toLowerCase();
-		if (!q) return true;
-		if (String(id).includes(q)) return true;
-		if (extraId != null && String(extraId).includes(q)) return true;
-		const t = (text || "").toLowerCase();
-		if (t.includes(q)) return true;
-		let qIdx = 0;
-		for (let i = 0; i < t.length && qIdx < q.length; i++) if (t[i] === q[qIdx]) qIdx++;
-		return qIdx === q.length;
-	}
-	var unmatchedMetaCache = new Map();
-	async function batchFetchUnmatchedMeta(ids) {
-		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
-		if (!needed.length) return;
-		for (let i = 0; i < needed.length; i += 50) {
-			const batch = needed.slice(i, i + 50);
-			const q = `query ($ids: [Int]) {
-      Page(page: 1, perPage: 50) {
-        media(id_in: $ids) {
-          id
-          title { userPreferred english romaji }
-          coverImage { medium }
-        }
-      }
-    }`;
-			try {
-				const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
-				for (const m of list) {
-					const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
-					unmatchedMetaCache.set(m.id, {
-						title: t,
-						cover: m.coverImage?.medium
-					});
-				}
-			} catch (e) {
-				console.warn("[AL-Additions] Failed to batch fetch unmatched metadata:", e);
-				break;
-			}
-		}
-	}
-	async function openQuickOverrideModal(mediaId, mediaType = "ANIME") {
-		ensureOverridesStyle();
-		const existing = document.getElementById(QUICK_MODAL_ID);
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = QUICK_MODAL_ID;
-		const existingOverride = getManualOverrides()[String(mediaId)];
-		backdrop.innerHTML = `
-    <div class="ala-ov-sheet ala-ov-quick-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-qo-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-qo-modal-title">Set MAL Mapping</h2>
-        <button class="ala-icon-btn ala-qo-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div id="ala-qo-preview" class="ala-ov-preview">
-          <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
-        </div>
-
-        <div class="ala-ov-field">
-          <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
-          <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-        </div>
-
-        <div class="ala-ov-form-actions">
-          <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
-          <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
-          ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
-        </div>
-      </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-qo-close" type="button">Cancel</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const close = () => backdrop.remove();
-		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
-		});
-		const previewBox = backdrop.querySelector("#ala-qo-preview");
-		const malInput = backdrop.querySelector("#ala-qo-mal-input");
-		const saveBtn = backdrop.querySelector("#ala-qo-btn-save");
-		const ignoreBtn = backdrop.querySelector("#ala-qo-btn-ignore");
-		const removeBtn = backdrop.querySelector("#ala-qo-btn-remove");
-		if (existingOverride && existingOverride.malId > 0) malInput.value = String(existingOverride.malId);
-		let loadedTitle = existingOverride?.title || `Media #${mediaId}`;
-		let loadedCover = existingOverride?.cover;
-		let loadedType = existingOverride?.type || mediaType;
-		let detectedMalId;
-		const q = `query ($id: Int) {
-    Media(id: $id) {
-      id
-      idMal
-      type
-      title { userPreferred english romaji }
-      coverImage { medium }
-    }
-  }`;
-		try {
-			const m = (await AniList.query(q, { id: mediaId }))?.Media;
-			if (m) {
-				loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
-				loadedCover = m.coverImage?.medium || loadedCover;
-				loadedType = m.type === "MANGA" ? "MANGA" : "ANIME";
-				detectedMalId = Number(m.idMal) || void 0;
-			}
-		} catch (_) {}
-		const isIgnored = existingOverride && existingOverride.malId === 0;
-		const isCustom = existingOverride && existingOverride.malId > 0;
-		previewBox.innerHTML = `
-    ${loadedCover ? `<img class="ala-ov-preview-cover" src="${loadedCover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
-    <div class="ala-ov-preview-info">
-      <div class="ala-ov-preview-title">${loadedTitle}</div>
-      <div class="ala-ov-preview-meta">
-        <span class="ala-ov-badge ${loadedType === "MANGA" ? "ala-ov-badge--manga" : ""}">${loadedType}</span>
-        ${isIgnored ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>` : isCustom ? `<span>Overridden to MAL ID: <b>${existingOverride.malId}</b></span>` : detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
-      </div>
-    </div>
-  `;
-		if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
-		saveBtn.addEventListener("click", () => {
-			let malId = extractMalId(malInput.value);
-			if (!malId && detectedMalId) malId = detectedMalId;
-			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
-			setOverride(mediaId, {
-				malId,
-				type: loadedType,
-				title: loadedTitle,
-				cover: loadedCover
-			});
-			close();
-		});
-		ignoreBtn.addEventListener("click", () => {
-			setOverride(mediaId, {
-				malId: 0,
-				type: loadedType,
-				title: loadedTitle,
-				cover: loadedCover
-			});
-			close();
-		});
-		removeBtn?.addEventListener("click", () => {
-			removeOverride(mediaId);
-			close();
-		});
-	}
-	function openOverridesModal() {
-		ensureOverridesStyle();
-		const existing = document.getElementById(MODAL_ID);
-		if (existing) existing.remove();
-		refreshStaleOverrides().then(() => {
-			if (document.getElementById(MODAL_ID)) renderList();
-		});
-		const backdrop = document.createElement("div");
-		backdrop.id = MODAL_ID;
-		backdrop.innerHTML = `
-    <div class="ala-ov-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-ov-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-ov-modal-title">Manual Mappings & Sync Audit</h2>
-        <button class="ala-icon-btn ala-ov-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div class="ala-ov-tabs">
-          <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
-          <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
-          <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
-        </div>
-
-        <div id="ala-ov-view-overrides">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
-            <div class="ala-ov-field">
-              <label for="ala-ov-al-input">AniList Media ID or URL</label>
-              <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
-            </div>
-
-            <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
-
-            <div class="ala-ov-field">
-              <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
-              <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-            </div>
-
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
-            </div>
-          </div>
-
-          <div class="ala-ov-controls">
-            <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
-            <div class="ala-ov-filter-groups">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Status:</span>
-                <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
-                <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
-              </div>
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
-              </div>
-            </div>
-          </div>
-
-          <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
-          <div id="ala-ov-list" class="ala-ov-list"></div>
-        </div>
-
-        <div id="ala-ov-view-audit" style="display:none">
-          <div class="ala-ov-audit-section">
-            <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
-            <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
-              <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
-          </div>
-
-          <div class="ala-ov-audit-section" style="margin-top:24px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
-              <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
-            </div>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
-            <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
-              <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
-          </div>
-        </div>
-
-        <div id="ala-ov-view-json" style="display:none">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
-              View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
-            </p>
-            <div class="ala-ov-field">
-              <label for="ala-ov-json-textarea">Configuration JSON</label>
-              <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
-            </div>
-            <div id="ala-ov-json-status" class="ala-ov-status"></div>
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-btn--primary ala-ov-close" type="button">Done</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const close = () => backdrop.remove();
-		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
-		});
-		const tabs = backdrop.querySelectorAll(".ala-ov-tab");
-		const viewOverrides = backdrop.querySelector("#ala-ov-view-overrides");
-		const viewAudit = backdrop.querySelector("#ala-ov-view-audit");
-		const viewJson = backdrop.querySelector("#ala-ov-view-json");
-		tabs.forEach((t) => {
-			t.addEventListener("click", () => {
-				tabs.forEach((o) => o.classList.toggle("is-active", o === t));
-				const target = t.dataset.tab;
-				viewOverrides.style.display = target === "overrides" ? "block" : "none";
-				viewAudit.style.display = target === "audit" ? "block" : "none";
-				viewJson.style.display = target === "json" ? "block" : "none";
-				if (target === "audit") renderAudit();
-				else if (target === "overrides") renderList();
-				else if (target === "json") renderJsonView();
-			});
-		});
-		let activePreview = null;
-		let statusFilter = "all";
-		let typeFilter = "all";
-		let searchQuery = "";
-		const alInput = backdrop.querySelector("#ala-ov-al-input");
-		const malInput = backdrop.querySelector("#ala-ov-mal-input");
-		const previewBox = backdrop.querySelector("#ala-ov-preview");
-		const listContainer = backdrop.querySelector("#ala-ov-list");
-		const countLabel = backdrop.querySelector("#ala-ov-count");
-		const searchInput = backdrop.querySelector("#ala-ov-search");
-		const updatePreviewUI = (loading = false) => {
-			if (loading) {
-				previewBox.style.display = "flex";
-				previewBox.innerHTML = `<span style="font-size:12px;color:rgb(var(--color-text-lighter))">Looking up AniList entry...</span>`;
-				return;
-			}
-			if (!activePreview) {
-				previewBox.style.display = "none";
-				previewBox.innerHTML = "";
-				malInput.placeholder = "e.g. 16498 or https://myanimelist.net/anime/16498";
-				return;
-			}
-			const { type, title, cover, detectedMalId } = activePreview;
-			previewBox.style.display = "flex";
-			previewBox.innerHTML = `
-      ${cover ? `<img class="ala-ov-preview-cover" src="${cover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
-      <div class="ala-ov-preview-info">
-        <div class="ala-ov-preview-title">${title}</div>
-        <div class="ala-ov-preview-meta">
-          <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
-          ${detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
-        </div>
-      </div>
-    `;
-			if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
-		};
-		let lookupTimer = 0;
-		const doLookup = async (id) => {
-			if (!id) {
-				activePreview = null;
-				updatePreviewUI();
-				return;
-			}
-			const existing = getManualOverrides()[String(id)];
-			if (existing) {
-				activePreview = {
-					mediaId: id,
-					type: existing.type,
-					title: existing.title,
-					cover: existing.cover,
-					detectedMalId: existing.malId > 0 ? existing.malId : void 0
-				};
-				if (existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
-				updatePreviewUI();
-			} else updatePreviewUI(true);
-			const q = `query ($id: Int) {
-      Media(id: $id) {
-        id
-        idMal
-        type
-        title { userPreferred english romaji }
-        coverImage { medium }
-      }
-    }`;
-			try {
-				const res = await AniList.query(q, { id });
-				if (extractAlId(alInput.value) !== id) return;
-				const m = res?.Media;
-				if (!m) {
-					if (!existing) {
-						activePreview = null;
-						updatePreviewUI();
-					}
-					return;
-				}
-				const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
-				activePreview = {
-					mediaId: m.id,
-					type: m.type === "MANGA" ? "MANGA" : "ANIME",
-					title: t,
-					cover: m.coverImage?.medium || existing?.cover,
-					detectedMalId: Number(m.idMal) || void 0
-				};
-				updatePreviewUI();
-				if (existing && existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
-			} catch (_) {
-				if (!existing && extractAlId(alInput.value) === id) {
-					activePreview = null;
-					updatePreviewUI();
-				}
-			}
-		};
-		alInput.addEventListener("input", () => {
-			clearTimeout(lookupTimer);
-			lookupTimer = setTimeout(() => {
-				const id = extractAlId(alInput.value);
-				doLookup(id);
-			}, 300);
-		});
-		const saveBtn = backdrop.querySelector("#ala-ov-btn-save");
-		const ignoreBtn = backdrop.querySelector("#ala-ov-btn-ignore");
-		const clearBtn = backdrop.querySelector("#ala-ov-btn-clear");
-		const clearForm = () => {
-			clearTimeout(lookupTimer);
-			alInput.value = "";
-			malInput.value = "";
-			activePreview = null;
-			updatePreviewUI();
-		};
-		clearBtn.addEventListener("click", clearForm);
-		saveBtn.addEventListener("click", () => {
-			const id = activePreview?.mediaId || extractAlId(alInput.value);
-			if (!id) return alert("Please enter a valid AniList ID or URL.");
-			let malId = extractMalId(malInput.value);
-			if (!malId && activePreview?.detectedMalId) malId = activePreview.detectedMalId;
-			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
-			const existing = getManualOverrides()[String(id)];
-			const title = activePreview?.title || existing?.title || `Media #${id}`;
-			const cover = activePreview?.cover || existing?.cover;
-			const type = activePreview?.type || existing?.type || "ANIME";
-			setOverride(id, {
-				malId,
-				type,
-				title,
-				cover
-			});
-			clearForm();
-			renderList();
-			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
-				const m = res?.Media;
-				if (m) {
-					const current = getManualOverrides();
-					if (current[String(id)]) {
-						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-						const c = m.coverImage?.medium || current[String(id)].cover;
-						current[String(id)] = {
-							...current[String(id)],
-							title: t,
-							cover: c,
-							type: m.type === "MANGA" ? "MANGA" : "ANIME",
-							updatedAt: Date.now()
-						};
-						saveManualOverrides(current);
-						if (document.getElementById(MODAL_ID)) renderList();
-					}
-				}
-			}).catch(() => {});
-		});
-		ignoreBtn.addEventListener("click", () => {
-			const id = activePreview?.mediaId || extractAlId(alInput.value);
-			if (!id) return alert("Please enter a valid AniList ID or URL.");
-			const existing = getManualOverrides()[String(id)];
-			const title = activePreview?.title || existing?.title || `Media #${id}`;
-			const cover = activePreview?.cover || existing?.cover;
-			setOverride(id, {
-				malId: 0,
-				type: activePreview?.type || existing?.type || "ANIME",
-				title,
-				cover
-			});
-			clearForm();
-			renderList();
-			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
-				const m = res?.Media;
-				if (m) {
-					const current = getManualOverrides();
-					if (current[String(id)]) {
-						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-						const c = m.coverImage?.medium || current[String(id)].cover;
-						current[String(id)] = {
-							...current[String(id)],
-							title: t,
-							cover: c,
-							type: m.type === "MANGA" ? "MANGA" : "ANIME",
-							updatedAt: Date.now()
-						};
-						saveManualOverrides(current);
-						if (document.getElementById(MODAL_ID)) renderList();
-					}
-				}
-			}).catch(() => {});
-		});
-		backdrop.querySelectorAll("[data-status-filter]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-status-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
-				statusFilter = c.dataset.statusFilter || "all";
-				renderList();
-			});
-		});
-		backdrop.querySelectorAll("[data-type-filter]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-type-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
-				typeFilter = c.dataset.typeFilter || "all";
-				renderList();
-			});
-		});
-		let searchTimer = 0;
-		searchInput?.addEventListener("input", () => {
-			clearTimeout(searchTimer);
-			searchTimer = setTimeout(() => {
-				searchQuery = searchInput.value.trim();
-				renderList();
-			}, 150);
-		});
-		function renderList() {
-			const all = getManualOverrides();
-			const entries = Object.entries(all).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
-			const filtered = entries.filter(([idStr, o]) => {
-				if (statusFilter === "overrides" && o.malId === 0) return false;
-				if (statusFilter === "ignored" && o.malId > 0) return false;
-				if (typeFilter !== "all" && o.type.toLowerCase() !== typeFilter.toLowerCase()) return false;
-				if (searchQuery && !matchesSearch(o.title, idStr, o.malId > 0 ? o.malId : void 0, searchQuery)) return false;
-				return true;
-			});
-			countLabel.textContent = `Configured Entries (${entries.length}${filtered.length !== entries.length ? ` — showing ${filtered.length}` : ""})`;
-			if (!filtered.length) {
-				listContainer.innerHTML = `<div class="ala-ov-empty">No entries found matching this filter.</div>`;
-				return;
-			}
-			listContainer.innerHTML = filtered.map(([idStr, o]) => {
-				const id = Number(idStr);
-				const isIgnoredEntry = o.malId === 0;
-				const alUrl = `https://anilist.co/${o.type.toLowerCase()}/${id}`;
-				const malUrl = o.malId > 0 ? `https://myanimelist.net/${o.type.toLowerCase()}/${o.malId}` : "#";
-				return `
-        <div class="ala-ov-item" data-id="${id}">
-          ${o.cover ? `<img class="ala-ov-item-cover" src="${o.cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
-          <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="${alUrl}" target="_blank" rel="noopener" title="${o.title}">${o.title}</a>
-            <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${o.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${o.type}</span>
-              <span>AniList ID: <b>${id}</b></span>
-              ${isIgnoredEntry ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>` : `<span>MAL ID: <a href="${malUrl}" target="_blank" rel="noopener"><b>${o.malId}</b></a></span>`}
-            </div>
-          </div>
-          <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${id}">Edit</button>
-            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${id}" title="Remove override">✕</button>
-          </div>
-        </div>
-      `;
-			}).join("");
-			listContainer.querySelectorAll(".ala-ov-btn-del").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					if (id) {
-						removeOverride(id);
-						if (activePreview?.mediaId === id) clearForm();
-						renderList();
-					}
-				});
-			});
-			listContainer.querySelectorAll(".ala-ov-btn-edit").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					if (id) {
-						alInput.value = String(id);
-						doLookup(id);
-						viewOverrides.scrollTop = 0;
-					}
-				});
-			});
-		}
-		let unmatchedTypeFilter = "all";
-		let unmatchedSearchQuery = "";
-		let orphansTypeFilter = "all";
-		let orphansSearchQuery = "";
-		const unmatchedControls = backdrop.querySelector("#ala-ov-unmatched-controls");
-		const unmatchedSearchInput = backdrop.querySelector("#ala-ov-unmatched-search");
-		backdrop.querySelectorAll("[data-unmatched-type]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-unmatched-type]").forEach((o) => o.classList.toggle("is-active", o === c));
-				unmatchedTypeFilter = c.dataset.unmatchedType || "all";
-				renderUnmatchedList();
-			});
-		});
-		let unmatchedSearchTimer = 0;
-		unmatchedSearchInput?.addEventListener("input", () => {
-			clearTimeout(unmatchedSearchTimer);
-			unmatchedSearchTimer = setTimeout(() => {
-				unmatchedSearchQuery = unmatchedSearchInput.value.trim();
-				renderUnmatchedList();
-			}, 150);
-		});
-		function getRawUnmatched() {
-			const configured = getManualOverrides();
-			const unmatched = [];
-			for (const t of ["ANIME", "MANGA"]) {
-				const data = stores[t].ids.data || {};
-				for (const [idStr, rec] of Object.entries(data)) {
-					const id = Number(idStr);
-					if (id > 0 && rec && rec.m === 0 && !configured[String(id)]) unmatched.push({
-						mediaId: id,
-						type: t
-					});
-				}
-			}
-			return unmatched;
-		}
-		function renderUnmatchedList() {
-			const unmatchedBox = backdrop.querySelector("#ala-ov-audit-unmatched");
-			const raw = getRawUnmatched();
-			if (!raw.length) {
-				unmatchedControls.style.display = "none";
-				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries found. All synced titles have MAL IDs or were resolved!</div>`;
-				return;
-			}
-			unmatchedControls.style.display = "flex";
-			const filtered = raw.filter(({ mediaId, type }) => {
-				if (unmatchedTypeFilter !== "all" && type.toLowerCase() !== unmatchedTypeFilter.toLowerCase()) return false;
-				const title = unmatchedMetaCache.get(mediaId)?.title || `Media #${mediaId}`;
-				if (unmatchedSearchQuery && !matchesSearch(title, mediaId, void 0, unmatchedSearchQuery)) return false;
-				return true;
-			});
-			if (!filtered.length) {
-				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries match this filter.</div>`;
-				return;
-			}
-			unmatchedBox.innerHTML = filtered.map(({ mediaId, type }) => {
-				const meta = unmatchedMetaCache.get(mediaId);
-				const title = meta?.title || `Media #${mediaId}`;
-				const cover = meta?.cover;
-				return `
-        <div class="ala-ov-item" data-id="${mediaId}">
-          ${cover ? `<img class="ala-ov-item-cover" src="${cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
-          <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://anilist.co/${type.toLowerCase()}/${mediaId}" target="_blank" rel="noopener" title="${title}">${title}</a>
-            <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
-              <span>AniList ID: <b>${mediaId}</b></span>
-            </div>
-          </div>
-          <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${mediaId}">Set MAL ID</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${mediaId}" data-type="${type}">Ignore</button>
-          </div>
-        </div>
-      `;
-			}).join("");
-			unmatchedBox.querySelectorAll(".ala-ov-audit-set").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					tabs[0].click();
-					alInput.value = String(id);
-					doLookup(id);
-				});
-			});
-			unmatchedBox.querySelectorAll(".ala-ov-audit-ignore").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.id);
-					const type = btn.dataset.type || "ANIME";
-					const meta = unmatchedMetaCache.get(id);
-					setOverride(id, {
-						malId: 0,
-						type,
-						title: meta?.title || `Media #${id}`,
-						cover: meta?.cover
-					});
-					renderUnmatchedList();
-					renderList();
-				});
-			});
-		}
-		function renderAudit() {
-			renderUnmatchedList();
-			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
-			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds).then(() => {
-				renderUnmatchedList();
-			});
-			renderOrphansList();
-		}
-		let scannedOrphans = null;
-		const orphansControls = backdrop.querySelector("#ala-ov-orphans-controls");
-		const orphansSearchInput = backdrop.querySelector("#ala-ov-orphans-search");
-		backdrop.querySelectorAll("[data-orphans-type]").forEach((c) => {
-			c.addEventListener("click", () => {
-				backdrop.querySelectorAll("[data-orphans-type]").forEach((o) => o.classList.toggle("is-active", o === c));
-				orphansTypeFilter = c.dataset.orphansType || "all";
-				renderOrphansList();
-			});
-		});
-		let orphansSearchTimer = 0;
-		orphansSearchInput?.addEventListener("input", () => {
-			clearTimeout(orphansSearchTimer);
-			orphansSearchTimer = setTimeout(() => {
-				orphansSearchQuery = orphansSearchInput.value.trim();
-				renderOrphansList();
-			}, 150);
-		});
-		function renderOrphansList() {
-			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
-			if (!orphansBox) return;
-			if (scannedOrphans === null) {
-				orphansControls.style.display = "none";
-				orphansBox.innerHTML = `<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
-				return;
-			}
-			if (!scannedOrphans.length) {
-				orphansControls.style.display = "none";
-				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
-				return;
-			}
-			orphansControls.style.display = "flex";
-			const filtered = scannedOrphans.filter((item) => {
-				if (orphansTypeFilter !== "all" && item.type.toLowerCase() !== orphansTypeFilter.toLowerCase()) return false;
-				if (orphansSearchQuery && !matchesSearch(item.title, item.malId, void 0, orphansSearchQuery)) return false;
-				return true;
-			});
-			if (!filtered.length) {
-				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
-				return;
-			}
-			orphansBox.innerHTML = filtered.map((item) => `
-        <div class="ala-ov-item" data-mal-id="${item.malId}">
-          <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://myanimelist.net/${item.type.toLowerCase()}/${item.malId}" target="_blank" rel="noopener" title="${item.title}">${item.title}</a>
-            <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${item.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${item.type}</span>
-              <span>MAL ID: <b>${item.malId}</b></span>
-            </div>
-          </div>
-          <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${item.malId}" data-type="${item.type}">Delete from MAL</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${item.malId}">Keep on MAL</button>
-          </div>
-        </div>
-      `).join("");
-			orphansBox.querySelectorAll(".ala-ov-btn-del-mal").forEach((btn) => {
-				btn.addEventListener("click", async () => {
-					const id = Number(btn.dataset.malId);
-					const type = btn.dataset.type || "ANIME";
-					if (!id) return;
-					if (!confirm(`Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`)) return;
-					btn.disabled = true;
-					btn.textContent = "Deleting...";
-					try {
-						await malDeleteEntry(type, id);
-						scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
-						renderOrphansList();
-					} catch (err) {
-						btn.disabled = false;
-						btn.textContent = "Delete from MAL";
-						alert(`Failed to delete from MAL: ${err?.message || err}`);
-					}
-				});
-			});
-			orphansBox.querySelectorAll(".ala-ov-btn-keep-mal").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = Number(btn.dataset.malId);
-					scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
-					renderOrphansList();
-				});
-			});
-		}
-		const scanOrphansBtn = backdrop.querySelector("#ala-ov-btn-scan-orphans");
-		scanOrphansBtn?.addEventListener("click", async () => {
-			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
-			scanOrphansBtn.disabled = true;
-			scanOrphansBtn.textContent = "Scanning...";
-			orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
-			try {
-				const viewer = await AniList.viewer();
-				if (!viewer) {
-					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
-					return;
-				}
-				const overrides = getManualOverrides();
-				const knownMalIds = new Set();
-				for (const t of ["ANIME", "MANGA"]) try {
-					const alEntries = await alFetchAll(viewer.id, t);
-					for (const e of alEntries) {
-						const ov = overrides[String(e.mediaId)];
-						if (ov) {
-							if (ov.malId > 0) knownMalIds.add(ov.malId);
-						} else {
-							const cached = stores[t].ids.data[e.mediaId]?.m;
-							if (cached && cached > 0) knownMalIds.add(cached);
-							else if (e.idMal > 0) knownMalIds.add(e.idMal);
-						}
-					}
-				} catch (e) {
-					console.warn(`[AL-Additions] Audit scan: failed to fetch AniList ${t}:`, e);
-				}
-				const foundOrphans = [];
-				for (const t of ["ANIME", "MANGA"]) try {
-					const malList = await malFetchList(t);
-					for (const [idStr, data] of Object.entries(malList)) {
-						const malId = Number(idStr);
-						if (malId > 0 && !knownMalIds.has(malId)) foundOrphans.push({
-							malId,
-							type: t,
-							title: data.__malTitle || `MAL #${malId}`
-						});
-					}
-				} catch (e) {
-					console.warn(`[AL-Additions] Audit scan: failed to fetch MAL ${t}:`, e);
-				}
-				scannedOrphans = foundOrphans;
-				renderOrphansList();
-			} catch (err) {
-				orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${err?.message || err}</div>`;
-			} finally {
-				scanOrphansBtn.disabled = false;
-				scanOrphansBtn.textContent = "Scan MAL";
-			}
-		});
-		const jsonTextarea = backdrop.querySelector("#ala-ov-json-textarea");
-		const jsonStatus = backdrop.querySelector("#ala-ov-json-status");
-		const jsonSaveBtn = backdrop.querySelector("#ala-ov-btn-json-save");
-		const jsonMergeBtn = backdrop.querySelector("#ala-ov-btn-json-merge");
-		const jsonCopyBtn = backdrop.querySelector("#ala-ov-btn-json-copy");
-		const jsonResetBtn = backdrop.querySelector("#ala-ov-btn-json-reset");
-		function renderJsonView() {
-			const current = getManualOverrides();
-			jsonTextarea.value = JSON.stringify(current, null, 2);
-			jsonStatus.style.display = "none";
-		}
-		jsonCopyBtn?.addEventListener("click", async () => {
-			try {
-				await navigator.clipboard.writeText(jsonTextarea.value);
-				const prev = jsonCopyBtn.textContent;
-				jsonCopyBtn.textContent = "Copied!";
-				setTimeout(() => {
-					jsonCopyBtn.textContent = prev;
-				}, 1500);
-			} catch (_) {
-				jsonTextarea.select();
-				document.execCommand("copy");
-				const prev = jsonCopyBtn.textContent;
-				jsonCopyBtn.textContent = "Copied!";
-				setTimeout(() => {
-					jsonCopyBtn.textContent = prev;
-				}, 1500);
-			}
-		});
-		jsonResetBtn?.addEventListener("click", renderJsonView);
-		jsonSaveBtn?.addEventListener("click", () => {
-			const res = importOverrides(jsonTextarea.value, "replace");
-			if (!res.success) {
-				jsonStatus.className = "ala-ov-status ala-ov-status--error";
-				jsonStatus.textContent = res.error || "Failed to parse JSON";
-				jsonStatus.style.display = "block";
-				return;
-			}
-			jsonStatus.className = "ala-ov-status ala-ov-status--success";
-			jsonStatus.textContent = `Successfully saved ${res.count ?? 0} overrides!`;
-			jsonStatus.style.display = "block";
-			renderList();
-		});
-		jsonMergeBtn?.addEventListener("click", () => {
-			const res = importOverrides(jsonTextarea.value, "merge");
-			if (!res.success) {
-				jsonStatus.className = "ala-ov-status ala-ov-status--error";
-				jsonStatus.textContent = res.error || "Failed to parse JSON";
-				jsonStatus.style.display = "block";
-				return;
-			}
-			const current = getManualOverrides();
-			jsonStatus.className = "ala-ov-status ala-ov-status--success";
-			jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
-			jsonStatus.style.display = "block";
-			jsonTextarea.value = JSON.stringify(current, null, 2);
-			renderList();
-		});
-		renderList();
-	}
-	defineFeature({
-		id: "nyaa",
-		key: "nyaaEnabled",
-		section: "External Links, Downloads & Mappings",
-		def: false,
-		legacy: [
-			"nyaaEnabled",
-			"malNyaaLinksEnabled",
-			"malNyaaEnabled"
-		],
-		title: "MyAnimeList & Nyaa Links",
-		help: "Show a MyAnimeList link, with Nyaa search available by Ctrl/Cmd-click on desktop or long-press on mobile.",
-		options: [{
-			key: "nyaaProviders",
-			type: "list",
-			def: ["SubsPlease", "ToonsHub"],
-			legacy: ["nyaaProviders", "nyaaSearchGroups"],
-			title: "Nyaa Search Providers",
-			help: "Comma-separated provider names to include in Nyaa searches. Defaults to SubsPlease and ToonsHub."
-		}]
-	}, () => {
-		const ID = "ala-find-on-nyaa";
-		const TITLE_SEL = ".page-content .header .content > h1";
-		const ICON = icon("external", 17);
-		addStyle("ala-nyaa-style", `#${ID},#ala-edit-mal-id{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}#${ID}{margin-left:10px}#ala-edit-mal-id{margin-left:6px;cursor:pointer}#${ID}:hover,#ala-edit-mal-id:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`);
-		const nyaaUrl = (title) => {
-			const q = title.trim().replace(/[^a-zA-Z0-9]+/g, "+").replace(/^\++|\++$/g, "");
-			const frag = Settings.get("nyaaProviders").map(encodeURIComponent).join("&text=");
-			return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
-		};
-		function attach(h1, route) {
-			const EDIT_ID = "ala-edit-mal-id";
-			const a = document.createElement("a");
-			a.id = ID;
-			a.href = "#";
-			a.title = isIgnored(route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
-			a.setAttribute("aria-label", "Open on MAL; long-press to search Nyaa");
-			a.innerHTML = ICON;
-			const titleText = () => [...h1.childNodes].filter((n) => n !== a && n?.id !== EDIT_ID).map((n) => n.textContent).join("").trim();
-			const searchNyaa = () => openTab(nyaaUrl(titleText()));
-			MediaData.get(route.id, route.type);
-			let timer = null;
-			let longPressed = false;
-			let sx = 0;
-			let sy = 0;
-			const cancel = () => {
-				if (timer) clearTimeout(timer);
-				timer = null;
-			};
-			a.addEventListener("touchstart", (e) => {
-				if (e.touches.length !== 1) return;
-				sx = e.touches[0].clientX;
-				sy = e.touches[0].clientY;
-				longPressed = false;
-				cancel();
-				timer = setTimeout(() => {
-					timer = null;
-					longPressed = true;
-					searchNyaa();
-					setTimeout(() => {
-						longPressed = false;
-					}, 800);
-				}, 550);
-			}, { passive: true });
-			a.addEventListener("touchmove", (e) => {
-				if (timer === null || !e.touches.length) return;
-				if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
-			}, { passive: true });
-			a.addEventListener("touchend", cancel, { passive: true });
-			a.addEventListener("touchcancel", cancel, { passive: true });
-			a.addEventListener("contextmenu", (e) => {
-				if (longPressed) e.preventDefault();
-			});
-			a.addEventListener("click", async (e) => {
-				e.preventDefault();
-				if (longPressed) {
-					longPressed = false;
-					e.stopPropagation();
-					return;
-				}
-				const w = window.open("about:blank", "_blank");
-				const title = titleText();
-				const nyaa = nyaaUrl(title);
-				let target = nyaa;
-				if (!e.ctrlKey && !e.metaKey) {
-					if (isIgnored(route.id)) target = nyaa;
-					else {
-						const media = await MediaData.get(route.id, route.type);
-						const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
-						if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
-						else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
-					}
-				}
-				if (w) {
-					w.opener = null;
-					w.location.href = target;
-				} else openTab(target);
-			});
-			h1.appendChild(a);
-			document.getElementById(EDIT_ID)?.remove();
-			const editBtn = document.createElement("a");
-			editBtn.id = EDIT_ID;
-			editBtn.href = "#";
-			editBtn.title = "Set or edit MyAnimeList mapping";
-			editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
-			editBtn.innerHTML = icon("edit", 16);
-			editBtn.addEventListener("click", (e) => {
-				e.preventDefault();
-				e.stopPropagation();
-				openQuickOverrideModal(route.id, route.type);
-			});
-			h1.appendChild(editBtn);
-		}
-		let token = 0;
-		let placedKey = null;
-		let placing = false;
-		async function place() {
-			const route = mediaRoute();
-			const key = route && `${route.type}:${route.id}`;
-			if (key && key === placedKey && document.getElementById(ID)) return;
-			document.getElementById(ID)?.remove();
-			document.getElementById("ala-edit-mal-id")?.remove();
-			placedKey = null;
-			if (!route) return;
-			const mine = ++token;
-			placing = true;
-			try {
-				const h1 = await Core.waitForSelector(TITLE_SEL, 8e3);
-				if (h1 && mine === token && mediaRoute()?.id === route.id && !document.getElementById(ID)) {
-					attach(h1, route);
-					placedKey = key;
-				}
-			} finally {
-				if (mine === token) placing = false;
-			}
-		}
-		const repair = debounce(() => {
-			if (placedKey && !placing && !document.getElementById(ID)) place();
-		}, 400);
-		place();
-		Core.onNavigate(place);
-		Core.onBodyMutation(repair);
-	});
-	defineModule({
-		id: "removeTitle",
-		key: "linkShortenerEnabled",
-		section: "AniList Enhancements",
-		layer: "preload",
-		requiresReload: true,
-		def: false,
-		legacy: [
-			"linkShortenerEnabled",
-			"shortAniListUrlsEnabled",
-			"shortAniListUrls"
-		],
-		title: "Short AniList URLs",
-		help: "Remove the title slug from AniList anime, manga, staff, and character URLs.",
-		setup(ctx) {
-			const SLUG_HREF = /^(?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/./;
-			const strip = (s) => s.replace(/^((?:https:\/\/anilist\.co)?\/(?:manga|anime|staff|character)\/\d{1,10}\/)[^/?#]+\/?(?=[?#]|$)/, "$1");
-			function fixLocation() {
-				if (!/anilist\.co\/(manga|anime|staff|character)\//.test(location.href) || !/\/\d{1,10}\/./.test(location.href)) return;
-				const cur = location.pathname + location.search + location.hash;
-				const next = strip(cur.replace(/^https:\/\/anilist\.co/, ""));
-				if (cur !== next) ctx.silently(() => history.replaceState(history.state, "", next));
-			}
-			function fixLinks(nodes) {
-				for (const node of Array.from(nodes)) {
-					if (node.nodeType !== 1) continue;
-					const el = node;
-					const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
-					for (const a of links) {
-						const href = a.getAttribute("href");
-						if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
-					}
-				}
-			}
-			fixLocation();
-			ctx.onNav(fixLocation);
-			ctx.onBodyMutation((muts) => {
-				for (const m of muts) if (m.addedNodes.length) fixLinks(m.addedNodes);
-			});
-			ctx.ready(() => fixLinks([document.body]));
-		}
-	});
-	var MODAL_CSS = `
-  #ala-pwd-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(5, 12, 20, 0.75);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
-    z-index: 100005;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-    box-sizing: border-box;
-  }
-  .ala-pwd-sheet {
-    width: 100%;
-    max-width: 420px;
-    background: rgb(var(--color-foreground, 31, 38, 49));
-    color: rgb(var(--color-text, 240, 243, 246));
-    border-radius: 10px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    animation: alaModalPop 0.15s ease-out;
-  }
-  @keyframes alaModalPop {
-    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
-    to { opacity: 1; transform: scale(1) translateY(0); }
-  }
-  .ala-pwd-desc {
-    margin: 0 0 16px;
-    font-size: 13px;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-    line-height: 1.45;
-  }
-  .ala-pwd-group {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .ala-pwd-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-  }
-  .ala-pwd-input-wrap {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: 100%;
-  }
-  .ala-pwd-field {
-    width: 100%;
-    height: 40px;
-    padding: 0 38px 0 12px;
-    border-radius: 6px;
-    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
-    background: rgb(var(--color-background, 15, 23, 42));
-    color: rgb(var(--color-text, 240, 243, 246));
-    font: inherit;
-    font-size: 14px;
-    box-sizing: border-box;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-  .ala-pwd-field:focus {
-    outline: none;
-    border-color: rgb(var(--color-blue, 61, 180, 242));
-    box-shadow: 0 0 0 2px rgba(var(--color-blue, 61, 180, 242), 0.25);
-  }
-  .ala-pwd-toggle {
-    position: absolute;
-    right: 4px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 32px;
-    height: 32px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: color 0.15s, background 0.15s;
-  }
-  .ala-pwd-toggle:hover {
-    color: rgb(var(--color-text, 240, 243, 246));
-    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.12);
-  }
-  .ala-pwd-error {
-    margin-top: 12px;
-    padding: 8px 12px;
-    border-radius: 6px;
-    background: rgba(var(--color-red, 224, 85, 85), 0.12);
-    border: 1px solid rgba(var(--color-red, 224, 85, 85), 0.3);
-    color: rgb(var(--color-red, 224, 85, 85));
-    font-size: 12px;
-    font-weight: 500;
-  }
-`;
-	var EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
-	var EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
-	function promptPasswordModal(options) {
-		return new Promise((resolve) => {
-			addStyle("ala-pwd-modal-style", MODAL_CSS);
-			const existing = document.getElementById("ala-pwd-backdrop");
-			if (existing) existing.remove();
-			const backdrop = document.createElement("div");
-			backdrop.id = "ala-pwd-backdrop";
-			backdrop.innerHTML = `
-      <div class="ala-sheet ala-pwd-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-pwd-title">
-        <header class="ala-sheet-head">
-          <h2 id="ala-pwd-title">${esc(options.title)}</h2>
-          <button class="ala-icon-btn ala-pwd-btn-close" type="button" aria-label="Close">✕</button>
-        </header>
-        <div class="ala-sheet-body">
-          ${options.description ? `<p class="ala-pwd-desc">${esc(options.description)}</p>` : ""}
-          <div class="ala-pwd-group">
-            <label for="ala-pwd-input-main" class="ala-pwd-label">Password</label>
-            <div class="ala-pwd-input-wrap">
-              <input
-                id="ala-pwd-input-main"
-                class="ala-pwd-field"
-                type="password"
-                placeholder="${esc(options.placeholder || "Enter password")}"
-                autocomplete="${options.confirm ? "new-password" : "current-password"}"
-              />
-              <button type="button" class="ala-pwd-toggle" title="Show / Hide password" aria-label="Toggle password visibility">
-                ${EYE_OPEN}
-              </button>
-            </div>
-          </div>
-          ${options.confirm ? `
-            <div class="ala-pwd-group" style="margin-top:12px">
-              <label for="ala-pwd-input-confirm" class="ala-pwd-label">Confirm Password</label>
-              <div class="ala-pwd-input-wrap">
-                <input
-                  id="ala-pwd-input-confirm"
-                  class="ala-pwd-field"
-                  type="password"
-                  placeholder="Re-enter password"
-                  autocomplete="new-password"
-                />
-              </div>
-            </div>
-          ` : ""}
-          <div class="ala-pwd-error" id="ala-pwd-err" style="display:none"></div>
-        </div>
-        <footer class="ala-sheet-foot">
-          <button class="ala-btn ala-btn--primary" id="ala-pwd-btn-submit" type="button">
-            ${esc(options.submitText || "Submit")}
-          </button>
-          <button class="ala-btn" id="ala-pwd-btn-cancel" type="button">
-            ${esc(options.cancelText || "Cancel")}
-          </button>
-        </footer>
-      </div>
-    `;
-			document.body.appendChild(backdrop);
-			const input = backdrop.querySelector("#ala-pwd-input-main");
-			const confirmInput = backdrop.querySelector("#ala-pwd-input-confirm");
-			const toggleBtn = backdrop.querySelector(".ala-pwd-toggle");
-			const errBox = backdrop.querySelector("#ala-pwd-err");
-			const submitBtn = backdrop.querySelector("#ala-pwd-btn-submit");
-			const cancelBtn = backdrop.querySelector("#ala-pwd-btn-cancel");
-			const closeBtn = backdrop.querySelector(".ala-pwd-btn-close");
-			let isVisible = false;
-			const cleanup = () => {
-				document.removeEventListener("keydown", onKeyDown);
-				backdrop.remove();
-			};
-			const cancel = () => {
-				cleanup();
-				resolve(null);
-			};
-			const submit = () => {
-				const val = input.value;
-				if (!options.allowEmpty && !val.trim()) {
-					errBox.textContent = "Password cannot be empty.";
-					errBox.style.display = "block";
-					input.focus();
-					return;
-				}
-				if (options.confirm && confirmInput) {
-					if (val && val !== confirmInput.value) {
-						errBox.textContent = "Passwords do not match.";
-						errBox.style.display = "block";
-						confirmInput.focus();
-						return;
-					}
-				}
-				cleanup();
-				resolve(val);
-			};
-			toggleBtn.addEventListener("click", () => {
-				isVisible = !isVisible;
-				const type = isVisible ? "text" : "password";
-				input.type = type;
-				if (confirmInput) confirmInput.type = type;
-				toggleBtn.innerHTML = isVisible ? EYE_OFF : EYE_OPEN;
-				toggleBtn.title = isVisible ? "Hide password" : "Show password";
-			});
-			submitBtn.addEventListener("click", submit);
-			cancelBtn.addEventListener("click", cancel);
-			closeBtn.addEventListener("click", cancel);
-			backdrop.addEventListener("click", (e) => {
-				if (e.target === backdrop) cancel();
-			});
-			const onKeyDown = (e) => {
-				if (e.key === "Escape") {
-					e.preventDefault();
-					cancel();
-				} else if (e.key === "Enter") {
-					e.preventDefault();
-					submit();
-				}
-			};
-			document.addEventListener("keydown", onKeyDown);
-			setTimeout(() => input.focus(), 50);
-		});
-	}
-	var BACKUP_FILENAME = "al-additions.settings";
-	var MAGIC_PLAIN = new Uint8Array([
-		65,
-		76,
-		65,
-		83
-	]);
-	var MAGIC_ENCRYPTED = new Uint8Array([
-		65,
-		76,
-		65,
-		69
-	]);
-	var SENSITIVE_KEYS = [
-		"mal_code_verifier",
-		"mal_token",
-		"mal_refresh_token",
-		"mal_expires_at"
-	];
-	var SESSION_CACHE_KEYS = [
-		"al_token",
-		"al_username",
-		"al_user_id",
-		"al_score_format"
-	];
-	var PBKDF2_ITERATIONS = 1e5;
-	function matchesMagic(bytes, magic) {
-		if (bytes.length < magic.length) return false;
-		for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic[i]) return false;
-		return true;
-	}
-	function base64ToUint8(b64) {
-		const binary = atob(b64.replace(/\s+/g, ""));
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-		return bytes;
-	}
-	async function deriveAesKey(password, salt) {
-		const enc = new TextEncoder();
-		const baseKey = await window.crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
-		return window.crypto.subtle.deriveKey({
-			name: "PBKDF2",
-			salt,
-			iterations: PBKDF2_ITERATIONS,
-			hash: "SHA-256"
-		}, baseKey, {
-			name: "AES-GCM",
-			length: 256
-		}, false, ["encrypt", "decrypt"]);
-	}
-	async function decryptData(cryptoData, password) {
-		const salt = base64ToUint8(cryptoData.salt);
-		const iv = base64ToUint8(cryptoData.iv);
-		const ciphertext = base64ToUint8(cryptoData.ciphertext);
-		const key = await deriveAesKey(password, salt);
-		const decryptedBuffer = await window.crypto.subtle.decrypt({
-			name: "AES-GCM",
-			iv
-		}, key, ciphertext);
-		return new TextDecoder().decode(decryptedBuffer);
-	}
-	async function compressDeflateRaw(data) {
-		const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-		const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
-		const buffer = await new Response(stream).arrayBuffer();
-		return new Uint8Array(buffer);
-	}
-	async function decompressDeflateRaw(data) {
-		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-		return await new Response(stream).text();
-	}
-	async function decompressGzip(data) {
-		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"));
-		return await new Response(stream).text();
-	}
-	async function createBackup(includeSecrets, password, overrides) {
-		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
-		const data = {};
-		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
-			data[r.key] = rawVal;
-		}
-		if (includeSecrets) for (const key of SENSITIVE_KEYS) {
-			const val = store$1.get(key, void 0);
-			if (val !== void 0 && val !== null) data[key] = val;
-		}
-		const plainPayload = {
-			version: 1,
-			exportedAt: Date.now(),
-			data
-		};
-		const jsonBytes = new TextEncoder().encode(JSON.stringify(plainPayload));
-		const compressedBytes = await compressDeflateRaw(jsonBytes);
-		if (password && password.trim().length > 0) {
-			const salt = window.crypto.getRandomValues(new Uint8Array(16));
-			const iv = window.crypto.getRandomValues(new Uint8Array(12));
-			const key = await deriveAesKey(password, salt);
-			const ciphertextBuffer = await window.crypto.subtle.encrypt({
-				name: "AES-GCM",
-				iv
-			}, key, compressedBytes);
-			const ciphertext = new Uint8Array(ciphertextBuffer);
-			const out = new Uint8Array(33 + ciphertext.length);
-			out.set(MAGIC_ENCRYPTED, 0);
-			out[4] = 1;
-			out.set(salt, 5);
-			out.set(iv, 21);
-			out.set(ciphertext, 33);
-			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
-			return out;
-		} else {
-			const out = new Uint8Array(5 + compressedBytes.length);
-			out.set(MAGIC_PLAIN, 0);
-			out[4] = 1;
-			out.set(compressedBytes, 5);
-			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
-			return out;
-		}
-	}
-	function createRawBackup(overrides) {
-		const data = {};
-		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
-			data[r.key] = rawVal;
-		}
-		for (const key of SENSITIVE_KEYS) {
-			const val = store$1.get(key, void 0);
-			if (val !== void 0 && val !== null) data[key] = val;
-		}
-		return JSON.stringify({
-			version: 1,
-			exportedAt: Date.now(),
-			data
-		}, null, 2);
-	}
-	function downloadBackupFile(bytes, filename = BACKUP_FILENAME) {
-		const blob = new Blob([bytes], { type: "application/octet-stream" });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = filename;
-		document.body.appendChild(a);
-		a.click();
-		a.remove();
-		setTimeout(() => URL.revokeObjectURL(url), 1e3);
-	}
-	function applyVersion1Settings(data) {
-		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
-		let applied = 0;
-		let secretsApplied = 0;
-		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
-		for (const [key, rawValue] of Object.entries(data)) {
-			if (SESSION_CACHE_KEYS.includes(key)) continue;
-			if (SENSITIVE_KEYS.includes(key)) {
-				if (rawValue !== void 0 && rawValue !== null) {
-					store$1.set(key, rawValue);
-					secretsApplied++;
-				}
-				continue;
-			}
-			const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
-			const r = ROWS[settingKey];
-			if (r) {
-				const normalized = TYPES$1[r.type].normalize(rawValue, r);
-				store$1.set(SETTING_PREFIX + settingKey, normalized);
-				applied++;
-			}
-		}
-		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
-		return {
-			applied,
-			secretsApplied
-		};
-	}
-	async function handleLegacyJsonBackup(jsonText, promptPassword) {
-		let payload;
-		try {
-			payload = JSON.parse(jsonText);
-		} catch {
-			throw new Error("Invalid backup file: corrupted JSON content.");
-		}
-		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
-		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
-		if (payload.encrypted === true) {
-			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
-			const password = await promptPassword("Enter password to decrypt your settings backup:");
-			if (password === null) return {
-				applied: 0,
-				secretsApplied: 0,
-				cancelled: true
-			};
-			if (!password) throw new Error("Password cannot be empty.");
-			let decryptedText;
-			try {
-				decryptedText = await decryptData(payload.crypto, password);
-			} catch {
-				throw new Error("Incorrect password or corrupted backup file.");
-			}
-			let data;
-			try {
-				data = JSON.parse(decryptedText);
-			} catch {
-				throw new Error("Decrypted content is not valid JSON.");
-			}
-			return applyVersion1Settings(data);
-		}
-		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
-	}
-	async function importBackup(fileInput, customPromptPassword) {
-		let bytes;
-		if (typeof fileInput === "string") bytes = new TextEncoder().encode(fileInput);
-		else bytes = fileInput;
-		if (!bytes || bytes.length === 0) throw new Error("Backup file is empty.");
-		const promptPassword = customPromptPassword || ((hint) => promptPasswordModal({
-			title: "Decrypt Settings Backup",
-			description: hint || "Enter your password to decrypt your settings backup:",
-			submitText: "Decrypt & Restore",
-			allowEmpty: false,
-			confirm: false,
-			placeholder: "Enter backup password"
-		}));
-		if (matchesMagic(bytes, MAGIC_ENCRYPTED)) {
-			if (bytes.length < 49) throw new Error("Invalid encrypted backup file: file is truncated.");
-			const version = bytes[4];
-			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
-			const password = await promptPassword("Enter password to decrypt your settings backup:");
-			if (password === null) return {
-				applied: 0,
-				secretsApplied: 0,
-				cancelled: true
-			};
-			if (!password) throw new Error("Password cannot be empty.");
-			const salt = bytes.subarray(5, 21);
-			const iv = bytes.subarray(21, 33);
-			const ciphertext = bytes.subarray(33);
-			const key = await deriveAesKey(password, salt);
-			let decryptedBuffer;
-			try {
-				decryptedBuffer = await window.crypto.subtle.decrypt({
-					name: "AES-GCM",
-					iv
-				}, key, ciphertext);
-			} catch {
-				throw new Error("Incorrect password or corrupted backup file.");
-			}
-			let jsonText;
-			try {
-				jsonText = await decompressDeflateRaw(new Uint8Array(decryptedBuffer));
-			} catch {
-				throw new Error("Corrupted decrypted data: failed to decompress.");
-			}
-			let payload;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				throw new Error("Decrypted content is not valid JSON.");
-			}
-			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
-		}
-		if (matchesMagic(bytes, MAGIC_PLAIN)) {
-			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
-			const version = bytes[4];
-			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
-			let jsonText;
-			try {
-				jsonText = await decompressDeflateRaw(bytes.subarray(5));
-			} catch {
-				throw new Error("Corrupted backup file: failed to decompress.");
-			}
-			let payload;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				throw new Error("Corrupted backup file: invalid JSON content.");
-			}
-			logDebug("[CORE]", "Imported plain binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
-		}
-		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
-			let jsonText;
-			try {
-				jsonText = await decompressGzip(bytes);
-			} catch {
-				throw new Error("Corrupted or invalid GZIP backup file.");
-			}
-			logDebug("[CORE]", "Imported legacy GZIP backup.");
-			return handleLegacyJsonBackup(jsonText, promptPassword);
-		}
-		let jsonText;
-		try {
-			jsonText = new TextDecoder().decode(bytes);
-		} catch {
-			throw new Error("Failed to decode backup file as UTF-8 text.");
-		}
-		logDebug("[CORE]", "Imported legacy JSON/text backup.");
-		return handleLegacyJsonBackup(jsonText, promptPassword);
-	}
-	async function readFileAsBytes(file) {
-		if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
-		return new Promise((resolve, reject) => {
-			const reader = new FileReader();
-			reader.onload = () => resolve(new Uint8Array(reader.result));
-			reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-			reader.readAsArrayBuffer(file);
-		});
 	}
 	var PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
@@ -12225,6 +11296,871 @@
 			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
 		});
 		renderTable(tiers);
+	}
+	var MODAL_ID = "ala-overrides-backdrop";
+	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
+	var OVERRIDES_CSS = `
+  #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
+  #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
+  .ala-ov-sheet *{box-sizing:border-box}
+  .ala-ov-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+  .ala-ov-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
+  .ala-ov-head h2{margin:0;font-size:18px;font-weight:600}
+  .ala-ov-body {flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable;}
+  .ala-ov-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+
+  .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
+  .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+  .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
+  .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
+
+  .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
+  .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
+  .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
+  .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
+  .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
+  .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
+
+  .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
+  .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
+
+  .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
+  .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
+  .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
+
+  .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
+  .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
+  .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
+  .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
+  .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
+  .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
+
+  .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+  .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+  .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
+  .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
+  .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
+
+  .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
+  .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
+
+  .ala-ov-list{display:grid;gap:8px;min-width:0;}
+  .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
+  .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
+  .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
+  .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
+  .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
+  .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
+  .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
+  .ala-ov-item-meta a:hover{text-decoration:underline}
+  .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
+
+  .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
+
+  .ala-ov-audit-section{margin-bottom:20px}
+  .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
+
+  @media (max-width:700px){
+    #${MODAL_ID}{align-items:flex-end;padding:0}
+    #${MODAL_ID} .ala-ov-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    #${QUICK_MODAL_ID}{align-items:flex-end;padding:0}
+    #${QUICK_MODAL_ID} .ala-ov-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+
+    .ala-ov-head{padding:14px 16px}
+    .ala-ov-body{padding:12px 16px}
+    .ala-ov-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
+    .ala-ov-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
+
+    .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
+    .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
+
+    .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
+    .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
+    .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
+    .ala-ov-filter-group{width:100%;flex-wrap:wrap}
+
+    .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
+    .ala-ov-item-cover{width:36px;height:48px}
+    .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
+    .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
+    .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
+    .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
+  }
+  `;
+	function ensureOverridesStyle() {
+		addStyle("ala-overrides-style", OVERRIDES_CSS);
+	}
+	function extractAlId(raw) {
+		const str = String(raw || "").trim();
+		const match = str.match(/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
+		return match ? Number(match[1]) : 0;
+	}
+	function extractMalId(raw) {
+		const str = String(raw || "").trim();
+		const match = str.match(/myanimelist\.net\/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
+		return match ? Number(match[1]) : 0;
+	}
+	function matchesSearch(text, id, extraId, query) {
+		if (!query) return true;
+		const q = query.trim().toLowerCase();
+		if (!q) return true;
+		if (String(id).includes(q)) return true;
+		if (extraId != null && String(extraId).includes(q)) return true;
+		const t = (text || "").toLowerCase();
+		if (t.includes(q)) return true;
+		let qIdx = 0;
+		for (let i = 0; i < t.length && qIdx < q.length; i++) if (t[i] === q[qIdx]) qIdx++;
+		return qIdx === q.length;
+	}
+	var unmatchedMetaCache = new Map();
+	async function batchFetchUnmatchedMeta(ids) {
+		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
+		if (!needed.length) return;
+		for (let i = 0; i < needed.length; i += 50) {
+			const batch = needed.slice(i, i + 50);
+			const q = `query ($ids: [Int]) {
+      Page(page: 1, perPage: 50) {
+        media(id_in: $ids) {
+          id
+          title { userPreferred english romaji }
+          coverImage { medium }
+        }
+      }
+    }`;
+			try {
+				const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
+				for (const m of list) {
+					const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
+					unmatchedMetaCache.set(m.id, {
+						title: t,
+						cover: m.coverImage?.medium
+					});
+				}
+			} catch (e) {
+				console.warn("[AL-Additions] Failed to batch fetch unmatched metadata:", e);
+				break;
+			}
+		}
+	}
+	function openOverridesModal() {
+		ensureOverridesStyle();
+		const existing = document.getElementById(MODAL_ID);
+		if (existing) existing.remove();
+		refreshStaleOverrides().then(() => {
+			if (document.getElementById(MODAL_ID)) renderList();
+		});
+		const backdrop = document.createElement("div");
+		backdrop.id = MODAL_ID;
+		backdrop.innerHTML = `
+    <div class="ala-ov-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-ov-modal-title">
+      <header class="ala-ov-head">
+        <h2 id="ala-ov-modal-title">Manual Mappings & Sync Audit</h2>
+        <button class="ala-icon-btn ala-ov-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-ov-body">
+        <div class="ala-ov-tabs">
+          <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
+          <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
+          <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
+        </div>
+
+        <div id="ala-ov-view-overrides">
+          <div class="ala-ov-form-box">
+            <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
+            <div class="ala-ov-field">
+              <label for="ala-ov-al-input">AniList Media ID or URL</label>
+              <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
+            </div>
+
+            <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
+
+            <div class="ala-ov-field">
+              <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
+              <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
+            </div>
+
+            <div class="ala-ov-form-actions">
+              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
+            </div>
+          </div>
+
+          <div class="ala-ov-controls">
+            <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
+            <div class="ala-ov-filter-groups">
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Status:</span>
+                <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
+                <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
+                <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
+              </div>
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Type:</span>
+                <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
+                <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
+                <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
+              </div>
+            </div>
+          </div>
+
+          <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
+          <div id="ala-ov-list" class="ala-ov-list"></div>
+        </div>
+
+        <div id="ala-ov-view-audit" style="display:none">
+          <div class="ala-ov-audit-section">
+            <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
+            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
+            <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
+              <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Type:</span>
+                <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
+                <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
+                <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
+              </div>
+            </div>
+            <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
+          </div>
+
+          <div class="ala-ov-audit-section" style="margin-top:24px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
+              <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
+            </div>
+            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
+            <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
+              <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
+              <div class="ala-ov-filter-group">
+                <span class="ala-ov-filter-label">Type:</span>
+                <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
+                <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
+                <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
+              </div>
+            </div>
+            <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
+          </div>
+        </div>
+
+        <div id="ala-ov-view-json" style="display:none">
+          <div class="ala-ov-form-box">
+            <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
+            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
+              View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
+            </p>
+            <div class="ala-ov-field">
+              <label for="ala-ov-json-textarea">Configuration JSON</label>
+              <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
+            </div>
+            <div id="ala-ov-json-status" class="ala-ov-status"></div>
+            <div class="ala-ov-form-actions">
+              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
+              <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer class="ala-ov-foot">
+        <button class="ala-btn ala-btn--primary ala-ov-close" type="button">Done</button>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const close = () => backdrop.remove();
+		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close();
+		});
+		const tabs = backdrop.querySelectorAll(".ala-ov-tab");
+		const viewOverrides = backdrop.querySelector("#ala-ov-view-overrides");
+		const viewAudit = backdrop.querySelector("#ala-ov-view-audit");
+		const viewJson = backdrop.querySelector("#ala-ov-view-json");
+		tabs.forEach((t) => {
+			t.addEventListener("click", () => {
+				tabs.forEach((o) => o.classList.toggle("is-active", o === t));
+				const target = t.dataset.tab;
+				viewOverrides.style.display = target === "overrides" ? "block" : "none";
+				viewAudit.style.display = target === "audit" ? "block" : "none";
+				viewJson.style.display = target === "json" ? "block" : "none";
+				if (target === "audit") renderAudit();
+				else if (target === "overrides") renderList();
+				else if (target === "json") renderJsonView();
+			});
+		});
+		let activePreview = null;
+		let statusFilter = "all";
+		let typeFilter = "all";
+		let searchQuery = "";
+		const alInput = backdrop.querySelector("#ala-ov-al-input");
+		const malInput = backdrop.querySelector("#ala-ov-mal-input");
+		const previewBox = backdrop.querySelector("#ala-ov-preview");
+		const listContainer = backdrop.querySelector("#ala-ov-list");
+		const countLabel = backdrop.querySelector("#ala-ov-count");
+		const searchInput = backdrop.querySelector("#ala-ov-search");
+		const updatePreviewUI = (loading = false) => {
+			if (loading) {
+				previewBox.style.display = "flex";
+				previewBox.innerHTML = `<span style="font-size:12px;color:rgb(var(--color-text-lighter))">Looking up AniList entry...</span>`;
+				return;
+			}
+			if (!activePreview) {
+				previewBox.style.display = "none";
+				previewBox.innerHTML = "";
+				malInput.placeholder = "e.g. 16498 or https://myanimelist.net/anime/16498";
+				return;
+			}
+			const { type, title, cover, detectedMalId } = activePreview;
+			previewBox.style.display = "flex";
+			previewBox.innerHTML = `
+      ${cover ? `<img class="ala-ov-preview-cover" src="${cover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+      <div class="ala-ov-preview-info">
+        <div class="ala-ov-preview-title">${title}</div>
+        <div class="ala-ov-preview-meta">
+          <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
+          ${detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+        </div>
+      </div>
+    `;
+			if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
+		};
+		let lookupTimer = 0;
+		const doLookup = async (id) => {
+			if (!id) {
+				activePreview = null;
+				updatePreviewUI();
+				return;
+			}
+			const existing = getManualOverrides()[String(id)];
+			if (existing) {
+				activePreview = {
+					mediaId: id,
+					type: existing.type,
+					title: existing.title,
+					cover: existing.cover,
+					detectedMalId: existing.malId > 0 ? existing.malId : void 0
+				};
+				if (existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
+				updatePreviewUI();
+			} else updatePreviewUI(true);
+			const q = `query ($id: Int) {
+      Media(id: $id) {
+        id
+        idMal
+        type
+        title { userPreferred english romaji }
+        coverImage { medium }
+      }
+    }`;
+			try {
+				const res = await AniList.query(q, { id });
+				if (extractAlId(alInput.value) !== id) return;
+				const m = res?.Media;
+				if (!m) {
+					if (!existing) {
+						activePreview = null;
+						updatePreviewUI();
+					}
+					return;
+				}
+				const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
+				activePreview = {
+					mediaId: m.id,
+					type: m.type === "MANGA" ? "MANGA" : "ANIME",
+					title: t,
+					cover: m.coverImage?.medium || existing?.cover,
+					detectedMalId: Number(m.idMal) || void 0
+				};
+				updatePreviewUI();
+				if (existing && existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
+			} catch (_) {
+				if (!existing && extractAlId(alInput.value) === id) {
+					activePreview = null;
+					updatePreviewUI();
+				}
+			}
+		};
+		alInput.addEventListener("input", () => {
+			clearTimeout(lookupTimer);
+			lookupTimer = setTimeout(() => {
+				const id = extractAlId(alInput.value);
+				doLookup(id);
+			}, 300);
+		});
+		const saveBtn = backdrop.querySelector("#ala-ov-btn-save");
+		const ignoreBtn = backdrop.querySelector("#ala-ov-btn-ignore");
+		const clearBtn = backdrop.querySelector("#ala-ov-btn-clear");
+		const clearForm = () => {
+			clearTimeout(lookupTimer);
+			alInput.value = "";
+			malInput.value = "";
+			activePreview = null;
+			updatePreviewUI();
+		};
+		clearBtn.addEventListener("click", clearForm);
+		saveBtn.addEventListener("click", () => {
+			const id = activePreview?.mediaId || extractAlId(alInput.value);
+			if (!id) return alert("Please enter a valid AniList ID or URL.");
+			let malId = extractMalId(malInput.value);
+			if (!malId && activePreview?.detectedMalId) malId = activePreview.detectedMalId;
+			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
+			const existing = getManualOverrides()[String(id)];
+			const title = activePreview?.title || existing?.title || `Media #${id}`;
+			const cover = activePreview?.cover || existing?.cover;
+			const type = activePreview?.type || existing?.type || "ANIME";
+			setOverride(id, {
+				malId,
+				type,
+				title,
+				cover
+			});
+			clearForm();
+			renderList();
+			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
+				const m = res?.Media;
+				if (m) {
+					const current = getManualOverrides();
+					if (current[String(id)]) {
+						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
+						const c = m.coverImage?.medium || current[String(id)].cover;
+						current[String(id)] = {
+							...current[String(id)],
+							title: t,
+							cover: c,
+							type: m.type === "MANGA" ? "MANGA" : "ANIME",
+							updatedAt: Date.now()
+						};
+						saveManualOverrides(current);
+						if (document.getElementById(MODAL_ID)) renderList();
+					}
+				}
+			}).catch(() => {});
+		});
+		ignoreBtn.addEventListener("click", () => {
+			const id = activePreview?.mediaId || extractAlId(alInput.value);
+			if (!id) return alert("Please enter a valid AniList ID or URL.");
+			const existing = getManualOverrides()[String(id)];
+			const title = activePreview?.title || existing?.title || `Media #${id}`;
+			const cover = activePreview?.cover || existing?.cover;
+			setOverride(id, {
+				malId: 0,
+				type: activePreview?.type || existing?.type || "ANIME",
+				title,
+				cover
+			});
+			clearForm();
+			renderList();
+			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
+				const m = res?.Media;
+				if (m) {
+					const current = getManualOverrides();
+					if (current[String(id)]) {
+						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
+						const c = m.coverImage?.medium || current[String(id)].cover;
+						current[String(id)] = {
+							...current[String(id)],
+							title: t,
+							cover: c,
+							type: m.type === "MANGA" ? "MANGA" : "ANIME",
+							updatedAt: Date.now()
+						};
+						saveManualOverrides(current);
+						if (document.getElementById(MODAL_ID)) renderList();
+					}
+				}
+			}).catch(() => {});
+		});
+		backdrop.querySelectorAll("[data-status-filter]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-status-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
+				statusFilter = c.dataset.statusFilter || "all";
+				renderList();
+			});
+		});
+		backdrop.querySelectorAll("[data-type-filter]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-type-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
+				typeFilter = c.dataset.typeFilter || "all";
+				renderList();
+			});
+		});
+		let searchTimer = 0;
+		searchInput?.addEventListener("input", () => {
+			clearTimeout(searchTimer);
+			searchTimer = setTimeout(() => {
+				searchQuery = searchInput.value.trim();
+				renderList();
+			}, 150);
+		});
+		function renderList() {
+			const all = getManualOverrides();
+			const entries = Object.entries(all).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+			const filtered = entries.filter(([idStr, o]) => {
+				if (statusFilter === "overrides" && o.malId === 0) return false;
+				if (statusFilter === "ignored" && o.malId > 0) return false;
+				if (typeFilter !== "all" && o.type.toLowerCase() !== typeFilter.toLowerCase()) return false;
+				if (searchQuery && !matchesSearch(o.title, idStr, o.malId > 0 ? o.malId : void 0, searchQuery)) return false;
+				return true;
+			});
+			countLabel.textContent = `Configured Entries (${entries.length}${filtered.length !== entries.length ? ` — showing ${filtered.length}` : ""})`;
+			if (!filtered.length) {
+				listContainer.innerHTML = `<div class="ala-ov-empty">No entries found matching this filter.</div>`;
+				return;
+			}
+			listContainer.innerHTML = filtered.map(([idStr, o]) => {
+				const id = Number(idStr);
+				const isIgnoredEntry = o.malId === 0;
+				const alUrl = `https://anilist.co/${o.type.toLowerCase()}/${id}`;
+				const malUrl = o.malId > 0 ? `https://myanimelist.net/${o.type.toLowerCase()}/${o.malId}` : "#";
+				return `
+        <div class="ala-ov-item" data-id="${id}">
+          ${o.cover ? `<img class="ala-ov-item-cover" src="${o.cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+          <div class="ala-ov-item-info">
+            <a class="ala-ov-item-title" href="${alUrl}" target="_blank" rel="noopener" title="${o.title}">${o.title}</a>
+            <div class="ala-ov-item-meta">
+              <span class="ala-ov-badge ${o.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${o.type}</span>
+              <span>AniList ID: <b>${id}</b></span>
+              ${isIgnoredEntry ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>` : `<span>MAL ID: <a href="${malUrl}" target="_blank" rel="noopener"><b>${o.malId}</b></a></span>`}
+            </div>
+          </div>
+          <div class="ala-ov-item-actions">
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${id}">Edit</button>
+            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${id}" title="Remove override">✕</button>
+          </div>
+        </div>
+      `;
+			}).join("");
+			listContainer.querySelectorAll(".ala-ov-btn-del").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					if (id) {
+						removeOverride(id);
+						if (activePreview?.mediaId === id) clearForm();
+						renderList();
+					}
+				});
+			});
+			listContainer.querySelectorAll(".ala-ov-btn-edit").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					if (id) {
+						alInput.value = String(id);
+						doLookup(id);
+						viewOverrides.scrollTop = 0;
+					}
+				});
+			});
+		}
+		let unmatchedTypeFilter = "all";
+		let unmatchedSearchQuery = "";
+		let orphansTypeFilter = "all";
+		let orphansSearchQuery = "";
+		const unmatchedControls = backdrop.querySelector("#ala-ov-unmatched-controls");
+		const unmatchedSearchInput = backdrop.querySelector("#ala-ov-unmatched-search");
+		backdrop.querySelectorAll("[data-unmatched-type]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-unmatched-type]").forEach((o) => o.classList.toggle("is-active", o === c));
+				unmatchedTypeFilter = c.dataset.unmatchedType || "all";
+				renderUnmatchedList();
+			});
+		});
+		let unmatchedSearchTimer = 0;
+		unmatchedSearchInput?.addEventListener("input", () => {
+			clearTimeout(unmatchedSearchTimer);
+			unmatchedSearchTimer = setTimeout(() => {
+				unmatchedSearchQuery = unmatchedSearchInput.value.trim();
+				renderUnmatchedList();
+			}, 150);
+		});
+		function getRawUnmatched() {
+			const configured = getManualOverrides();
+			const unmatched = [];
+			for (const t of ["ANIME", "MANGA"]) {
+				const data = stores[t].ids.data || {};
+				for (const [idStr, rec] of Object.entries(data)) {
+					const id = Number(idStr);
+					if (id > 0 && rec && rec.m === 0 && !configured[String(id)]) unmatched.push({
+						mediaId: id,
+						type: t
+					});
+				}
+			}
+			return unmatched;
+		}
+		function renderUnmatchedList() {
+			const unmatchedBox = backdrop.querySelector("#ala-ov-audit-unmatched");
+			const raw = getRawUnmatched();
+			if (!raw.length) {
+				unmatchedControls.style.display = "none";
+				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries found. All synced titles have MAL IDs or were resolved!</div>`;
+				return;
+			}
+			unmatchedControls.style.display = "flex";
+			const filtered = raw.filter(({ mediaId, type }) => {
+				if (unmatchedTypeFilter !== "all" && type.toLowerCase() !== unmatchedTypeFilter.toLowerCase()) return false;
+				const title = unmatchedMetaCache.get(mediaId)?.title || `Media #${mediaId}`;
+				if (unmatchedSearchQuery && !matchesSearch(title, mediaId, void 0, unmatchedSearchQuery)) return false;
+				return true;
+			});
+			if (!filtered.length) {
+				unmatchedBox.innerHTML = `<div class="ala-ov-empty">No unmatched entries match this filter.</div>`;
+				return;
+			}
+			unmatchedBox.innerHTML = filtered.map(({ mediaId, type }) => {
+				const meta = unmatchedMetaCache.get(mediaId);
+				const title = meta?.title || `Media #${mediaId}`;
+				const cover = meta?.cover;
+				return `
+        <div class="ala-ov-item" data-id="${mediaId}">
+          ${cover ? `<img class="ala-ov-item-cover" src="${cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+          <div class="ala-ov-item-info">
+            <a class="ala-ov-item-title" href="https://anilist.co/${type.toLowerCase()}/${mediaId}" target="_blank" rel="noopener" title="${title}">${title}</a>
+            <div class="ala-ov-item-meta">
+              <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
+              <span>AniList ID: <b>${mediaId}</b></span>
+            </div>
+          </div>
+          <div class="ala-ov-item-actions">
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${mediaId}">Set MAL ID</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${mediaId}" data-type="${type}">Ignore</button>
+          </div>
+        </div>
+      `;
+			}).join("");
+			unmatchedBox.querySelectorAll(".ala-ov-audit-set").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					tabs[0].click();
+					alInput.value = String(id);
+					doLookup(id);
+				});
+			});
+			unmatchedBox.querySelectorAll(".ala-ov-audit-ignore").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.id);
+					const type = btn.dataset.type || "ANIME";
+					const meta = unmatchedMetaCache.get(id);
+					setOverride(id, {
+						malId: 0,
+						type,
+						title: meta?.title || `Media #${id}`,
+						cover: meta?.cover
+					});
+					renderUnmatchedList();
+					renderList();
+				});
+			});
+		}
+		function renderAudit() {
+			renderUnmatchedList();
+			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
+			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds).then(() => {
+				renderUnmatchedList();
+			});
+			renderOrphansList();
+		}
+		let scannedOrphans = null;
+		const orphansControls = backdrop.querySelector("#ala-ov-orphans-controls");
+		const orphansSearchInput = backdrop.querySelector("#ala-ov-orphans-search");
+		backdrop.querySelectorAll("[data-orphans-type]").forEach((c) => {
+			c.addEventListener("click", () => {
+				backdrop.querySelectorAll("[data-orphans-type]").forEach((o) => o.classList.toggle("is-active", o === c));
+				orphansTypeFilter = c.dataset.orphansType || "all";
+				renderOrphansList();
+			});
+		});
+		let orphansSearchTimer = 0;
+		orphansSearchInput?.addEventListener("input", () => {
+			clearTimeout(orphansSearchTimer);
+			orphansSearchTimer = setTimeout(() => {
+				orphansSearchQuery = orphansSearchInput.value.trim();
+				renderOrphansList();
+			}, 150);
+		});
+		function renderOrphansList() {
+			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
+			if (!orphansBox) return;
+			if (scannedOrphans === null) {
+				orphansControls.style.display = "none";
+				orphansBox.innerHTML = `<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
+				return;
+			}
+			if (!scannedOrphans.length) {
+				orphansControls.style.display = "none";
+				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
+				return;
+			}
+			orphansControls.style.display = "flex";
+			const filtered = scannedOrphans.filter((item) => {
+				if (orphansTypeFilter !== "all" && item.type.toLowerCase() !== orphansTypeFilter.toLowerCase()) return false;
+				if (orphansSearchQuery && !matchesSearch(item.title, item.malId, void 0, orphansSearchQuery)) return false;
+				return true;
+			});
+			if (!filtered.length) {
+				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
+				return;
+			}
+			orphansBox.innerHTML = filtered.map((item) => `
+        <div class="ala-ov-item" data-mal-id="${item.malId}">
+          <div class="ala-ov-item-info">
+            <a class="ala-ov-item-title" href="https://myanimelist.net/${item.type.toLowerCase()}/${item.malId}" target="_blank" rel="noopener" title="${item.title}">${item.title}</a>
+            <div class="ala-ov-item-meta">
+              <span class="ala-ov-badge ${item.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${item.type}</span>
+              <span>MAL ID: <b>${item.malId}</b></span>
+            </div>
+          </div>
+          <div class="ala-ov-item-actions">
+            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${item.malId}" data-type="${item.type}">Delete from MAL</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${item.malId}">Keep on MAL</button>
+          </div>
+        </div>
+      `).join("");
+			orphansBox.querySelectorAll(".ala-ov-btn-del-mal").forEach((btn) => {
+				btn.addEventListener("click", async () => {
+					const id = Number(btn.dataset.malId);
+					const type = btn.dataset.type || "ANIME";
+					if (!id) return;
+					if (!confirm(`Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`)) return;
+					btn.disabled = true;
+					btn.textContent = "Deleting...";
+					try {
+						await malDeleteEntry(type, id);
+						scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
+						renderOrphansList();
+					} catch (err) {
+						btn.disabled = false;
+						btn.textContent = "Delete from MAL";
+						alert(`Failed to delete from MAL: ${err?.message || err}`);
+					}
+				});
+			});
+			orphansBox.querySelectorAll(".ala-ov-btn-keep-mal").forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const id = Number(btn.dataset.malId);
+					scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
+					renderOrphansList();
+				});
+			});
+		}
+		const scanOrphansBtn = backdrop.querySelector("#ala-ov-btn-scan-orphans");
+		scanOrphansBtn?.addEventListener("click", async () => {
+			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
+			scanOrphansBtn.disabled = true;
+			scanOrphansBtn.textContent = "Scanning...";
+			orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
+			try {
+				const viewer = await AniList.viewer();
+				if (!viewer) {
+					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
+					return;
+				}
+				const overrides = getManualOverrides();
+				const knownMalIds = new Set();
+				for (const t of ["ANIME", "MANGA"]) try {
+					const alEntries = await alFetchAll(viewer.id, t);
+					for (const e of alEntries) {
+						const ov = overrides[String(e.mediaId)];
+						if (ov) {
+							if (ov.malId > 0) knownMalIds.add(ov.malId);
+						} else {
+							const cached = stores[t].ids.data[e.mediaId]?.m;
+							if (cached && cached > 0) knownMalIds.add(cached);
+							else if (e.idMal > 0) knownMalIds.add(e.idMal);
+						}
+					}
+				} catch (e) {
+					console.warn(`[AL-Additions] Audit scan: failed to fetch AniList ${t}:`, e);
+				}
+				const foundOrphans = [];
+				for (const t of ["ANIME", "MANGA"]) try {
+					const malList = await malFetchList(t);
+					for (const [idStr, data] of Object.entries(malList)) {
+						const malId = Number(idStr);
+						if (malId > 0 && !knownMalIds.has(malId)) foundOrphans.push({
+							malId,
+							type: t,
+							title: data.__malTitle || `MAL #${malId}`
+						});
+					}
+				} catch (e) {
+					console.warn(`[AL-Additions] Audit scan: failed to fetch MAL ${t}:`, e);
+				}
+				scannedOrphans = foundOrphans;
+				renderOrphansList();
+			} catch (err) {
+				orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${err?.message || err}</div>`;
+			} finally {
+				scanOrphansBtn.disabled = false;
+				scanOrphansBtn.textContent = "Scan MAL";
+			}
+		});
+		const jsonTextarea = backdrop.querySelector("#ala-ov-json-textarea");
+		const jsonStatus = backdrop.querySelector("#ala-ov-json-status");
+		const jsonSaveBtn = backdrop.querySelector("#ala-ov-btn-json-save");
+		const jsonMergeBtn = backdrop.querySelector("#ala-ov-btn-json-merge");
+		const jsonCopyBtn = backdrop.querySelector("#ala-ov-btn-json-copy");
+		const jsonResetBtn = backdrop.querySelector("#ala-ov-btn-json-reset");
+		function renderJsonView() {
+			const current = getManualOverrides();
+			jsonTextarea.value = JSON.stringify(current, null, 2);
+			jsonStatus.style.display = "none";
+		}
+		jsonCopyBtn?.addEventListener("click", async () => {
+			try {
+				await navigator.clipboard.writeText(jsonTextarea.value);
+				const prev = jsonCopyBtn.textContent;
+				jsonCopyBtn.textContent = "Copied!";
+				setTimeout(() => {
+					jsonCopyBtn.textContent = prev;
+				}, 1500);
+			} catch (_) {
+				jsonTextarea.select();
+				document.execCommand("copy");
+				const prev = jsonCopyBtn.textContent;
+				jsonCopyBtn.textContent = "Copied!";
+				setTimeout(() => {
+					jsonCopyBtn.textContent = prev;
+				}, 1500);
+			}
+		});
+		jsonResetBtn?.addEventListener("click", renderJsonView);
+		jsonSaveBtn?.addEventListener("click", () => {
+			const res = importOverrides(jsonTextarea.value, "replace");
+			if (!res.success) {
+				jsonStatus.className = "ala-ov-status ala-ov-status--error";
+				jsonStatus.textContent = res.error || "Failed to parse JSON";
+				jsonStatus.style.display = "block";
+				return;
+			}
+			jsonStatus.className = "ala-ov-status ala-ov-status--success";
+			jsonStatus.textContent = `Successfully saved ${res.count ?? 0} overrides!`;
+			jsonStatus.style.display = "block";
+			renderList();
+		});
+		jsonMergeBtn?.addEventListener("click", () => {
+			const res = importOverrides(jsonTextarea.value, "merge");
+			if (!res.success) {
+				jsonStatus.className = "ala-ov-status ala-ov-status--error";
+				jsonStatus.textContent = res.error || "Failed to parse JSON";
+				jsonStatus.style.display = "block";
+				return;
+			}
+			const current = getManualOverrides();
+			jsonStatus.className = "ala-ov-status ala-ov-status--success";
+			jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
+			jsonStatus.style.display = "block";
+			jsonTextarea.value = JSON.stringify(current, null, 2);
+			renderList();
+		});
+		renderList();
 	}
 	var PINNED_FIRST = ["Sync", "General"];
 	var PINNED_LAST = ["Advanced"];
