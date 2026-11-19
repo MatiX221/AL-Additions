@@ -5,8 +5,6 @@ import { openTab, debounce } from '../../utils/helpers';
 import { getEffectiveMalId, isIgnored } from '../../api/malOverrides';
 import type { MediaRoute } from '../../types';
 
-type QuickOverrideService = (mediaId: number, mediaType?: 'ANIME' | 'MANGA') => void | Promise<void>;
-
 const ID = 'ala-find-on-nyaa';
 const EDIT_ID = 'ala-edit-mal-id';
 const STYLE_ID = 'ala-nyaa-style';
@@ -47,8 +45,7 @@ defineModule({
     let disposed = false;
     let activeTimerCleanup: (() => void) | null = null;
     let attachedAnchor: { h1: HTMLElement; route: MediaRoute } | null = null;
-    let quickEditFn: QuickOverrideService | null =
-      ctx.services.get<QuickOverrideService>('manualOverrides:quickEdit') ?? null;
+    let quickEditFn = ctx.services.get('manualOverrides:quickEdit') ?? null;
 
     const mountEditButton = (h1: HTMLElement, route: MediaRoute): void => {
       document.getElementById(EDIT_ID)?.remove();
@@ -68,7 +65,7 @@ defineModule({
       h1.appendChild(editBtn);
     };
 
-    ctx.services.onAvailable<QuickOverrideService>('manualOverrides:quickEdit', (impl) => {
+    ctx.services.onAvailable('manualOverrides:quickEdit', (impl) => {
       quickEditFn = impl;
       if (attachedAnchor) {
         mountEditButton(attachedAnchor.h1, attachedAnchor.route);

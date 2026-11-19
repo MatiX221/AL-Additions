@@ -87,8 +87,17 @@ export interface FeatureMeta {
   standalone?: ModuleStandaloneDef;
 }
 
-export interface ModuleMeta {
-  id: string;
+export interface EventMap {}
+export interface ServiceMap {}
+
+export type EventArgs<P> = [P] extends [void] ? [] : undefined extends P ? [payload?: P] : [payload: P];
+
+export type LocalServices<TId extends string> = {
+  [K in keyof ServiceMap as K extends `${TId}:${infer Local}` ? Local : never]: ServiceMap[K];
+};
+
+export interface ModuleMeta<TId extends string = string> {
+  id: TId;
   key: string;
   legacy?: string[];
   section?: string;
@@ -104,7 +113,7 @@ export interface ModuleMeta {
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
   migrate?: () => void;
-  setup: (ctx: FeatureContext) => void | Promise<void>;
+  setup: (ctx: ScopedFeatureContext<TId>) => void | Promise<void>;
 }
 
 export interface RegisteredFeature {
@@ -277,6 +286,17 @@ export interface HttpRequestOptions {
   [key: string]: any;
 }
 
+export interface FeatureServices {
+  provide(localName: never, impl: never): CleanupFn;
+  get<K extends keyof ServiceMap>(fullName: K): ServiceMap[K] | undefined;
+  onAvailable<K extends keyof ServiceMap>(fullName: K, cb: (impl: ServiceMap[K]) => void | CleanupFn): CleanupFn;
+}
+
+export interface FeatureEvents {
+  emit<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void;
+  on<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn;
+}
+
 export interface FeatureContext {
   readonly id: string;
   get: <T = any>(key: string) => T;
@@ -328,21 +348,23 @@ export interface FeatureContext {
     error: (msg: string, opts?: { durationMs?: number; closeTab?: boolean }) => void;
   };
   menuCommand: (label: string, onClick: () => void) => CleanupFn;
-  services: {
-    provide: <T = any>(localName: string, impl: T) => CleanupFn;
-    get: <T = any>(fullName: string) => T | undefined;
-    onAvailable: <T = any>(fullName: string, cb: (impl: T) => void | CleanupFn) => CleanupFn;
-  };
-  events: {
-    emit: (event: string, payload?: any) => void;
-    on: (event: string, cb: (payload?: any) => void) => CleanupFn;
-  };
+  services: FeatureServices;
+  events: FeatureEvents;
   hooks: CoreHooksApi;
   debug: {
     enabled: () => boolean;
     log: (...args: any[]) => void;
   };
   setStandalonePaused: (paused: boolean) => void;
+}
+
+export interface ScopedFeatureContext<TId extends string> extends FeatureContext {
+  readonly id: TId;
+  services: {
+    provide<K extends keyof LocalServices<TId>>(localName: K, impl: LocalServices<TId>[K]): CleanupFn;
+    get<K extends keyof ServiceMap>(fullName: K): ServiceMap[K] | undefined;
+    onAvailable<K extends keyof ServiceMap>(fullName: K, cb: (impl: ServiceMap[K]) => void | CleanupFn): CleanupFn;
+  };
 }
 
 export interface MediaRoute {

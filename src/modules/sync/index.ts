@@ -14,6 +14,15 @@ import { initSyncPanel, renderPanel } from './panel';
 import { configureOverridesModalStyle, openQuickOverrideModal, openOverridesModal } from './overridesModal';
 import { initDeletionInterceptor } from './deletionInterceptor';
 
+declare module '../../types' {
+  interface ServiceMap {
+    'manualOverrides:quickEdit': (mediaId: number, mediaType?: SyncMediaType) => void | Promise<void>;
+  }
+  interface EventMap {
+    'manualOverrides:changed': number;
+  }
+}
+
 const SYNC_DATA_KEYS = [
   ...ANILIST_SESSION_KEYS,
   'sync_schema',

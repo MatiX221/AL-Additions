@@ -490,48 +490,50 @@
 		services = new Map();
 		watchers = new Map();
 		provide(name, impl) {
-			this.services.set(name, impl);
-			const subs = this.watchers.get(name);
+			const key = String(name);
+			this.services.set(key, impl);
+			const subs = this.watchers.get(key);
 			if (subs) for (const entry of [...subs]) {
 				this.runCleanup(entry);
 				try {
 					const res = entry.cb(impl);
 					entry.cleanup = typeof res === "function" ? res : null;
 				} catch (e) {
-					console.error(`[AL-Additions] Service watcher for "${name}" failed:`, e);
+					console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
 				}
 			}
 			return () => {
-				if (this.services.get(name) !== impl) return;
-				this.services.delete(name);
-				const currentSubs = this.watchers.get(name);
+				if (this.services.get(key) !== impl) return;
+				this.services.delete(key);
+				const currentSubs = this.watchers.get(key);
 				if (currentSubs) for (const entry of [...currentSubs]) this.runCleanup(entry);
 			};
 		}
 		get(name) {
-			return this.services.get(name);
+			return this.services.get(String(name));
 		}
 		onAvailable(name, cb) {
+			const key = String(name);
 			const entry = {
 				cb,
 				cleanup: null
 			};
-			let subs = this.watchers.get(name);
+			let subs = this.watchers.get(key);
 			if (!subs) {
 				subs = new Set();
-				this.watchers.set(name, subs);
+				this.watchers.set(key, subs);
 			}
 			subs.add(entry);
-			if (this.services.has(name)) try {
-				const res = cb(this.services.get(name));
+			if (this.services.has(key)) try {
+				const res = cb(this.services.get(key));
 				entry.cleanup = typeof res === "function" ? res : null;
 			} catch (e) {
-				console.error(`[AL-Additions] Service watcher for "${name}" failed:`, e);
+				console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
 			}
 			return () => {
 				this.runCleanup(entry);
 				subs?.delete(entry);
-				if (subs && subs.size === 0) this.watchers.delete(name);
+				if (subs && subs.size === 0) this.watchers.delete(key);
 			};
 		}
 		runCleanup(entry) {
@@ -547,25 +549,28 @@
 	};
 	var EventBusImpl = class {
 		listeners = new Map();
-		emit(event, payload) {
-			const set = this.listeners.get(event);
+		emit(event, ...args) {
+			const key = String(event);
+			const set = this.listeners.get(key);
 			if (!set) return;
+			const [payload] = args;
 			for (const cb of [...set]) try {
 				cb(payload);
 			} catch (e) {
-				console.error(`[AL-Additions] Event listener for "${event}" failed:`, e);
+				console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
 			}
 		}
 		on(event, cb) {
-			let set = this.listeners.get(event);
+			const key = String(event);
+			let set = this.listeners.get(key);
 			if (!set) {
 				set = new Set();
-				this.listeners.set(event, set);
+				this.listeners.set(key, set);
 			}
 			set.add(cb);
 			return () => {
 				set?.delete(cb);
-				if (set && set.size === 0) this.listeners.delete(event);
+				if (set && set.size === 0) this.listeners.delete(key);
 			};
 		}
 	};
@@ -1571,12 +1576,12 @@
 			},
 			menuCommand: (label, onClick) => track(registerMenuCommand(label, onClick)),
 			services: {
-				provide: (localName, impl) => track(ServiceRegistry.provide(`${rec.id}:${localName}`, impl)),
+				provide: (localName, impl) => track(ServiceRegistry.provide(`${rec.id}:${String(localName)}`, impl)),
 				get: (fullName) => ServiceRegistry.get(fullName),
 				onAvailable: (fullName, cb) => track(ServiceRegistry.onAvailable(fullName, cb))
 			},
 			events: {
-				emit: (event, payload) => EventBus.emit(event, payload),
+				emit: (event, ...args) => EventBus.emit(event, ...args),
 				on: (event, cb) => track(EventBus.on(event, cb))
 			},
 			hooks: trackedHooks,

@@ -17,7 +17,8 @@ import {
   type ModuleMeta,
   type ModuleStatus,
   type MountSpec,
-  type RouteContext
+  type RouteContext,
+  type ServiceMap
 } from '../types';
 import { isDebug, logDebug, persistent, registerDebugChannel, store } from '../utils/helpers';
 import {
@@ -688,12 +689,13 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     },
     menuCommand: (label, onClick) => track(registerMenuCommand(label, onClick)),
     services: {
-      provide: (localName, impl) => track(ServiceRegistry.provide(`${rec.id}:${localName}`, impl)),
+      provide: (localName, impl) =>
+        track(ServiceRegistry.provide(`${rec.id}:${String(localName)}` as keyof ServiceMap, impl as never)),
       get: (fullName) => ServiceRegistry.get(fullName),
       onAvailable: (fullName, cb) => track(ServiceRegistry.onAvailable(fullName, cb))
     },
     events: {
-      emit: (event, payload) => EventBus.emit(event, payload),
+      emit: (event, ...args) => EventBus.emit(event, ...args),
       on: (event, cb) => track(EventBus.on(event, cb))
     },
     hooks: trackedHooks,
@@ -792,7 +794,7 @@ function registerRecord(rec: ModuleRecord): void {
   });
 }
 
-export function defineModule(meta: ModuleMeta): void {
+export function defineModule<const TId extends string>(meta: ModuleMeta<TId>): void {
   if (!ID_RE.test(meta.id)) {
     console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
     invalidIds.set(meta.id, { active: false, reason: 'invalid-id' });
@@ -850,7 +852,7 @@ export function defineModule(meta: ModuleMeta): void {
     debugChannel: meta.debug?.channel || meta.id,
     standalone: meta.standalone,
     migrate: meta.migrate,
-    setup: meta.setup,
+    setup: meta.setup as (ctx: FeatureContext) => void | Promise<void>,
     invalidId: false,
     idCollision: false,
     standalonePaused: false,

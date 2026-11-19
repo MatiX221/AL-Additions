@@ -2,10 +2,13 @@ import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import type {
   CleanupFn,
   CoreHooksApi,
+  EventArgs,
+  EventMap,
   FastLoadCacheBridge,
   GqlFetchEvent,
   GqlFetchListener,
-  RpcBlocker
+  RpcBlocker,
+  ServiceMap
 } from '../types';
 
 class ServiceRegistryImpl {
@@ -18,9 +21,10 @@ class ServiceRegistryImpl {
     }>
   >();
 
-  provide<T>(name: string, impl: T): CleanupFn {
-    this.services.set(name, impl);
-    const subs = this.watchers.get(name);
+  provide<K extends keyof ServiceMap>(name: K, impl: ServiceMap[K]): CleanupFn {
+    const key = String(name);
+    this.services.set(key, impl);
+    const subs = this.watchers.get(key);
     if (subs) {
       for (const entry of [...subs]) {
         this.runCleanup(entry);
@@ -28,14 +32,14 @@ class ServiceRegistryImpl {
           const res = entry.cb(impl);
           entry.cleanup = typeof res === 'function' ? res : null;
         } catch (e) {
-          console.error(`[AL-Additions] Service watcher for "${name}" failed:`, e);
+          console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
         }
       }
     }
     return () => {
-      if (this.services.get(name) !== impl) return;
-      this.services.delete(name);
-      const currentSubs = this.watchers.get(name);
+      if (this.services.get(key) !== impl) return;
+      this.services.delete(key);
+      const currentSubs = this.watchers.get(key);
       if (currentSubs) {
         for (const entry of [...currentSubs]) {
           this.runCleanup(entry);
@@ -44,35 +48,39 @@ class ServiceRegistryImpl {
     };
   }
 
-  get<T>(name: string): T | undefined {
-    return this.services.get(name) as T | undefined;
+  get<K extends keyof ServiceMap>(name: K): ServiceMap[K] | undefined {
+    return this.services.get(String(name)) as ServiceMap[K] | undefined;
   }
 
-  onAvailable<T>(name: string, cb: (impl: T) => void | CleanupFn): CleanupFn {
+  onAvailable<K extends keyof ServiceMap>(
+    name: K,
+    cb: (impl: ServiceMap[K]) => void | CleanupFn
+  ): CleanupFn {
+    const key = String(name);
     const entry = {
       cb,
       cleanup: null as CleanupFn | null
     };
-    let subs = this.watchers.get(name);
+    let subs = this.watchers.get(key);
     if (!subs) {
       subs = new Set();
-      this.watchers.set(name, subs);
+      this.watchers.set(key, subs);
     }
     subs.add(entry);
 
-    if (this.services.has(name)) {
+    if (this.services.has(key)) {
       try {
-        const res = cb(this.services.get(name) as T);
+        const res = cb(this.services.get(key) as ServiceMap[K]);
         entry.cleanup = typeof res === 'function' ? res : null;
       } catch (e) {
-        console.error(`[AL-Additions] Service watcher for "${name}" failed:`, e);
+        console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
       }
     }
 
     return () => {
       this.runCleanup(entry);
       subs?.delete(entry);
-      if (subs && subs.size === 0) this.watchers.delete(name);
+      if (subs && subs.size === 0) this.watchers.delete(key);
     };
   }
 
@@ -91,28 +99,31 @@ class ServiceRegistryImpl {
 class EventBusImpl {
   private readonly listeners = new Map<string, Set<(payload?: any) => void>>();
 
-  emit(event: string, payload?: any): void {
-    const set = this.listeners.get(event);
+  emit<K extends keyof EventMap>(event: K, ...args: EventArgs<EventMap[K]>): void {
+    const key = String(event);
+    const set = this.listeners.get(key);
     if (!set) return;
+    const [payload] = args;
     for (const cb of [...set]) {
       try {
         cb(payload);
       } catch (e) {
-        console.error(`[AL-Additions] Event listener for "${event}" failed:`, e);
+        console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
       }
     }
   }
 
-  on(event: string, cb: (payload?: any) => void): CleanupFn {
-    let set = this.listeners.get(event);
+  on<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn {
+    const key = String(event);
+    let set = this.listeners.get(key);
     if (!set) {
       set = new Set();
-      this.listeners.set(event, set);
+      this.listeners.set(key, set);
     }
     set.add(cb);
     return () => {
       set?.delete(cb);
-      if (set && set.size === 0) this.listeners.delete(event);
+      if (set && set.size === 0) this.listeners.delete(key);
     };
   }
 }

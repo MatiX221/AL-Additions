@@ -421,7 +421,7 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
           vi.useRealTimers();
         }
 
-        ctx.events.on('ping', (payload) => log.push(`event:${payload}`));
+        (ctx.events as any).on('ping', (payload: unknown) => log.push(`event:${payload}`));
         ctx.menuCommand('Test Menu Cmd', () => log.push('cmd:v1'));
 
         ctx.onRoute(/\/anime\/\d+/, (rc) => {
@@ -834,5 +834,45 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     settings.Settings.set('manualOverridesEnabled', false);
     registry.createModuleHost().reload(['manualOverrides']);
     expect(document.getElementById('ala-edit-mal-id')).toBeNull();
+  });
+
+  it('enforces compile-time EventMap and ServiceMap key/payload contracts without runtime overhead', async () => {
+    const { registry, settings, bus } = await loadFreshKernel();
+    await import('../src/modules/sync');
+
+    let receivedId: number | undefined;
+    const unsubEvent = bus.EventBus.on('manualOverrides:changed', (id) => {
+      receivedId = id;
+    });
+    bus.EventBus.emit('manualOverrides:changed', 4242);
+    expect(receivedId).toBe(4242);
+    unsubEvent();
+
+    let checked = false;
+    registry.defineModule({
+      id: 'typedConsumer',
+      key: 'typedConsumerEnabled',
+      title: 'Typed Consumer',
+      help: 'Type-checks EventMap and ServiceMap',
+      setup(ctx) {
+        checked = true;
+        const svc = ctx.services.get('manualOverrides:quickEdit');
+        expect(svc).toBeUndefined();
+
+        if (false as boolean) {
+          // @ts-expect-error unknown event key
+          ctx.events.emit('nonexistent:event', 1);
+          // @ts-expect-error mismatched payload type
+          ctx.events.emit('manualOverrides:changed', 'wrong-type');
+          // @ts-expect-error unknown service key
+          ctx.services.get('manualOverrides:nonexistent');
+          // @ts-expect-error typedConsumer cannot provide manualOverrides's service
+          ctx.services.provide('quickEdit', () => {});
+        }
+      }
+    });
+    settings.Settings.set('typedConsumerEnabled', true);
+    registry.startModules(false);
+    expect(checked).toBe(true);
   });
 });
