@@ -193,7 +193,9 @@ defineModule({
   setup(ctx) {
     ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
     ctx.services.provide('quickEdit', (mediaId: number, mediaType: SyncMediaType = 'ANIME') =>
-      openQuickOverrideModal(mediaId, mediaType, ctx.addStyle)
+      openQuickOverrideModal(mediaId, mediaType, ctx.addStyle, () =>
+        ctx.events.emit('manualOverrides:changed', mediaId)
+      )
     );
   }
 });

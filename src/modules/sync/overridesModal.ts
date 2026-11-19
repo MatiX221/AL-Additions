@@ -213,7 +213,8 @@ async function batchFetchUnmatchedMeta(ids: number[]): Promise<void> {
 export async function openQuickOverrideModal(
   mediaId: number,
   mediaType: SyncMediaType = 'ANIME',
-  addStyleFn?: (id: string, css: string) => void
+  addStyleFn?: (id: string, css: string) => void,
+  onUpdated?: () => void
 ): Promise<void> {
   ensureOverridesStyle(addStyleFn);
   const existing = document.getElementById(QUICK_MODAL_ID);
@@ -334,6 +335,7 @@ export async function openQuickOverrideModal(
       title: loadedTitle,
       cover: loadedCover
     });
+    onUpdated?.();
     close();
   });
 
@@ -344,11 +346,13 @@ export async function openQuickOverrideModal(
       title: loadedTitle,
       cover: loadedCover
     });
+    onUpdated?.();
     close();
   });
 
   removeBtn?.addEventListener('click', () => {
     removeOverride(mediaId);
+    onUpdated?.();
     close();
   });
 }

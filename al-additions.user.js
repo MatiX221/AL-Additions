@@ -8134,6 +8134,12 @@
 					document.getElementById(EDIT_ID)?.remove();
 				};
 			});
+			ctx.events.on("manualOverrides:changed", (changedId) => {
+				const linkEl = document.getElementById(ID);
+				if (!linkEl || !attachedAnchor) return;
+				if (changedId && Number(changedId) !== attachedAnchor.route.id) return;
+				linkEl.title = isIgnored(attachedAnchor.route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
+			});
 			function attach(h1, route) {
 				activeTimerCleanup?.();
 				const a = document.createElement("a");
@@ -9969,7 +9975,7 @@
 			}
 		}
 	}
-	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", addStyleFn) {
+	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", addStyleFn, onUpdated) {
 		ensureOverridesStyle(addStyleFn);
 		const existing = document.getElementById(QUICK_MODAL_ID);
 		if (existing) existing.remove();
@@ -10060,6 +10066,7 @@
 				title: loadedTitle,
 				cover: loadedCover
 			});
+			onUpdated?.();
 			close();
 		});
 		ignoreBtn.addEventListener("click", () => {
@@ -10069,10 +10076,12 @@
 				title: loadedTitle,
 				cover: loadedCover
 			});
+			onUpdated?.();
 			close();
 		});
 		removeBtn?.addEventListener("click", () => {
 			removeOverride(mediaId);
+			onUpdated?.();
 			close();
 		});
 	}
@@ -11135,7 +11144,7 @@
 		},
 		setup(ctx) {
 			ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
-			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx.addStyle));
+			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx.addStyle, () => ctx.events.emit("manualOverrides:changed", mediaId)));
 		}
 	});
 	defineModule({

@@ -81,6 +81,15 @@ defineModule({
       };
     });
 
+    ctx.events.on('manualOverrides:changed', (changedId) => {
+      const linkEl = document.getElementById(ID);
+      if (!linkEl || !attachedAnchor) return;
+      if (changedId && Number(changedId) !== attachedAnchor.route.id) return;
+      linkEl.title = isIgnored(attachedAnchor.route.id)
+        ? 'Marked as AniList-Only (searches Nyaa)'
+        : 'Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)';
+    });
+
     function attach(h1: HTMLElement, route: MediaRoute): void {
       activeTimerCleanup?.();
       const a = document.createElement('a');

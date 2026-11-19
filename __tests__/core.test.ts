@@ -450,6 +450,21 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
 
     expect(document.getElementById('ctx-test-mount')).not.toBeNull();
 
+    // ctx.mount repairs removed DOM elements after body mutation batch
+    vi.useFakeTimers();
+    try {
+      document.getElementById('ctx-test-mount')!.remove();
+      expect(document.getElementById('ctx-test-mount')).toBeNull();
+      const trigger = document.createElement('span');
+      document.body.appendChild(trigger);
+      await Promise.resolve();
+      vi.advanceTimersByTime(60);
+      expect(document.getElementById('ctx-test-mount')).not.toBeNull();
+      trigger.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+
     // Events broadcast & menu command update without duplicate GM_registerMenuCommand
     capturedCtx.events.emit('ping', 'hello');
     capturedCtx.menuCommand('Test Menu Cmd', () => log.push('cmd:v2'));
@@ -580,6 +595,24 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
       unsub();
     } finally {
       (globalThis as any).unsafeWindow = origUnsafe;
+    }
+
+    // CoreHooks __alaCoreMirror resilience when page locks __alaCoreMirror
+    const origMirrorDesc = Object.getOwnPropertyDescriptor(globalThis, '__alaCoreMirror');
+    Object.defineProperty(globalThis, '__alaCoreMirror', {
+      value: Object.freeze({ locked: true }),
+      writable: false,
+      configurable: true
+    });
+    try {
+      expect(() => bus.CoreHooks.setSessionClearing(true)).not.toThrow();
+      expect(() => bus.CoreHooks.setSessionClearing(false)).not.toThrow();
+    } finally {
+      if (origMirrorDesc) {
+        Object.defineProperty(globalThis, '__alaCoreMirror', origMirrorDesc);
+      } else {
+        delete (globalThis as any).__alaCoreMirror;
+      }
     }
 
     // MAL toast fallback renders core toast without throwing when uiSink is null
@@ -737,5 +770,69 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     expect(rawRow.style.display).toBe('');
 
     panel.closePanel();
+
+    // Error badge/note rendering when a module fails to boot
+    registry.defineModule({
+      id: 'panelErrorMod',
+      key: 'panelErrorEnabled',
+      title: 'Failing Feature',
+      help: 'Fails',
+      setup() {
+        throw new Error('panel failure test');
+      }
+    });
+    settings.Settings.set('panelErrorEnabled', true);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      registry.startModules(false);
+    } finally {
+      errSpy.mockRestore();
+    }
+    panel.showPanel(host);
+    expect(document.querySelector('[data-feature="panelErrorMod"] .ala-badge--error')?.textContent).toBe('Error');
+    expect(document.querySelector('[data-feature="panelErrorMod"] .ala-error-note')?.textContent).toContain(
+      'panel failure test'
+    );
+    panel.closePanel();
+  });
+
+  it('wires nyaa quick-edit service and manualOverrides:changed tooltip updates cleanly', async () => {
+    const { registry, settings, malOverrides, helpers, bus } = await loadFreshKernel();
+    await import('../src/modules/sync');
+    await import('../src/modules/nyaa');
+
+    helpers.store.set(
+      'ala_syncManualOverrides',
+      { '16498': { malId: 16498, type: 'ANIME', title: 'AoT', updatedAt: 1 } }
+    );
+    document.body.innerHTML = '<div class="page-content"><div class="header"><div class="content"><h1>Attack on Titan</h1></div></div></div>';
+    history.replaceState({}, '', '/anime/16498');
+
+    settings.Settings.set('nyaaEnabled', true);
+    settings.Settings.set('manualOverridesEnabled', false);
+    registry.startModules(false);
+
+    // Wait for ctx.waitForSelector immediate resolution in nyaa
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.getElementById('ala-find-on-nyaa')).not.toBeNull();
+    expect(document.getElementById('ala-edit-mal-id')).toBeNull();
+
+    // Enabling manualOverrides attaches #ala-edit-mal-id live
+    settings.Settings.set('manualOverridesEnabled', true);
+    registry.createModuleHost().reload(['manualOverrides']);
+    expect(document.getElementById('ala-edit-mal-id')).not.toBeNull();
+
+    // Ignoring via override + emitting change refreshes tooltip live
+    const nyaaLink = document.getElementById('ala-find-on-nyaa') as HTMLAnchorElement;
+    malOverrides.setOverride(16498, { malId: 0, type: 'ANIME', title: 'AoT' });
+    bus.EventBus.emit('manualOverrides:changed', 16498);
+    expect(nyaaLink.title).toBe('Marked as AniList-Only (searches Nyaa)');
+
+    // Disabling manualOverrides removes #ala-edit-mal-id cleanly
+    settings.Settings.set('manualOverridesEnabled', false);
+    registry.createModuleHost().reload(['manualOverrides']);
+    expect(document.getElementById('ala-edit-mal-id')).toBeNull();
   });
 });
