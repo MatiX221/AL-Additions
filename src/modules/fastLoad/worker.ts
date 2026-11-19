@@ -25,7 +25,19 @@ import { store as gmStore, logDebug } from '../../utils/helpers';
 
 export const workerPending = new WeakMap<
   object,
-  Map<string, { key: string | null; mutation: boolean; epoch?: number; extraKeys?: string[] }>
+  Map<
+    string,
+    {
+      key: string | null;
+      mutation: boolean;
+      epoch?: number;
+      extraKeys?: string[];
+      url?: string;
+      query?: string;
+      variables?: Record<string, any>;
+      operationName?: string;
+    }
+  >
 >();
 export const watched = new WeakSet<object>();
 export let workerUrl: string | null = null;
@@ -125,7 +137,21 @@ export const onIn = function (this: any, ev: MessageEvent) {
   if (d.result) {
     extractUsersFromRpcResult(d.result);
   }
-  if (p.mutation) return clearGlobalCache();
+  if (p.mutation) {
+    if (coreHooks?.hasGqlFetchSubscribers() && p.query) {
+      coreHooks.emitGqlFetch({
+        phase: 'response',
+        url: p.url || '/graphql',
+        query: p.query,
+        variables: p.variables || {},
+        operationName: p.operationName,
+        status: d.error == null ? 200 : 500,
+        ok: d.error == null,
+        data: d.result?.data ?? d.result
+      });
+    }
+    return clearGlobalCache();
+  }
   if (p.key && d.error == null && p.epoch === rpcEpoch) {
     attempt(() => {
       const cached = { time: Date.now(), msg: clone(d) };
@@ -460,12 +486,26 @@ export function hookWorker(yielded: () => boolean) {
           }
           if (isMutation(q)) {
             clearGlobalCache();
+            const queryStr = String(q.query || '');
+            const varsObj = q.variables && typeof q.variables === 'object' ? q.variables : {};
+            const opMatch = queryStr.match(/^\s*(?:query|mutation|subscription)\s+([A-Za-z_]\w*)/);
+            const operationName = opMatch ? opMatch[1] : undefined;
+            const url = String(data.params[0] || '/graphql');
+            if (coreHooks?.hasGqlFetchSubscribers() && queryStr) {
+              coreHooks.emitGqlFetch({
+                phase: 'request',
+                url,
+                query: queryStr,
+                variables: varsObj,
+                operationName
+              });
+            }
             let pMap = workerPending.get(this);
             if (!pMap) {
               pMap = new Map();
               workerPending.set(this, pMap);
             }
-            pMap.set(id, { key: null, mutation: true });
+            pMap.set(id, { key: null, mutation: true, url, query: queryStr, variables: varsObj, operationName });
           } else if (!isVolatile(q)) {
             const key = rpcKey(data.params);
             const label = String(q.query).replace(/\s+/g, ' ').slice(0, 50);

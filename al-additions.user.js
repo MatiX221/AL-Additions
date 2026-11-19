@@ -5215,7 +5215,19 @@
 		pMap.delete(id);
 		logDebug("[FASTLOAD RPC] IN", id, Object.keys(d));
 		if (d.result) extractUsersFromRpcResult(d.result);
-		if (p.mutation) return clearGlobalCache();
+		if (p.mutation) {
+			if (coreHooks?.hasGqlFetchSubscribers() && p.query) coreHooks.emitGqlFetch({
+				phase: "response",
+				url: p.url || "/graphql",
+				query: p.query,
+				variables: p.variables || {},
+				operationName: p.operationName,
+				status: d.error == null ? 200 : 500,
+				ok: d.error == null,
+				data: d.result?.data ?? d.result
+			});
+			return clearGlobalCache();
+		}
 		if (p.key && d.error == null && p.epoch === rpcEpoch) attempt(() => {
 			const cached = {
 				time: Date.now(),
@@ -5543,6 +5555,18 @@
 						});
 						if (isMutation(q)) {
 							clearGlobalCache();
+							const queryStr = String(q.query || "");
+							const varsObj = q.variables && typeof q.variables === "object" ? q.variables : {};
+							const opMatch = queryStr.match(/^\s*(?:query|mutation|subscription)\s+([A-Za-z_]\w*)/);
+							const operationName = opMatch ? opMatch[1] : void 0;
+							const url = String(data.params[0] || "/graphql");
+							if (coreHooks?.hasGqlFetchSubscribers() && queryStr) coreHooks.emitGqlFetch({
+								phase: "request",
+								url,
+								query: queryStr,
+								variables: varsObj,
+								operationName
+							});
 							let pMap = workerPending.get(this);
 							if (!pMap) {
 								pMap = new Map();
@@ -5550,7 +5574,11 @@
 							}
 							pMap.set(id, {
 								key: null,
-								mutation: true
+								mutation: true,
+								url,
+								query: queryStr,
+								variables: varsObj,
+								operationName
 							});
 						} else if (!isVolatile(q)) {
 							const key = rpcKey(data.params);
@@ -5853,7 +5881,7 @@
 		const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
 		const opName = parsed.operationName || (isMediaListQuery(parsed) ? "MediaListCollection" : "query");
 		logDebug("[FASTLOAD] Cache MISS (network fetch):", opName, "key:", key);
-		const original = nativeFetch(input, init);
+		const original = trackedNativeFetch(nativeFetch, job, input, init);
 		const snapshot = original.then(async (res) => {
 			note429(res);
 			if (res.status !== 200) {
@@ -5899,6 +5927,39 @@
 			return toResponse(stale);
 		});
 	}
+	function trackedNativeFetch(nativeFetch, job, input, init) {
+		const subscribeActive = coreHooks?.hasGqlFetchSubscribers();
+		const { desc, parsed } = job;
+		const query = String(parsed?.query || "");
+		const variables = parsed?.variables && typeof parsed.variables === "object" ? parsed.variables : {};
+		const operationName = typeof parsed?.operationName === "string" ? parsed.operationName : void 0;
+		const url = String(desc?.url || "");
+		if (subscribeActive && query) coreHooks.emitGqlFetch({
+			phase: "request",
+			url,
+			query,
+			variables,
+			operationName
+		});
+		const p = nativeFetch(input, init);
+		if (subscribeActive && query) p.then(async (res) => {
+			let data = void 0;
+			try {
+				data = (await res.clone().json())?.data;
+			} catch {}
+			coreHooks?.emitGqlFetch({
+				phase: "response",
+				url,
+				query,
+				variables,
+				operationName,
+				status: res.status,
+				ok: res.ok,
+				data
+			});
+		}, () => {});
+		return p;
+	}
 	function installGraphQLLayer(yielded) {
 		const nativeFetch = win.fetch.bind(win);
 		const wrappedFetch = async function fetch(input, init) {
@@ -5911,7 +5972,7 @@
 			stats.graphqlRequests++;
 			if (job.mutation) {
 				clearGlobalCache();
-				const p = nativeFetch(input, init);
+				const p = trackedNativeFetch(nativeFetch, job, input, init);
 				p.then((res) => {
 					note429(res);
 					clearGlobalCache();
@@ -5919,7 +5980,7 @@
 				return p;
 			}
 			if (job.bypass) {
-				const p = nativeFetch(input, init);
+				const p = trackedNativeFetch(nativeFetch, job, input, init);
 				p.then(note429, () => {});
 				return p;
 			}
@@ -6341,6 +6402,7 @@
 				if (yieldedToStandalone) return true;
 				if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
 					yieldedToStandalone = true;
+					ctx.hooks.markFetchOwner(false);
 					ctx.setStandalonePaused(true);
 					console.warn("[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.");
 				}
@@ -6388,7 +6450,11 @@
 			});
 			if (CFG.gqlTtl > 0 && typeof win.fetch === "function") {
 				const uninstallFetch = installGraphQLLayer(yielded);
-				ctx.onCleanup(uninstallFetch);
+				ctx.hooks.markFetchOwner(true);
+				ctx.onCleanup(() => {
+					ctx.hooks.markFetchOwner(false);
+					uninstallFetch();
+				});
 				hookWorker(yielded);
 			}
 			if (CFG.coalesceObservers) attempt(installObserverCoalescing);

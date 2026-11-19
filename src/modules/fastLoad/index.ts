@@ -74,6 +74,7 @@ defineModule({
       if (yieldedToStandalone) return true;
       if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
         yieldedToStandalone = true;
+        ctx.hooks.markFetchOwner(false);
         ctx.setStandalonePaused(true);
         console.warn(
           '[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.'
@@ -131,7 +132,11 @@ defineModule({
 
     if (CFG.gqlTtl > 0 && typeof win.fetch === 'function') {
       const uninstallFetch = installGraphQLLayer(yielded);
-      ctx.onCleanup(uninstallFetch);
+      ctx.hooks.markFetchOwner(true);
+      ctx.onCleanup(() => {
+        ctx.hooks.markFetchOwner(false);
+        uninstallFetch();
+      });
       hookWorker(yielded);
     }
     if (CFG.coalesceObservers) attempt(installObserverCoalescing);

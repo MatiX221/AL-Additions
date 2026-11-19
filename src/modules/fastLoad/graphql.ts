@@ -315,7 +315,7 @@ export function cachedFetch(nativeFetch: any, job: any, input: any, init?: Reque
   const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
   const opName = parsed.operationName || (isMediaListQuery(parsed) ? 'MediaListCollection' : 'query');
   logDebug('[FASTLOAD] Cache MISS (network fetch):', opName, 'key:', key);
-  const original = nativeFetch(input, init);
+  const original = trackedNativeFetch(nativeFetch, job, input, init);
 
   const snapshot = original.then(async (res: Response) => {
     note429(res);
@@ -379,6 +379,52 @@ export function cachedFetch(nativeFetch: any, job: any, input: any, init?: Reque
   );
 }
 
+function trackedNativeFetch(nativeFetch: any, job: any, input: any, init?: RequestInit): Promise<Response> {
+  const subscribeActive = coreHooks?.hasGqlFetchSubscribers();
+  const { desc, parsed } = job;
+  const query = String(parsed?.query || '');
+  const variables = parsed?.variables && typeof parsed.variables === 'object' ? parsed.variables : {};
+  const operationName = typeof parsed?.operationName === 'string' ? parsed.operationName : undefined;
+  const url = String(desc?.url || '');
+
+  if (subscribeActive && query) {
+    coreHooks!.emitGqlFetch({
+      phase: 'request',
+      url,
+      query,
+      variables,
+      operationName
+    });
+  }
+
+  const p: Promise<Response> = nativeFetch(input, init);
+
+  if (subscribeActive && query) {
+    p.then(
+      async (res: Response) => {
+        let data: any = undefined;
+        try {
+          const json = await res.clone().json();
+          data = json?.data;
+        } catch {}
+        coreHooks?.emitGqlFetch({
+          phase: 'response',
+          url,
+          query,
+          variables,
+          operationName,
+          status: res.status,
+          ok: res.ok,
+          data
+        });
+      },
+      () => {}
+    );
+  }
+
+  return p;
+}
+
 export function installGraphQLLayer(yielded: () => boolean): () => void {
   const nativeFetch = win.fetch.bind(win);
 
@@ -395,7 +441,7 @@ export function installGraphQLLayer(yielded: () => boolean): () => void {
 
     if (job.mutation) {
       clearGlobalCache();
-      const p = nativeFetch(input, init);
+      const p = trackedNativeFetch(nativeFetch, job, input, init);
       p.then(
         (res: Response) => {
           note429(res);
@@ -406,7 +452,7 @@ export function installGraphQLLayer(yielded: () => boolean): () => void {
       return p;
     }
     if (job.bypass) {
-      const p = nativeFetch(input, init);
+      const p = trackedNativeFetch(nativeFetch, job, input, init);
       p.then(note429, () => {});
       return p;
     }
