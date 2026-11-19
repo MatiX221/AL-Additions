@@ -41,21 +41,23 @@ const CSS = `
   #ala-settings-panel h2,#ala-settings-panel h3{margin:0;font-family:inherit}
 
   .ala-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 10px}
-  .ala-sheet-head h2{font-size:18px;font-weight:700}
-  .ala-sheet-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 20px 12px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .ala-sheet-head h2{font-size:19px;font-weight:600;line-height:1.3}
+  .ala-sheet-body{flex:1 1 auto;min-height:0;padding:0 20px 8px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
   .ala-sheet-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-status{margin-left:auto;font-size:12px;color:rgb(var(--color-text-lighter))}
-  .ala-status.is-error{color:rgb(var(--color-red,224,85,85))}
+  .ala-status{flex:1 1 160px;color:rgb(var(--color-text-lighter));font-size:12px;transition:color .15s}
+  .ala-status.is-error{color:rgb(var(--color-red,224,85,85));font-weight:600}
 
-  .ala-section-title{margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:rgb(var(--color-text-lighter))}
+  #ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
   .ala-section{border-radius:6px;background:rgb(var(--color-background));overflow:hidden}
-  .ala-section-dropdown{margin-top:22px}
-  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;list-style:none;cursor:pointer;padding:6px 2px;user-select:none}
+  .ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}
+  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;min-height:48px;cursor:pointer;user-select:none;list-style:none;transition:background .15s}
   .ala-section-summary::-webkit-details-marker{display:none}
-  .ala-section-summary .ala-section-title{margin:0}
-  .ala-chevron{display:inline-flex;align-items:center;color:rgb(var(--color-text-lighter));transition:transform .2s cubic-bezier(0.4,0,0.2,1);transform:rotate(-90deg)}
-  .ala-section-dropdown.is-expanded>.ala-section-summary .ala-chevron{transform:rotate(0deg)}
-  .ala-section-collapsible{margin-top:6px}
+  .ala-section-summary:hover{background:rgba(var(--color-text-lighter),.06)}
+  .ala-section-summary:focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:-2px}
+  .ala-section-summary .ala-section-title{margin:0!important;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
+  .ala-chevron{display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--color-text-lighter));transition:transform .22s cubic-bezier(0.4,0,0.2,1);will-change:transform}
+  .ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}
+  .ala-section-collapsible .ala-collapsible-inner{border-top:1px solid rgba(var(--color-text-lighter),.12)}
 
   .ala-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden}
   .ala-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
@@ -433,7 +435,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       const r = ROWS[el.dataset.key!];
       if (!r) return;
       if (el.dataset.standaloneLocked) return;
-      const val = TYPES[r.type].read(el);
+      const val = TYPES[r.type].normalize(TYPES[r.type].read(el), r);
       const serialized = JSON.stringify(val);
       if (serialized !== baseline.vals[r.key]) {
         changed.push({ key: r.key, value: val });

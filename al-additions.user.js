@@ -5182,6 +5182,7 @@
 	var isTaxonomyQuery = (parsed) => /\bGenreCollection\b|\bMediaTagCollection\b/i.test(String(parsed?.query || ""));
 	var isMediaListQuery = (parsed) => /\bMediaListCollection\b/i.test(String(parsed?.query || ""));
 	var isViewerQuery = (parsed) => /\bViewer\b/i.test(String(parsed?.query || ""));
+	var isUserQuery = (parsed) => /\bUser\s*\(/i.test(String(parsed?.query || "")) && !isVolatile(parsed);
 	var isMutation = (parsed) => /\bmutation\b/i.test(String(parsed?.query || "").replace(/#[^\n\r]*/g, " "));
 	var isVolatile = (parsed) => /\b(?:notifications|activities|Activity|Notification)\s*\(/.test(String(parsed?.query || "").replace(/#[^\n\r]*/g, " "));
 	var noStore = (d) => d.cache === "no-store" || d.cache === "reload" || !!d.headers.get("cache-control")?.toLowerCase().includes("no-store");
@@ -5674,8 +5675,9 @@
 									}
 								}
 							} else {
+								const rpcTtl = isViewerQuery(q) || isTaxonomyQuery(q) ? 3e5 : isUserQuery(q) ? 6e4 : 15e3;
 								const h = rpcCache.get(key);
-								if (h && h.time >= freshFloor && Date.now() - h.time < 15e3) hit = h;
+								if (h && h.time >= freshFloor && Date.now() - h.time < rpcTtl) hit = h;
 								flying = rpcInflight.get(key);
 							}
 							if (hit) {
@@ -5891,10 +5893,10 @@
 			bypass
 		};
 	}
-	function cachedFetch(nativeFetch, job, input, init, replay = false) {
+	function cachedFetch(nativeFetch, job, input, init, alflMode) {
 		const { desc, parsed } = job;
 		if (init?.signal?.aborted) return nativeFetch(input, init);
-		if (!replay) attempt(() => rememberQuery(desc, parsed));
+		if (!(alflMode === true || alflMode === "replay" || alflMode === "internal")) attempt(() => rememberQuery(desc, parsed));
 		const blocker = win.__ALFL_RPC_BLOCK__;
 		if (coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) || typeof blocker === "function" && blocker(parsed?.query, parsed?.variables)) {
 			logDebug("[FASTLOAD] Blocked GQL fetch:", JSON.stringify(parsed?.variables));
@@ -5952,7 +5954,7 @@
 		const myEpoch = epoch;
 		const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
 		const opName = parsed.operationName || (isMediaListQuery(parsed) ? "MediaListCollection" : "query");
-		logDebug("[FASTLOAD] Cache MISS (network fetch):", opName, "key:", key);
+		logDebug(alflMode === "replay" ? "[FASTLOAD] Cache MISS (prefetch fetch):" : "[FASTLOAD] Cache MISS (network fetch):", opName, "key:", key);
 		const original = trackedNativeFetch(nativeFetch, job, input, init);
 		const snapshot = original.then(async (res) => {
 			note429(res);
@@ -6056,7 +6058,7 @@
 				p.then(note429, () => {});
 				return p;
 			}
-			return cachedFetch(nativeFetch, job, input, init, init?.__alfl === "replay");
+			return cachedFetch(nativeFetch, job, input, init, init?.__alfl);
 		};
 		win.fetch = wrappedFetch;
 		return () => {
@@ -6137,7 +6139,7 @@
 		return count;
 	}
 	var learned = new Map();
-	var ROUTES_KEY = "alfl:routes:v3";
+	var ROUTES_KEY = "alfl:routes:v4";
 	var ROUTES_TTL = 2592e6;
 	var persistTimer = 0;
 	var persistRoutes = () => {
@@ -6157,6 +6159,7 @@
 		attempt(() => {
 			win.localStorage?.removeItem("alfl:routes:v1");
 			win.localStorage?.removeItem("alfl:routes:v2");
+			win.localStorage?.removeItem("alfl:routes:v3");
 			const raw = win.localStorage?.getItem(ROUTES_KEY);
 			if (raw) {
 				const now = Date.now();
@@ -7455,7 +7458,8 @@
 					body: JSON.stringify({
 						query: q,
 						variables
-					})
+					}),
+					__alfl: "internal"
 				});
 			} catch (e) {
 				if (retries > 0) {
@@ -12521,21 +12525,23 @@
   #ala-settings-panel h2,#ala-settings-panel h3{margin:0;font-family:inherit}
 
   .ala-sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 10px}
-  .ala-sheet-head h2{font-size:18px;font-weight:700}
-  .ala-sheet-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 20px 12px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .ala-sheet-head h2{font-size:19px;font-weight:600;line-height:1.3}
+  .ala-sheet-body{flex:1 1 auto;min-height:0;padding:0 20px 8px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
   .ala-sheet-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-status{margin-left:auto;font-size:12px;color:rgb(var(--color-text-lighter))}
-  .ala-status.is-error{color:rgb(var(--color-red,224,85,85))}
+  .ala-status{flex:1 1 160px;color:rgb(var(--color-text-lighter));font-size:12px;transition:color .15s}
+  .ala-status.is-error{color:rgb(var(--color-red,224,85,85));font-weight:600}
 
-  .ala-section-title{margin:22px 0 8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:rgb(var(--color-text-lighter))}
+  #ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
   .ala-section{border-radius:6px;background:rgb(var(--color-background));overflow:hidden}
-  .ala-section-dropdown{margin-top:22px}
-  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;list-style:none;cursor:pointer;padding:6px 2px;user-select:none}
+  .ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}
+  .ala-section-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;min-height:48px;cursor:pointer;user-select:none;list-style:none;transition:background .15s}
   .ala-section-summary::-webkit-details-marker{display:none}
-  .ala-section-summary .ala-section-title{margin:0}
-  .ala-chevron{display:inline-flex;align-items:center;color:rgb(var(--color-text-lighter));transition:transform .2s cubic-bezier(0.4,0,0.2,1);transform:rotate(-90deg)}
-  .ala-section-dropdown.is-expanded>.ala-section-summary .ala-chevron{transform:rotate(0deg)}
-  .ala-section-collapsible{margin-top:6px}
+  .ala-section-summary:hover{background:rgba(var(--color-text-lighter),.06)}
+  .ala-section-summary:focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:-2px}
+  .ala-section-summary .ala-section-title{margin:0!important;color:rgb(var(--color-blue));font-size:13px;font-weight:600}
+  .ala-chevron{display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--color-text-lighter));transition:transform .22s cubic-bezier(0.4,0,0.2,1);will-change:transform}
+  .ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}
+  .ala-section-collapsible .ala-collapsible-inner{border-top:1px solid rgba(var(--color-text-lighter),.12)}
 
   .ala-collapsible{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s .22s;visibility:hidden;overflow:hidden}
   .ala-collapsible.is-open{grid-template-rows:1fr;transition:grid-template-rows .22s cubic-bezier(0.4,0,0.2,1),visibility 0s 0s;visibility:visible}
@@ -12843,7 +12849,7 @@
 				const r = ROWS[el.dataset.key];
 				if (!r) return;
 				if (el.dataset.standaloneLocked) return;
-				const val = TYPES$1[r.type].read(el);
+				const val = TYPES$1[r.type].normalize(TYPES$1[r.type].read(el), r);
 				if (JSON.stringify(val) !== baseline.vals[r.key]) {
 					changed.push({
 						key: r.key,

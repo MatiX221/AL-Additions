@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import '../src/modules/fastLoad';
 import '../src/modules/tagFilter';
 import '../src/modules/shortUrls';
@@ -15,7 +15,7 @@ import '../src/settings/devMode';
 import legacyKeys from './fixtures/legacy-keys.json';
 import { Settings, TYPES, ROWS, PREFIX, features } from '../src/settings/settings';
 import { store, isDebug } from '../src/utils/helpers';
-import { showPanel, closePanel } from '../src/settings/panel';
+import { showPanel, closePanel, initSettingsPage } from '../src/settings/panel';
 import { createModuleHost } from '../src/core/registry';
 import type { SettingRow } from '../src/types';
 
@@ -384,5 +384,56 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
     expect(isDebug('fastLoad')).toBe(false);
     expect(Settings.get('debugGeneral')).toBe(true);
     expect(Settings.get('debugFastLoad')).toBe(true);
+  });
+
+  it('restores pre-refactor section dropdown styling and shows "Save" without reloading when unchanged', () => {
+    closePanel();
+    const prevTag = Settings.get('tagFilterEnabled');
+    const prevPct = Settings.get('tagPercentage');
+    const prevNyaa = Settings.get('nyaaEnabled');
+    const prevTier = Settings.get('tierLabelsEnabled');
+
+    try {
+      Settings.set('tagFilterEnabled', true);
+      Settings.set('tagPercentage', 50);
+      Settings.set('nyaaEnabled', true);
+      Settings.set('tierLabelsEnabled', true);
+
+      const host = createModuleHost();
+      initSettingsPage(host);
+      const styleText = document.getElementById('ala-settings-style')?.textContent || '';
+      expect(styleText).toContain('#ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}');
+      expect(styleText).toContain('.ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}');
+      expect(styleText).toContain('.ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}');
+
+      showPanel(host);
+
+      const saveBtn = document.querySelector<HTMLButtonElement>('#ala-settings-panel .ala-save')!;
+      const statusEl = document.querySelector<HTMLElement>('#ala-settings-panel .ala-status')!;
+      const reloadSpy = vi.spyOn(host, 'reload');
+
+      expect(saveBtn.textContent).toBe('Save');
+
+      saveBtn.click();
+      expect(reloadSpy).not.toHaveBeenCalled();
+      expect(statusEl.textContent).toBe('Saved.');
+      expect(saveBtn.textContent).toBe('Save');
+
+      const pctInput = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="tagPercentage"]')!;
+      pctInput.value = '65';
+      pctInput.dispatchEvent(new Event('change', { bubbles: true }));
+      expect(saveBtn.textContent).toBe('Save and reload');
+
+      // Equivalent normalized value reverts Save plan back to no-op Save
+      pctInput.value = '50';
+      pctInput.dispatchEvent(new Event('change', { bubbles: true }));
+      expect(saveBtn.textContent).toBe('Save');
+    } finally {
+      closePanel();
+      Settings.set('tagFilterEnabled', prevTag);
+      Settings.set('tagPercentage', prevPct);
+      Settings.set('nyaaEnabled', prevNyaa);
+      Settings.set('tierLabelsEnabled', prevTier);
+    }
   });
 });

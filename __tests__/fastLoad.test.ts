@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
 import { bootModuleForTest } from '../src/core/registry';
 import { store as gmStore } from '../src/utils/helpers';
 import { AniList } from '../src/api/anilist';
+import { learned, loadRoutes } from '../src/modules/fastLoad/routes';
+import { hookWorker } from '../src/modules/fastLoad/worker';
 import '../src/modules/fastLoad';
 
 describe('FastLoad: GraphQL Performance & Cache Engine', () => {
@@ -512,6 +514,108 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
       expect(res.allEntries[0].score).toBe(0);
       expect(res.allEntries[0].media?.title?.userPreferred).toBe('Real Worker Normalizr Anime');
       expect(res.user?.name).toBe('TargetUser3');
+    });
+  });
+
+  describe('Route Learning Isolation & RPC TTL Parity', () => {
+    it('ignores internal AniList API requests during route learning and purges stale alfl:routes:v3', async () => {
+      window.localStorage.setItem(
+        'alfl:routes:v3',
+        JSON.stringify({
+          'anime/': {
+            t: Date.now(),
+            id: 1,
+            static: false,
+            reqs: [{ url: 'https://anilist.co/graphql', body: '{"query":"old"}', headers: {} }]
+          }
+        })
+      );
+      learned.clear();
+      loadRoutes();
+      expect(window.localStorage.getItem('alfl:routes:v3')).toBeNull();
+      expect(learned.get('anime/')).toBeUndefined();
+
+      history.replaceState({}, '', '/anime/206949');
+      mockNativeFetch.mockResolvedValueOnce(
+        createJsonResponse({ data: { Media: { title: { romaji: 'InternalTest' }, seasonYear: 2025 } } })
+      );
+
+      await AniList.query(
+        'query ($id: Int) { Media(id: $id) { title { userPreferred english romaji native } seasonYear season } }',
+        { id: 206949 }
+      );
+      await flushAsync();
+      expect(learned.get('anime/')).toBeUndefined();
+
+      mockNativeFetch.mockResolvedValueOnce(
+        createJsonResponse({ data: { Media: { id: 206949 } } })
+      );
+      await window.fetch('https://graphql.anilist.co', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: 'query ($id: Int) { Media(id: $id) { id } }',
+          variables: { id: 206949 }
+        })
+      });
+      await flushAsync();
+      expect(learned.get('anime/')?.reqs).toHaveLength(1);
+    });
+
+    it('retains User profile RPC cache hits past 15s (60s TTL)', async () => {
+      vi.useFakeTimers();
+      const origWorker = window.Worker;
+      const origPostCalls: any[] = [];
+
+      class MockWorker extends EventTarget {
+        postMessage(data: any) {
+          origPostCalls.push(data);
+          setTimeout(() => {
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: { type: 'RPC', id: data.id, result: { User: { id: 7053169, name: 'MysticDaiya' } } }
+              })
+            );
+          }, 0);
+        }
+        terminate() {}
+      }
+
+      try {
+        (window as any).Worker = MockWorker;
+        hookWorker(() => false);
+
+        const worker = new window.Worker('/test.worker.js');
+        const payload = {
+          type: 'RPC',
+          id: 'rpc-1',
+          method: 'fetch',
+          params: [
+            '/graphql',
+            'query($id:Int,$name:String){User(id:$id,name:$name){id name}}',
+            { name: 'MysticDaiya' },
+            {}
+          ]
+        };
+
+        const responses: any[] = [];
+        worker.addEventListener('message', (ev: MessageEvent) => responses.push(ev.data));
+
+        worker.postMessage(payload);
+        await vi.advanceTimersByTimeAsync(10);
+        expect(origPostCalls).toHaveLength(1);
+        expect(responses).toHaveLength(1);
+
+        await vi.advanceTimersByTimeAsync(20_000);
+        worker.postMessage({ ...payload, id: 'rpc-2' });
+        await vi.advanceTimersByTimeAsync(10);
+        expect(origPostCalls).toHaveLength(1);
+        expect(responses).toHaveLength(2);
+        expect(responses[1].id).toBe('rpc-2');
+      } finally {
+        (window as any).Worker = origWorker;
+        vi.useRealTimers();
+      }
     });
   });
 });

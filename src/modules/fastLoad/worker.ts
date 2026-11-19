@@ -14,6 +14,7 @@ import { stats, attempt } from './config';
 import {
   isMediaListQuery,
   isTaxonomyQuery,
+  isUserQuery,
   isViewerQuery,
   isMutation,
   isVolatile,
@@ -538,8 +539,10 @@ export function hookWorker(yielded: () => boolean) {
                 }
               }
             } else {
+              const rpcTtl =
+                isViewerQuery(q) || isTaxonomyQuery(q) ? 5 * 60_000 : isUserQuery(q) ? 60_000 : 15_000;
               const h = rpcCache.get(key);
-              if (h && h.time >= freshFloor && Date.now() - h.time < 15_000) {
+              if (h && h.time >= freshFloor && Date.now() - h.time < rpcTtl) {
                 hit = h;
               }
               flying = rpcInflight.get(key);

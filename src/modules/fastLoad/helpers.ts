@@ -10,6 +10,9 @@ export const isMediaListQuery = (parsed: any): boolean =>
 export const isViewerQuery = (parsed: any): boolean =>
   /\bViewer\b/i.test(String(parsed?.query || ''));
 
+export const isUserQuery = (parsed: any): boolean =>
+  /\bUser\s*\(/i.test(String(parsed?.query || '')) && !isVolatile(parsed);
+
 export const isMutation = (parsed: any) =>
   /\bmutation\b/i.test(String(parsed?.query || '').replace(/#[^\n\r]*/g, ' '));
 

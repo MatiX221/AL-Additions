@@ -228,10 +228,17 @@ export async function classify(input: any, init?: RequestInit) {
   return { desc, parsed, mutation: isMutation(parsed), bypass };
 }
 
-export function cachedFetch(nativeFetch: any, job: any, input: any, init?: RequestInit, replay = false) {
+export function cachedFetch(
+  nativeFetch: any,
+  job: any,
+  input: any,
+  init?: RequestInit,
+  alflMode?: string | boolean
+) {
   const { desc, parsed } = job;
   if (init?.signal?.aborted) return nativeFetch(input, init);
-  if (!replay) attempt(() => rememberQuery(desc, parsed));
+  const skipLearn = alflMode === true || alflMode === 'replay' || alflMode === 'internal';
+  if (!skipLearn) attempt(() => rememberQuery(desc, parsed));
 
   const blocker = (win as any).__ALFL_RPC_BLOCK__;
   const isBlocked =
@@ -314,7 +321,12 @@ export function cachedFetch(nativeFetch: any, job: any, input: any, init?: Reque
   const myEpoch = epoch;
   const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
   const opName = parsed.operationName || (isMediaListQuery(parsed) ? 'MediaListCollection' : 'query');
-  logDebug('[FASTLOAD] Cache MISS (network fetch):', opName, 'key:', key);
+  logDebug(
+    alflMode === 'replay' ? '[FASTLOAD] Cache MISS (prefetch fetch):' : '[FASTLOAD] Cache MISS (network fetch):',
+    opName,
+    'key:',
+    key
+  );
   const original = trackedNativeFetch(nativeFetch, job, input, init);
 
   const snapshot = original.then(async (res: Response) => {
@@ -456,7 +468,7 @@ export function installGraphQLLayer(yielded: () => boolean): () => void {
       p.then(note429, () => {});
       return p;
     }
-    return cachedFetch(nativeFetch, job, input, init, (init as any)?.__alfl === 'replay');
+    return cachedFetch(nativeFetch, job, input, init, (init as any)?.__alfl);
   };
 
   win.fetch = wrappedFetch;

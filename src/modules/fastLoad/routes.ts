@@ -81,7 +81,7 @@ export function replacePageId(value: any, from: any, to: any): number {
 }
 
 export const learned = new Map<string, any>();
-const ROUTES_KEY = 'alfl:routes:v3';
+const ROUTES_KEY = 'alfl:routes:v4';
 const ROUTES_TTL = 30 * 86400e3;
 
 let persistTimer: any = 0;
@@ -103,6 +103,7 @@ export function loadRoutes() {
   attempt(() => {
     win.localStorage?.removeItem('alfl:routes:v1');
     win.localStorage?.removeItem('alfl:routes:v2');
+    win.localStorage?.removeItem('alfl:routes:v3');
     const raw = win.localStorage?.getItem(ROUTES_KEY);
     if (raw) {
       const now = Date.now();

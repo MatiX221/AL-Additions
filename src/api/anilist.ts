@@ -324,8 +324,9 @@ export const AniList = (() => {
         headers,
         cache: forceFresh ? 'no-store' : undefined,
         credentials: 'include',
-        body: JSON.stringify({ query: q, variables })
-      });
+        body: JSON.stringify({ query: q, variables }),
+        __alfl: 'internal'
+      } as RequestInit);
     } catch (e: any) {
       if (retries > 0) {
         await backoff();
