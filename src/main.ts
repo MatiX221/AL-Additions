@@ -1,5 +1,6 @@
 import 'vite-plugin-monkey/dist/client';
 import { Core } from './core/observer';
+import './settings/devMode';
 import { initSettingsPage } from './settings/panel';
 import {
   configureCoreServices,

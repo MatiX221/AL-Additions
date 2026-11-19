@@ -43,6 +43,12 @@ defineModule({
   legacy: ['tierLabelsEnabled'],
   title: 'AniList Tier Labels',
   help: 'Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.',
+  debug: {
+    key: 'debugTierLabels',
+    title: 'Tier Labels Debug',
+    help: 'Log scoring system detection, tier matching, and badge rendering.',
+    pattern: /^\[TIER/i
+  },
   standalone: {
     name: 'AniList Tier Labels',
     probe: () => detectStandalone('tierLabels')

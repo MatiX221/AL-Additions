@@ -165,14 +165,7 @@ interface DebugChannelEntry {
   pattern?: RegExp;
 }
 
-const debugChannels = new Map<string, DebugChannelEntry>([
-  ['fastLoad', { settingKey: `${SETTING_PREFIX}debugFastLoad`, def: false, pattern: /^\[(?:FASTLOAD|ALFL)/i }],
-  ['sync', { settingKey: `${SETTING_PREFIX}debugSync`, def: false, pattern: /^\[SYNC/i }],
-  ['compareView', { settingKey: `${SETTING_PREFIX}debugCompareView`, def: false, pattern: /^\[COMPARE/i }],
-  ['mediaInfo', { settingKey: `${SETTING_PREFIX}debugMediaInfo`, def: false, pattern: /^\[MEDIAINFO/i }],
-  ['tierLabels', { settingKey: `${SETTING_PREFIX}debugTierLabels`, def: false, pattern: /^\[TIER/i }],
-  ['general', { settingKey: `${SETTING_PREFIX}debugGeneral`, def: false, pattern: /^\[(?:CORE|OBSERVER)/i }]
-]);
+const debugChannels = new Map<string, DebugChannelEntry>();
 
 export function registerDebugChannel(
   channel: string,
@@ -193,14 +186,14 @@ export function isDebug(module?: DebugModule | string): boolean {
     const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
     if (win.__ALA_DEBUG__ || win.__ALFL_DEBUG__) return true;
 
-    const devMode = store.get(`${SETTING_PREFIX}devModeEnabled`, false);
+    const devMode = parseToggle(store.get(`${SETTING_PREFIX}devModeEnabled`, false));
     if (!devMode) return false;
 
     if (!module) return true;
 
     const channel = debugChannels.get(module);
     if (channel) {
-      return !!store.get(channel.settingKey, channel.def);
+      return parseToggle(store.get(channel.settingKey, channel.def));
     }
 
     return true;

@@ -73,22 +73,6 @@ export interface ModuleStandaloneDef {
   note?: string;
 }
 
-export interface BackupToolContext {
-  getOverrides: () => Record<string, any>;
-  setStatus: (msg: string, isError?: boolean) => void;
-  createRawBackup: (overrides?: Record<string, any>) => string;
-  downloadFile: (bytes: Uint8Array, filename?: string) => void;
-}
-
-export interface BackupToolDef {
-  id: string;
-  title: string;
-  help: string;
-  buttonLabel: string;
-  danger?: boolean;
-  action: (ctx: BackupToolContext) => void | Promise<void>;
-}
-
 export interface FeatureMeta {
   id: string;
   key: string;
@@ -107,7 +91,6 @@ export interface FeatureMeta {
   accounts?: string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
-  backupTools?: BackupToolDef[];
   early?: boolean;
   alwaysRun?: boolean;
 }
@@ -126,7 +109,6 @@ export interface ModuleMeta extends ToggleMeta {
   accounts?: string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
-  backupTools?: BackupToolDef[];
   migrate?: () => void;
   setup: (ctx: FeatureContext) => void | Promise<void>;
 }
@@ -146,7 +128,6 @@ export interface RegisteredFeature {
   accounts?: string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
-  backupTools?: BackupToolDef[];
 }
 
 export type ModuleDisableReason =

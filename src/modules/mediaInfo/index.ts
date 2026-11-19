@@ -14,6 +14,12 @@ defineModule({
   legacy: ['mediaInfoEnabled', 'mediaListEditorEnabled'],
   title: 'List Score & Progress Editor',
   help: 'Show your score and episode/chapter progress controls on anime and manga pages.',
+  debug: {
+    key: 'debugMediaInfo',
+    title: 'Media Info Debug',
+    help: 'Log media info sidebar updates, progress steppers, and save requests.',
+    pattern: /^\[MEDIAINFO/i
+  },
   setup(ctx) {
     const ID = 'ala-media-info';
     ctx.ownUi(`#${ID}`);

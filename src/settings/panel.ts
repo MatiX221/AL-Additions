@@ -14,6 +14,7 @@ import { openTierEditor } from '../modules/tierLabels/tierModal';
 import { openOverridesModal } from '../modules/sync/overridesModal';
 import { OVERRIDES_SETTING_KEY, getManualOverrides } from '../api/malOverrides';
 import { openAniSongsModal } from '../modules/anisongs/anisongModal';
+import { DEV_MODE_DEF } from './devMode';
 
 const PINNED_FIRST = ['Sync', 'General'];
 const PINNED_LAST = ['Advanced'];
@@ -236,8 +237,41 @@ function backupRestoreHtml(): string {
   </details>`;
 }
 
+function devModeCardHtml(): string {
+  const devRow = ROWS[DEV_MODE_DEF.key];
+  const generalRow = ROWS[DEV_MODE_DEF.generalDebug.key];
+  if (!devRow) return '';
+
+  const isDevOn = !!Settings.get(DEV_MODE_DEF.key);
+  const debugModules = features
+    .filter((f) => f.debug && ROWS[f.debug.key])
+    .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
+
+  const debugRowsHtml = [
+    ...debugModules.map((f) => {
+      const row = ROWS[f.debug!.key];
+      const modOn = !!Settings.get(f.toggle.key);
+      return `<div class="ala-collapsible ${modOn ? 'is-open' : ''}" data-debug-for="${esc(f.toggle.key)}">
+        <div class="ala-collapsible-inner">
+          ${optionHtml(row)}
+        </div>
+      </div>`;
+    }),
+    generalRow ? optionHtml(generalRow) : ''
+  ].join('');
+
+  return `<div class="ala-feature ${isDevOn ? '' : 'is-off'}" data-feature="${esc(DEV_MODE_DEF.id)}">
+    <label class="ala-row ala-row--main">${rowText(DEV_MODE_DEF.title, DEV_MODE_DEF.help)}${TYPES.toggle.html(devRow, isDevOn)}</label>
+    <div class="ala-collapsible ala-options-collapsible ${isDevOn ? 'is-open' : ''}">
+      <div class="ala-collapsible-inner">
+        <div class="ala-options">${debugRowsHtml}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function sectionsHtml(): string {
-  const all = [...new Set(features.map((f) => f.section))];
+  const all = [...new Set([...features.map((f) => f.section), 'Advanced'])];
   const pinned = new Set([...PINNED_FIRST, ...PINNED_LAST]);
   const order = [
     ...PINNED_FIRST.filter((s) => all.includes(s)),
@@ -249,7 +283,11 @@ function sectionsHtml(): string {
       const items = features
         .filter((f) => f.section === name)
         .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-      return items.length
+      const cardsHtml = [
+        ...items.map(featureHtml),
+        ...(name === 'Advanced' ? [devModeCardHtml()] : [])
+      ].join('');
+      return cardsHtml
         ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
             <summary class="ala-section-summary">
               <span class="ala-section-title">${esc(name)}</span>
@@ -257,7 +295,7 @@ function sectionsHtml(): string {
             </summary>
             <div class="ala-collapsible ala-section-collapsible">
               <div class="ala-collapsible-inner">
-                <div class="ala-section">${items.map(featureHtml).join('')}</div>
+                <div class="ala-section">${cardsHtml}</div>
               </div>
             </div>
           </details>`
@@ -387,8 +425,22 @@ export function showPanel(): void {
     });
 
     card.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.ala-options [data-key]').forEach((el) => {
-      if (el.closest('.ala-child-option')) return;
+      if (el.closest('.ala-child-option, [data-debug-for]')) return;
       el.disabled = !on;
+    });
+  };
+
+  const syncDebugRows = () => {
+    const devToggle = panel.querySelector<HTMLInputElement>('input[data-key="devModeEnabled"]');
+    const isDevOn = devToggle ? devToggle.checked : !!Settings.get('devModeEnabled');
+    panel.querySelectorAll<HTMLElement>('[data-debug-for]').forEach((wrap) => {
+      const modKey = wrap.dataset.debugFor!;
+      const modInput = panel.querySelector<HTMLInputElement>(`input[data-key="${modKey}"]`);
+      const modOn = modInput ? modInput.checked : !!Settings.get(modKey);
+      wrap.classList.toggle('is-open', modOn);
+      wrap.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]').forEach((el) => {
+        el.disabled = !(isDevOn && modOn);
+      });
     });
   };
 
@@ -401,12 +453,14 @@ export function showPanel(): void {
   };
 
   panel.querySelectorAll<HTMLElement>('.ala-feature').forEach(syncFeature);
+  syncDebugRows();
   syncDevBackupVisibility();
   initDropdownAnimations(panel);
   panel.addEventListener('change', (e) => {
     const target = e.target as HTMLElement | null;
     const card = target?.closest<HTMLElement>('.ala-feature');
     if (card) syncFeature(card);
+    syncDebugRows();
     syncDevBackupVisibility();
   });
 
@@ -433,6 +487,7 @@ export function showPanel(): void {
       }
     });
     panel.querySelectorAll<HTMLElement>('.ala-feature').forEach(syncFeature);
+    syncDebugRows();
     syncDevBackupVisibility();
     setStatus('Defaults restored. Press Save to apply them.');
   });

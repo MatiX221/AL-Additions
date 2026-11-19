@@ -34,6 +34,12 @@ defineFeature(
     legacy: ['syncEnabled', 'syncOn'],
     title: 'AniList → MyAnimeList Sync',
     help: 'Enable sync and show the list page sync panel',
+    debug: {
+      key: 'debugSync',
+      title: 'Sync Debug',
+      help: 'Log MAL synchronization steps, queue processing, rate limits, and deletions.',
+      pattern: /^\[SYNC/i
+    },
     options: [
       {
         key: 'syncAutoAnime',

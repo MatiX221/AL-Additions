@@ -1,5 +1,12 @@
 import { store, safe, esc, parseToggle } from '../utils/helpers';
-import { SETTING_PREFIX, type SettingRow, type SettingType, type FeatureMeta, type RegisteredFeature } from '../types';
+import {
+  SETTING_PREFIX,
+  type SettingRow,
+  type SettingOption,
+  type SettingType,
+  type FeatureMeta,
+  type RegisteredFeature
+} from '../types';
 
 export { SETTING_PREFIX as PREFIX };
 const PREFIX = SETTING_PREFIX;
@@ -123,6 +130,16 @@ function register(f: FeatureMeta): void {
   }));
 
   const batch = [toggle, ...options];
+  if (f.debug) {
+    batch.push({
+      key: f.debug.key,
+      type: 'toggle',
+      def: false,
+      legacy: [f.debug.key],
+      title: f.debug.title,
+      help: f.debug.help
+    });
+  }
   const seenKeys = new Set<string>();
   for (const row of batch) {
     if (seenKeys.has(row.key) || ROWS[row.key]) {
@@ -150,9 +167,27 @@ function register(f: FeatureMeta): void {
     after: f.after,
     accounts: f.accounts,
     debug: f.debug,
-    standalone: f.standalone,
-    backupTools: f.backupTools
+    standalone: f.standalone
   });
+}
+
+function registerCoreSetting(o: SettingOption): SettingRow {
+  const rowType = o.type || 'toggle';
+  const rowDef = o.def !== undefined ? o.def : rowType === 'json' ? {} : false;
+  if (rowType === 'toggle' && rowDef !== false) {
+    throw new Error(`Toggle setting "${o.key}" must default to false`);
+  }
+  if (ROWS[o.key]) {
+    throw new Error(`Duplicate setting: ${o.key}`);
+  }
+  const row: SettingRow = {
+    ...o,
+    type: rowType,
+    def: rowDef,
+    legacy: [...new Set([o.key, ...(o.legacy || [])])]
+  };
+  ROWS[row.key] = row;
+  return row;
 }
 
 function get(key: string): any {
@@ -194,4 +229,4 @@ function migrate(): void {
   }, 'settings migration');
 }
 
-export const Settings = { get, set, register, migrate };
+export const Settings = { get, set, register, registerCoreSetting, migrate };

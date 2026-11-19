@@ -831,8 +831,7 @@ export function defineModule(meta: ModuleMeta): void {
     after,
     accounts: meta.accounts,
     debug: meta.debug,
-    standalone: meta.standalone,
-    backupTools: meta.backupTools
+    standalone: meta.standalone
   });
 
   if (meta.debug) {
@@ -936,6 +935,11 @@ export const defineFeature = (meta: FeatureMeta, init: () => void | Promise<void
     dependsOn,
     after
   });
+
+  if (meta.debug) {
+    const channel = meta.debug.channel || meta.id;
+    registerDebugChannel(channel, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
+  }
 
   registerRecord({
     id: meta.id,

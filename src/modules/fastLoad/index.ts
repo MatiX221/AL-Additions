@@ -35,6 +35,12 @@ defineModule({
   def: false,
   title: 'AniList Fast Load',
   help: 'Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.',
+  debug: {
+    key: 'debugFastLoad',
+    title: 'Fast Load Debug',
+    help: 'Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity.',
+    pattern: /^\[(?:FASTLOAD|ALFL)/i
+  },
   standalone: {
     name: 'AniList Fast Load',
     probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning('fastLoad')

@@ -11,7 +11,7 @@ import '../src/modules/anisongs';
 import '../src/modules/tierLabels';
 import '../src/modules/compareView';
 import '../src/modules/sync';
-import '../src/modules/devMode';
+import '../src/settings/devMode';
 import legacyKeys from './fixtures/legacy-keys.json';
 import { Settings, TYPES, ROWS, PREFIX } from '../src/settings/settings';
 import { store } from '../src/utils/helpers';

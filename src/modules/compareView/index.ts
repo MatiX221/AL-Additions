@@ -97,6 +97,12 @@ defineModule({
   def: false,
   title: 'Compare View Improvements',
   help: 'Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.',
+  debug: {
+    key: 'debugCompareView',
+    title: 'Compare View Debug',
+    help: 'Log list comparison data loading, score diffs, sorting, and filtering passes.',
+    pattern: /^\[COMPARE/i
+  },
   setup(ctx) {
     const CSS_ID = 'ala-compare-style';
     const CSS = `

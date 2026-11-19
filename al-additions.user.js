@@ -176,38 +176,7 @@
 			};
 		}
 	};
-	var debugChannels = new Map([
-		["fastLoad", {
-			settingKey: `${SETTING_PREFIX}debugFastLoad`,
-			def: false,
-			pattern: /^\[(?:FASTLOAD|ALFL)/i
-		}],
-		["sync", {
-			settingKey: `${SETTING_PREFIX}debugSync`,
-			def: false,
-			pattern: /^\[SYNC/i
-		}],
-		["compareView", {
-			settingKey: `${SETTING_PREFIX}debugCompareView`,
-			def: false,
-			pattern: /^\[COMPARE/i
-		}],
-		["mediaInfo", {
-			settingKey: `${SETTING_PREFIX}debugMediaInfo`,
-			def: false,
-			pattern: /^\[MEDIAINFO/i
-		}],
-		["tierLabels", {
-			settingKey: `${SETTING_PREFIX}debugTierLabels`,
-			def: false,
-			pattern: /^\[TIER/i
-		}],
-		["general", {
-			settingKey: `${SETTING_PREFIX}debugGeneral`,
-			def: false,
-			pattern: /^\[(?:CORE|OBSERVER)/i
-		}]
-	]);
+	var debugChannels = new Map();
 	function registerDebugChannel(channel, settingKey, def = false, prefixPattern) {
 		const existing = debugChannels.get(channel);
 		debugChannels.set(channel, {
@@ -220,10 +189,10 @@
 		try {
 			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 			if (win.__ALA_DEBUG__ || win.__ALFL_DEBUG__) return true;
-			if (!store$1.get(`ala_setting_devModeEnabled`, false)) return false;
+			if (!parseToggle(store$1.get(`ala_setting_devModeEnabled`, false))) return false;
 			if (!module) return true;
 			const channel = debugChannels.get(module);
-			if (channel) return !!store$1.get(channel.settingKey, channel.def);
+			if (channel) return parseToggle(store$1.get(channel.settingKey, channel.def));
 			return true;
 		} catch {
 			return false;
@@ -397,6 +366,14 @@
 			legacy: o.legacy || []
 		}));
 		const batch = [toggle, ...options];
+		if (f.debug) batch.push({
+			key: f.debug.key,
+			type: "toggle",
+			def: false,
+			legacy: [f.debug.key],
+			title: f.debug.title,
+			help: f.debug.help
+		});
 		const seenKeys = new Set();
 		for (const row of batch) {
 			if (seenKeys.has(row.key) || ROWS[row.key]) throw new Error(`Duplicate setting: ${row.key}`);
@@ -420,9 +397,22 @@
 			after: f.after,
 			accounts: f.accounts,
 			debug: f.debug,
-			standalone: f.standalone,
-			backupTools: f.backupTools
+			standalone: f.standalone
 		});
+	}
+	function registerCoreSetting(o) {
+		const rowType = o.type || "toggle";
+		const rowDef = o.def !== void 0 ? o.def : rowType === "json" ? {} : false;
+		if (rowType === "toggle" && rowDef !== false) throw new Error(`Toggle setting "${o.key}" must default to false`);
+		if (ROWS[o.key]) throw new Error(`Duplicate setting: ${o.key}`);
+		const row = {
+			...o,
+			type: rowType,
+			def: rowDef,
+			legacy: [...new Set([o.key, ...o.legacy || []])]
+		};
+		ROWS[row.key] = row;
+		return row;
 	}
 	function get(key) {
 		const r = ROWS[key];
@@ -460,6 +450,7 @@
 		get,
 		set,
 		register,
+		registerCoreSetting,
 		migrate
 	};
 	var providers = new Map();
@@ -1692,8 +1683,7 @@
 			after,
 			accounts: meta.accounts,
 			debug: meta.debug,
-			standalone: meta.standalone,
-			backupTools: meta.backupTools
+			standalone: meta.standalone
 		});
 		if (meta.debug) registerDebugChannel(meta.debug.channel || meta.id, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
 		registerRecord({
@@ -1795,6 +1785,7 @@
 			dependsOn,
 			after
 		});
+		if (meta.debug) registerDebugChannel(meta.debug.channel || meta.id, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
 		registerRecord({
 			id: meta.id,
 			setting: meta.alwaysRun ? null : meta.key,
@@ -3772,6 +3763,12 @@
 		def: false,
 		title: "Compare View Improvements",
 		help: "Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.",
+		debug: {
+			key: "debugCompareView",
+			title: "Compare View Debug",
+			help: "Log list comparison data loading, score diffs, sorting, and filtering passes.",
+			pattern: /^\[COMPARE/i
+		},
 		setup(ctx) {
 			ctx.addStyle("ala-compare-style", `
       .content.container.ala-compare-page-container {
@@ -4696,61 +4693,6 @@
 				cleanup();
 			});
 		}
-	});
-	defineModule({
-		id: "devMode",
-		key: "devModeEnabled",
-		section: "Advanced",
-		layer: "service",
-		requiresReload: false,
-		def: false,
-		title: "Developer Mode",
-		help: "Enable developer diagnostics and verbose module logging in the browser console.",
-		options: [
-			{
-				key: "debugFastLoad",
-				type: "toggle",
-				def: false,
-				title: "Fast Load Debug",
-				help: "Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity."
-			},
-			{
-				key: "debugSync",
-				type: "toggle",
-				def: false,
-				title: "Sync Debug",
-				help: "Log MAL synchronization steps, queue processing, rate limits, and deletions."
-			},
-			{
-				key: "debugCompareView",
-				type: "toggle",
-				def: false,
-				title: "Compare View Debug",
-				help: "Log list comparison data loading, score diffs, sorting, and filtering passes."
-			},
-			{
-				key: "debugMediaInfo",
-				type: "toggle",
-				def: false,
-				title: "Media Info Debug",
-				help: "Log media info sidebar updates, progress steppers, and save requests."
-			},
-			{
-				key: "debugTierLabels",
-				type: "toggle",
-				def: false,
-				title: "Tier Labels Debug",
-				help: "Log scoring system detection, tier matching, and badge rendering."
-			},
-			{
-				key: "debugGeneral",
-				type: "toggle",
-				def: false,
-				title: "Core & Observer Debug",
-				help: "Log DOM observer mutations, route changes, and general script lifecycle events."
-			}
-		],
-		setup: () => {}
 	});
 	var builtInRunning = new Set();
 	var markBuiltIn = (id) => {
@@ -6401,6 +6343,12 @@
 		def: false,
 		title: "AniList Fast Load",
 		help: "Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.",
+		debug: {
+			key: "debugFastLoad",
+			title: "Fast Load Debug",
+			help: "Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity.",
+			pattern: /^\[(?:FASTLOAD|ALFL)/i
+		},
 		standalone: {
 			name: "AniList Fast Load",
 			probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning("fastLoad")
@@ -6732,6 +6680,12 @@
 		legacy: ["mediaInfoEnabled", "mediaListEditorEnabled"],
 		title: "List Score & Progress Editor",
 		help: "Show your score and episode/chapter progress controls on anime and manga pages.",
+		debug: {
+			key: "debugMediaInfo",
+			title: "Media Info Debug",
+			help: "Log media info sidebar updates, progress steppers, and save requests.",
+			pattern: /^\[MEDIAINFO/i
+		},
 		setup(ctx) {
 			const ID = "ala-media-info";
 			ctx.ownUi(`#${ID}`);
@@ -11355,6 +11309,12 @@
 		legacy: ["syncEnabled", "syncOn"],
 		title: "AniList → MyAnimeList Sync",
 		help: "Enable sync and show the list page sync panel",
+		debug: {
+			key: "debugSync",
+			title: "Sync Debug",
+			help: "Log MAL synchronization steps, queue processing, rate limits, and deletions.",
+			pattern: /^\[SYNC/i
+		},
 		options: [
 			{
 				key: "syncAutoAnime",
@@ -11720,6 +11680,12 @@
 		legacy: ["tierLabelsEnabled"],
 		title: "AniList Tier Labels",
 		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
+		debug: {
+			key: "debugTierLabels",
+			title: "Tier Labels Debug",
+			help: "Log scoring system detection, tier matching, and badge rendering.",
+			pattern: /^\[TIER/i
+		},
 		standalone: {
 			name: "AniList Tier Labels",
 			probe: () => detectStandalone("tierLabels")
@@ -11979,6 +11945,33 @@
 			});
 		}
 	});
+	var DEV_MODE_DEF = {
+		id: "devMode",
+		key: "devModeEnabled",
+		section: "Advanced",
+		title: "Developer Mode",
+		help: "Enable developer diagnostics and verbose module logging in the browser console.",
+		generalDebug: {
+			key: "debugGeneral",
+			title: "Core & Observer Debug",
+			help: "Log DOM observer mutations, route changes, and general script lifecycle events."
+		}
+	};
+	Settings.registerCoreSetting({
+		key: DEV_MODE_DEF.key,
+		type: "toggle",
+		def: false,
+		title: DEV_MODE_DEF.title,
+		help: DEV_MODE_DEF.help
+	});
+	Settings.registerCoreSetting({
+		key: DEV_MODE_DEF.generalDebug.key,
+		type: "toggle",
+		def: false,
+		title: DEV_MODE_DEF.generalDebug.title,
+		help: DEV_MODE_DEF.generalDebug.help
+	});
+	registerDebugChannel("general", `${SETTING_PREFIX}${DEV_MODE_DEF.generalDebug.key}`, false, /^\[(?:CORE|OBSERVER)/i);
 	var CREDITS = [
 		{
 			name: "Daiya",
@@ -12438,23 +12431,45 @@
     </div>
   </details>`;
 	}
+	function devModeCardHtml() {
+		const devRow = ROWS[DEV_MODE_DEF.key];
+		const generalRow = ROWS[DEV_MODE_DEF.generalDebug.key];
+		if (!devRow) return "";
+		const isDevOn = !!Settings.get(DEV_MODE_DEF.key);
+		const debugRowsHtml = [...features.filter((f) => f.debug && ROWS[f.debug.key]).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id)).map((f) => {
+			const row = ROWS[f.debug.key];
+			return `<div class="ala-collapsible ${!!Settings.get(f.toggle.key) ? "is-open" : ""}" data-debug-for="${esc(f.toggle.key)}">
+        <div class="ala-collapsible-inner">
+          ${optionHtml(row)}
+        </div>
+      </div>`;
+		}), generalRow ? optionHtml(generalRow) : ""].join("");
+		return `<div class="ala-feature ${isDevOn ? "" : "is-off"}" data-feature="${esc(DEV_MODE_DEF.id)}">
+    <label class="ala-row ala-row--main">${rowText(DEV_MODE_DEF.title, DEV_MODE_DEF.help)}${TYPES$1.toggle.html(devRow, isDevOn)}</label>
+    <div class="ala-collapsible ala-options-collapsible ${isDevOn ? "is-open" : ""}">
+      <div class="ala-collapsible-inner">
+        <div class="ala-options">${debugRowsHtml}</div>
+      </div>
+    </div>
+  </div>`;
+	}
 	function sectionsHtml() {
-		const all = [...new Set(features.map((f) => f.section))];
+		const all = [...new Set([...features.map((f) => f.section), "Advanced"])];
 		const pinned = new Set([...PINNED_FIRST, ...PINNED_LAST]);
 		return [
 			...PINNED_FIRST.filter((s) => all.includes(s)),
 			...all.filter((s) => !pinned.has(s)).sort((a, b) => a.localeCompare(b)),
 			...PINNED_LAST.filter((s) => all.includes(s))
 		].map((name) => {
-			const items = features.filter((f) => f.section === name).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-			return items.length ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
+			const cardsHtml = [...features.filter((f) => f.section === name).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id)).map(featureHtml), ...name === "Advanced" ? [devModeCardHtml()] : []].join("");
+			return cardsHtml ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
             <summary class="ala-section-summary">
               <span class="ala-section-title">${esc(name)}</span>
               <span class="ala-chevron">${icon("chevron", 14)}</span>
             </summary>
             <div class="ala-collapsible ala-section-collapsible">
               <div class="ala-collapsible-inner">
-                <div class="ala-section">${items.map(featureHtml).join("")}</div>
+                <div class="ala-section">${cardsHtml}</div>
               </div>
             </div>
           </details>` : "";
@@ -12564,8 +12579,21 @@
 				});
 			});
 			card.querySelectorAll(".ala-options [data-key]").forEach((el) => {
-				if (el.closest(".ala-child-option")) return;
+				if (el.closest(".ala-child-option, [data-debug-for]")) return;
 				el.disabled = !on;
+			});
+		};
+		const syncDebugRows = () => {
+			const devToggle = panel.querySelector("input[data-key=\"devModeEnabled\"]");
+			const isDevOn = devToggle ? devToggle.checked : !!Settings.get("devModeEnabled");
+			panel.querySelectorAll("[data-debug-for]").forEach((wrap) => {
+				const modKey = wrap.dataset.debugFor;
+				const modInput = panel.querySelector(`input[data-key="${modKey}"]`);
+				const modOn = modInput ? modInput.checked : !!Settings.get(modKey);
+				wrap.classList.toggle("is-open", modOn);
+				wrap.querySelectorAll("[data-key]").forEach((el) => {
+					el.disabled = !(isDevOn && modOn);
+				});
 			});
 		};
 		const devRow = panel.querySelector("#ala-row-export-raw");
@@ -12576,11 +12604,13 @@
 			devRow.style.display = isDevOn ? "" : "none";
 		};
 		panel.querySelectorAll(".ala-feature").forEach(syncFeature);
+		syncDebugRows();
 		syncDevBackupVisibility();
 		initDropdownAnimations(panel);
 		panel.addEventListener("change", (e) => {
 			const card = e.target?.closest(".ala-feature");
 			if (card) syncFeature(card);
+			syncDebugRows();
 			syncDevBackupVisibility();
 		});
 		panel.querySelector(".ala-save")?.addEventListener("click", () => {
@@ -12605,6 +12635,7 @@
 				}
 			});
 			panel.querySelectorAll(".ala-feature").forEach(syncFeature);
+			syncDebugRows();
 			syncDevBackupVisibility();
 			setStatus("Defaults restored. Press Save to apply them.");
 		});
