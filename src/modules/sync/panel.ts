@@ -1,19 +1,19 @@
-import { Settings } from '../../settings/settings';
-import { AniList } from '../../api/anilist';
 import {
   malLimiter,
   log,
   lastNotice,
   logLines,
-  malConnect,
-  exchangeMalCode
+  exchangeMalCode,
+  setMalUiSink
 } from '../../api/mal';
 import { store, tryOr, esc, debounce } from '../../utils/helpers';
-import { addStyle } from '../../core/styles';
+import { findSyncPanelAnchor, listRoute, navUserName } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
-import { Core } from '../../core/observer';
+import type { FeatureContext } from '../../types';
 import { progress, syncStatus, onProgressChange, onStateChange } from './state';
 import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';
+
+let panelCtx: FeatureContext | null = null;
 
 const PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
@@ -116,7 +116,7 @@ export function renderRateLimitWarning(panelEl: HTMLElement | null): void {
   if (!panelEl || !panelEl.isConnected) return;
   const now = Date.now();
   const limited = [
-    ['AniList', AniList.resumeAt()],
+    ['AniList', panelCtx?.api.resumeAt() ?? 0],
     ['MAL', malLimiter.resumeAt]
   ].filter(([, at]) => Number(at) > now);
   let warn = panelEl.querySelector<HTMLElement>('#almal-api-limit-warning');
@@ -196,9 +196,9 @@ function connItem(connected: boolean): string {
 
 export function renderPanel(): void {
   const panelEl = document.getElementById('almal-panel');
-  if (!panelEl) return;
-  const alOk = AniList.hasAuth();
-  const malOk = !!store.get('mal_token', null);
+  if (!panelEl || !panelCtx) return;
+  const alOk = panelCtx.api.hasAuth();
+  const malOk = panelCtx.accounts.isConnected('mal');
   const ready = alOk && malOk;
   const tone = syncStatus.syncing ? 'busy' : ready ? 'ok' : 'idle';
   const said = {
@@ -282,7 +282,7 @@ export function renderPanel(): void {
 }
 
 const ACTIONS: Record<string, () => void> = {
-  'mal-connect': malConnect,
+  'mal-connect': () => panelCtx?.accounts.connect('mal'),
   'manual-toggle': () => {
     ui.manual = !ui.manual;
     renderPanel();
@@ -316,60 +316,30 @@ const ACTIONS: Record<string, () => void> = {
   }
 };
 
-function findPanelAnchor(): HTMLElement | null {
-  const shuffle = document.querySelector<HTMLElement>(
-    '[title*="Random List Entry" i], [aria-label*="Random List Entry" i]'
-  );
-  if (shuffle) return shuffle.parentElement || shuffle;
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  for (let t: Node | null; (t = walker.nextNode()); ) {
-    const el = t.parentElement;
-    if (t.nodeValue?.trim() === 'Sort' && el?.matches('div, section, aside') && el.parentElement)
-      return el.parentElement;
-  }
-  return null;
-}
-
 let lastMountTry = 0;
 let retryTimer: ReturnType<typeof setTimeout> | 0 = 0;
 let selfLookup = false;
 
-const OWNER_RE = /^\/user\/([^/]+)\/(?:anime|manga)list/;
-const decodeName = (s: string): string => {
-  try {
-    return decodeURIComponent(s);
-  } catch (_) {
-    return s;
-  }
-};
-
-function navUser(): string {
-  const href = document
-    .querySelector('nav a[href^="/user/"], .nav-wrap a[href^="/user/"], .nav a[href^="/user/"]')
-    ?.getAttribute('href');
-  const m = href && href.match(/^\/user\/([^/?#]+)/);
-  return m ? decodeName(m[1]) : '';
-}
-
 function isOwnList(): boolean {
-  const owner = decodeName(location.pathname.match(OWNER_RE)?.[1] || '');
+  const route = listRoute();
+  const owner = route?.owner || '';
   if (!owner) return false;
-  const me = store.get<string | null>('al_username', null) || navUser();
-  if (!me && AniList.hasAuth() && !selfLookup) {
+  const me = store.get<string | null>('al_username', null) || navUserName();
+  if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
     selfLookup = true;
-    tryOr(() => AniList.viewer()).then(() => mountSoon());
+    void tryOr(() => panelCtx!.api.viewer()).then(() => mountSoon());
   }
   return !!me && me.toLowerCase() === owner.toLowerCase();
 }
 
 const onListRoute = (): boolean =>
-  Settings.get('syncEnabled') && LIST_PATH_RE.test(location.pathname) && isOwnList();
+  !!panelCtx?.get('syncEnabled') && LIST_PATH_RE.test(location.pathname) && isOwnList();
 
 export function mountPanel(): void {
   clearTimeout(retryTimer);
-  if (!onListRoute() || document.getElementById('almal-panel')) return;
+  if (!panelCtx || !onListRoute() || document.getElementById('almal-panel')) return;
   lastMountTry = Date.now();
-  const anchor = findPanelAnchor();
+  const anchor = findSyncPanelAnchor();
   if (!anchor) {
     retryTimer = setTimeout(mountSoon, 700);
     return;
@@ -389,15 +359,31 @@ export function mountPanel(): void {
 }
 const mountSoon = debounce(mountPanel, 250);
 
-export function initSyncPanel(): void {
-  addStyle('almal-style', PANEL_CSS);
-  onProgressChange((force) => updateProgressUI(force));
-  onStateChange(renderPanel);
+export function initSyncPanel(ctx: FeatureContext): void {
+  panelCtx = ctx;
+  ctx.ownUi('#almal-panel');
+  ctx.addStyle('almal-style', PANEL_CSS);
+  ctx.onCleanup(
+    setMalUiSink({
+      onLog: () => {
+        const hint = document.getElementById('almal-hint');
+        if (hint) hint.textContent = lastNotice;
+        const logBox = document.getElementById('almal-log');
+        if (logBox) logBox.textContent = logLines.join('\n') || 'No activity yet.';
+      },
+      onToast: (msg, isError, closeTab) => {
+        ctx.toast.show(msg, { type: isError ? 'error' : 'success', closeTab });
+      }
+    })
+  );
+  ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
+  ctx.onCleanup(onStateChange(renderPanel));
+  ctx.onCleanup(store.watch('mal_token', () => renderPanel()));
 
-  Core.onBodyMutation(() => {
+  ctx.onBodyMutation(() => {
     if (!document.getElementById('almal-panel') && Date.now() - lastMountTry > 1000 && onListRoute()) mountSoon();
   });
-  Core.onNavigate(() => {
+  ctx.onNav(() => {
     clearTimeout(retryTimer);
     document.getElementById('almal-panel')?.remove();
     mountSoon();
@@ -406,9 +392,9 @@ export function initSyncPanel(): void {
 
   let lastAl: boolean | null = null;
   let lastMal: boolean | null = null;
-  setInterval(() => {
-    const al = AniList.hasAuth();
-    const mal = !!store.get('mal_token', null);
+  ctx.interval(() => {
+    const al = ctx.api.hasAuth();
+    const mal = ctx.accounts.isConnected('mal');
     if (al !== lastAl || mal !== lastMal) {
       lastAl = al;
       lastMal = mal;
@@ -418,4 +404,12 @@ export function initSyncPanel(): void {
     if (onListRoute() && !document.getElementById('almal-panel')) mountSoon();
     maybeAutoSync();
   }, 2000);
+
+  ctx.onCleanup(() => {
+    clearTimeout(retryTimer);
+    retryTimer = 0;
+    selfLookup = false;
+    document.getElementById('almal-panel')?.remove();
+    if (panelCtx === ctx) panelCtx = null;
+  });
 }

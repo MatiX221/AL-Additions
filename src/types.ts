@@ -91,8 +91,6 @@ export interface FeatureMeta {
   accounts?: string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
-  early?: boolean;
-  alwaysRun?: boolean;
 }
 
 export interface ModuleMeta extends ToggleMeta {

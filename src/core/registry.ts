@@ -9,7 +9,6 @@ import {
   type CoreHooksApi,
   type FeatureContext,
   type FeatureLayer,
-  type FeatureMeta,
   type HttpRequestOptions,
   type ModuleDef,
   type ModuleDisableReason,
@@ -902,65 +901,6 @@ export function registerShellModule(
     abortController: null
   });
 }
-
-/**
- * Temporary backwards-compatibility wrapper while remaining modules migrate to `defineModule`.
- * @deprecated Remove after Phase 4 module decoupling finishes.
- */
-export const defineFeature = (meta: FeatureMeta, init: () => void | Promise<void>): void => {
-  if (!ID_RE.test(meta.id)) {
-    console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
-    invalidIds.set(meta.id, { active: false, reason: 'invalid-id' });
-    emitStatusChange(meta.id, { active: false, reason: 'invalid-id' });
-    return;
-  }
-
-  const existing = recordsById.get(meta.id);
-  if (existing) {
-    console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
-    existing.idCollision = true;
-    emitStatusChange(meta.id, { active: false, reason: 'id-collision' });
-    return;
-  }
-
-  const layer: FeatureLayer = meta.layer ?? (meta.early ? 'intercept' : 'feature');
-  const hosts = meta.hosts?.length ? meta.hosts.slice() : ['anilist.co'];
-  const dependsOn = (meta.dependsOn || []).slice();
-  const after = (meta.after || []).slice();
-
-  Settings.register({
-    ...meta,
-    hosts,
-    layer,
-    dependsOn,
-    after
-  });
-
-  if (meta.debug) {
-    const channel = meta.debug.channel || meta.id;
-    registerDebugChannel(channel, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
-  }
-
-  registerRecord({
-    id: meta.id,
-    setting: meta.alwaysRun ? null : meta.key,
-    hosts,
-    layer,
-    early: layer === 'intercept' || layer === 'preload',
-    requiresReload: meta.requiresReload ?? true,
-    dependsOn,
-    after,
-    setup: () => init(),
-    legacyInit: init,
-    invalidId: false,
-    idCollision: false,
-    standalonePaused: false,
-    booted: false,
-    bootSeq: 0,
-    cleanups: [],
-    abortController: null
-  });
-};
 
 export function runMigrations(): void {
   Settings.migrate();

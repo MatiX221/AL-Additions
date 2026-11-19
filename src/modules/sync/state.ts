@@ -11,19 +11,25 @@ const LOCK_KEY = 'sync_lock_heartbeat';
 export const progress: SyncProgress = { phase: 'idle', done: 0, total: 0, changed: 0 };
 export const syncStatus = { syncing: false, cancelled: false, autoSyncRetryAfter: 0 };
 
-const progressListeners: Array<(force: boolean) => void> = [];
-const stateListeners: Array<() => void> = [];
-export const onProgressChange = (cb: (force: boolean) => void): void => {
-  progressListeners.push(cb);
+const progressListeners = new Set<(force: boolean) => void>();
+const stateListeners = new Set<() => void>();
+export const onProgressChange = (cb: (force: boolean) => void): (() => void) => {
+  progressListeners.add(cb);
+  return () => {
+    progressListeners.delete(cb);
+  };
 };
-export const onStateChange = (cb: () => void): void => {
-  stateListeners.push(cb);
+export const onStateChange = (cb: () => void): (() => void) => {
+  stateListeners.add(cb);
+  return () => {
+    stateListeners.delete(cb);
+  };
 };
 export const notifyProgress = (force = false): void => {
-  for (const cb of progressListeners) cb(force);
+  for (const cb of [...progressListeners]) cb(force);
 };
 export const notifyState = (): void => {
-  for (const cb of stateListeners) cb();
+  for (const cb of [...stateListeners]) cb();
 };
 
 export const markDone = (n = 1): void => {

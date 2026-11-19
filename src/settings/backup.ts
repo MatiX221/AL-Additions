@@ -1,6 +1,7 @@
 import { store, logDebug } from '../utils/helpers';
 import { ROWS, TYPES, PREFIX } from './settings';
 import { promptPasswordModal } from './passwordModal';
+import { getAccountSecretKeys } from '../core/accounts';
 
 export const BACKUP_VERSION = 1;
 export const BACKUP_FILENAME = 'al-additions.settings';
@@ -10,13 +11,6 @@ export const MAGIC_ENCRYPTED = new Uint8Array([0x41, 0x4c, 0x41, 0x45]); // 'ALA
 export const FORMAT_VERSION = 1;
 export const SALT_LENGTH = 16;
 export const IV_LENGTH = 12;
-
-export const SENSITIVE_KEYS = [
-  'mal_code_verifier',
-  'mal_token',
-  'mal_refresh_token',
-  'mal_expires_at'
-] as const;
 
 export const SESSION_CACHE_KEYS = [
   'al_token',
@@ -170,7 +164,7 @@ export async function createBackup(
   }
 
   if (includeSecrets) {
-    for (const key of SENSITIVE_KEYS) {
+    for (const key of getAccountSecretKeys()) {
       const val = store.get(key, undefined);
       if (val !== undefined && val !== null) {
         data[key] = val;
@@ -227,7 +221,7 @@ export function createRawBackup(overrides?: Record<string, any>): string {
     data[r.key] = rawVal;
   }
 
-  for (const key of SENSITIVE_KEYS) {
+  for (const key of getAccountSecretKeys()) {
     const val = store.get(key, undefined);
     if (val !== undefined && val !== null) {
       data[key] = val;
@@ -268,9 +262,10 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
     store.del(k);
   }
 
+  const secretKeys = new Set(getAccountSecretKeys());
   for (const [key, rawValue] of Object.entries(data)) {
     if ((SESSION_CACHE_KEYS as readonly string[]).includes(key)) continue;
-    if ((SENSITIVE_KEYS as readonly string[]).includes(key)) {
+    if (secretKeys.has(key)) {
       if (rawValue !== undefined && rawValue !== null) {
         store.set(key, rawValue);
         secretsApplied++;

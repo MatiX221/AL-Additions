@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import '../src/api/mal';
 import '../src/modules/tagFilter';
 import '../src/modules/sync';
 import {
@@ -9,9 +10,9 @@ import {
   MAGIC_ENCRYPTED,
   encryptData,
   decryptData,
-  FORMAT_VERSION,
-  SENSITIVE_KEYS
+  FORMAT_VERSION
 } from '../src/settings/backup';
+import { getAccountSecretKeys } from '../src/core/accounts';
 import { Settings } from '../src/settings/settings';
 import { store } from '../src/utils/helpers';
 
@@ -112,11 +113,13 @@ describe('Settings Backup & Crypto Engine', () => {
     expect(Settings.get('tagPercentage')).toBe(73);
   });
 
-  it('excludes AniList session cache and tokens from SENSITIVE_KEYS and credential exports', async () => {
-    expect((SENSITIVE_KEYS as readonly string[]).includes('al_token')).toBe(false);
-    expect((SENSITIVE_KEYS as readonly string[]).includes('al_username')).toBe(false);
-    expect((SENSITIVE_KEYS as readonly string[]).includes('al_user_id')).toBe(false);
-    expect((SENSITIVE_KEYS as readonly string[]).includes('al_score_format')).toBe(false);
+  it('excludes AniList session cache and tokens from account secret keys and credential exports', async () => {
+    const secretKeys = getAccountSecretKeys();
+    expect(secretKeys).toContain('mal_token');
+    expect(secretKeys.includes('al_token')).toBe(false);
+    expect(secretKeys.includes('al_username')).toBe(false);
+    expect(secretKeys.includes('al_user_id')).toBe(false);
+    expect(secretKeys.includes('al_score_format')).toBe(false);
 
     store.set('al_token', 'stale_token_123');
     store.set('al_username', 'LocalUser');

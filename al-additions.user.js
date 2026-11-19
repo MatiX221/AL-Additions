@@ -390,7 +390,7 @@
 			help: f.help,
 			toggle,
 			options,
-			layer: f.layer ?? (f.early ? "intercept" : "feature"),
+			layer: f.layer ?? "feature",
 			hosts: f.hosts,
 			requiresReload: f.requiresReload,
 			dependsOn: f.dependsOn,
@@ -1751,61 +1751,6 @@
 			abortController: null
 		});
 	}
-	var defineFeature = (meta, init) => {
-		if (!ID_RE.test(meta.id)) {
-			console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
-			invalidIds.set(meta.id, {
-				active: false,
-				reason: "invalid-id"
-			});
-			emitStatusChange(meta.id, {
-				active: false,
-				reason: "invalid-id"
-			});
-			return;
-		}
-		const existing = recordsById.get(meta.id);
-		if (existing) {
-			console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
-			existing.idCollision = true;
-			emitStatusChange(meta.id, {
-				active: false,
-				reason: "id-collision"
-			});
-			return;
-		}
-		const layer = meta.layer ?? (meta.early ? "intercept" : "feature");
-		const hosts = meta.hosts?.length ? meta.hosts.slice() : ["anilist.co"];
-		const dependsOn = (meta.dependsOn || []).slice();
-		const after = (meta.after || []).slice();
-		Settings.register({
-			...meta,
-			hosts,
-			layer,
-			dependsOn,
-			after
-		});
-		if (meta.debug) registerDebugChannel(meta.debug.channel || meta.id, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
-		registerRecord({
-			id: meta.id,
-			setting: meta.alwaysRun ? null : meta.key,
-			hosts,
-			layer,
-			early: layer === "intercept" || layer === "preload",
-			requiresReload: meta.requiresReload ?? true,
-			dependsOn,
-			after,
-			setup: () => init(),
-			legacyInit: init,
-			invalidId: false,
-			idCollision: false,
-			standalonePaused: false,
-			booted: false,
-			bootSeq: 0,
-			cleanups: [],
-			abortController: null
-		});
-	};
 	function runMigrations() {
 		Settings.migrate();
 		for (const layer of [
@@ -1873,6 +1818,14 @@
 			id: Number(m[2])
 		} : null;
 	}
+	function listRoute(pathname = location.pathname) {
+		const m = pathname.match(/^\/user\/([^/]+)\/(anime|manga)list(?:\/|$)/i);
+		if (!m) return null;
+		return {
+			owner: decodeRouteSegment(m[1]),
+			type: m[2].toUpperCase() === "MANGA" ? "MANGA" : "ANIME"
+		};
+	}
 	function compareRoute(pathname = location.pathname) {
 		const m = pathname.match(/^\/user\/([^/]+)\/(animelist|mangalist)\/compare(?:\/|$)/i);
 		if (!m) return null;
@@ -1913,6 +1866,17 @@
 	}
 	function findBannerElement(doc = document) {
 		return doc.querySelector(ANILIST_SELECTORS.banner);
+	}
+	function findSyncPanelAnchor(doc = document) {
+		const shuffle = doc.querySelector(ANILIST_SELECTORS.shuffleControl);
+		if (shuffle) return shuffle.parentElement || shuffle;
+		if (!doc.body) return null;
+		const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+		for (let t; t = walker.nextNode();) {
+			const el = t.parentElement;
+			if (t.nodeValue?.trim() === "Sort" && el?.matches("div, section, aside") && el.parentElement) return el.parentElement;
+		}
+		return null;
 	}
 	defineModule({
 		id: "behindDots",
@@ -8218,6 +8182,12 @@
 	var logLines = [];
 	var lastNotice = "";
 	var uiSink = null;
+	function setMalUiSink(sink) {
+		uiSink = sink;
+		return () => {
+			if (uiSink === sink) uiSink = null;
+		};
+	}
 	function log(msg, level = "info") {
 		const line = `${new Date().toLocaleTimeString([], {
 			hour: "2-digit",
@@ -8543,536 +8513,6 @@
 		}
 		return 0;
 	}
-	var MODAL_CSS = `
-  #ala-pwd-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(5, 12, 20, 0.75);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
-    z-index: 100005;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-    box-sizing: border-box;
-  }
-  .ala-pwd-sheet {
-    width: 100%;
-    max-width: 420px;
-    background: rgb(var(--color-foreground, 31, 38, 49));
-    color: rgb(var(--color-text, 240, 243, 246));
-    border-radius: 10px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    animation: alaModalPop 0.15s ease-out;
-  }
-  @keyframes alaModalPop {
-    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
-    to { opacity: 1; transform: scale(1) translateY(0); }
-  }
-  .ala-pwd-desc {
-    margin: 0 0 16px;
-    font-size: 13px;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-    line-height: 1.45;
-  }
-  .ala-pwd-group {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .ala-pwd-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-  }
-  .ala-pwd-input-wrap {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: 100%;
-  }
-  .ala-pwd-field {
-    width: 100%;
-    height: 40px;
-    padding: 0 38px 0 12px;
-    border-radius: 6px;
-    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
-    background: rgb(var(--color-background, 15, 23, 42));
-    color: rgb(var(--color-text, 240, 243, 246));
-    font: inherit;
-    font-size: 14px;
-    box-sizing: border-box;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-  .ala-pwd-field:focus {
-    outline: none;
-    border-color: rgb(var(--color-blue, 61, 180, 242));
-    box-shadow: 0 0 0 2px rgba(var(--color-blue, 61, 180, 242), 0.25);
-  }
-  .ala-pwd-toggle {
-    position: absolute;
-    right: 4px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 32px;
-    height: 32px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: rgb(var(--color-text-lighter, 146, 154, 166));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: color 0.15s, background 0.15s;
-  }
-  .ala-pwd-toggle:hover {
-    color: rgb(var(--color-text, 240, 243, 246));
-    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.12);
-  }
-  .ala-pwd-error {
-    margin-top: 12px;
-    padding: 8px 12px;
-    border-radius: 6px;
-    background: rgba(var(--color-red, 224, 85, 85), 0.12);
-    border: 1px solid rgba(var(--color-red, 224, 85, 85), 0.3);
-    color: rgb(var(--color-red, 224, 85, 85));
-    font-size: 12px;
-    font-weight: 500;
-  }
-`;
-	var EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
-	var EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
-	function promptPasswordModal(options) {
-		return new Promise((resolve) => {
-			addStyle("ala-pwd-modal-style", MODAL_CSS);
-			const existing = document.getElementById("ala-pwd-backdrop");
-			if (existing) existing.remove();
-			const backdrop = document.createElement("div");
-			backdrop.id = "ala-pwd-backdrop";
-			backdrop.innerHTML = `
-      <div class="ala-sheet ala-pwd-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-pwd-title">
-        <header class="ala-sheet-head">
-          <h2 id="ala-pwd-title">${esc(options.title)}</h2>
-          <button class="ala-icon-btn ala-pwd-btn-close" type="button" aria-label="Close">✕</button>
-        </header>
-        <div class="ala-sheet-body">
-          ${options.description ? `<p class="ala-pwd-desc">${esc(options.description)}</p>` : ""}
-          <div class="ala-pwd-group">
-            <label for="ala-pwd-input-main" class="ala-pwd-label">Password</label>
-            <div class="ala-pwd-input-wrap">
-              <input
-                id="ala-pwd-input-main"
-                class="ala-pwd-field"
-                type="password"
-                placeholder="${esc(options.placeholder || "Enter password")}"
-                autocomplete="${options.confirm ? "new-password" : "current-password"}"
-              />
-              <button type="button" class="ala-pwd-toggle" title="Show / Hide password" aria-label="Toggle password visibility">
-                ${EYE_OPEN}
-              </button>
-            </div>
-          </div>
-          ${options.confirm ? `
-            <div class="ala-pwd-group" style="margin-top:12px">
-              <label for="ala-pwd-input-confirm" class="ala-pwd-label">Confirm Password</label>
-              <div class="ala-pwd-input-wrap">
-                <input
-                  id="ala-pwd-input-confirm"
-                  class="ala-pwd-field"
-                  type="password"
-                  placeholder="Re-enter password"
-                  autocomplete="new-password"
-                />
-              </div>
-            </div>
-          ` : ""}
-          <div class="ala-pwd-error" id="ala-pwd-err" style="display:none"></div>
-        </div>
-        <footer class="ala-sheet-foot">
-          <button class="ala-btn ala-btn--primary" id="ala-pwd-btn-submit" type="button">
-            ${esc(options.submitText || "Submit")}
-          </button>
-          <button class="ala-btn" id="ala-pwd-btn-cancel" type="button">
-            ${esc(options.cancelText || "Cancel")}
-          </button>
-        </footer>
-      </div>
-    `;
-			document.body.appendChild(backdrop);
-			const input = backdrop.querySelector("#ala-pwd-input-main");
-			const confirmInput = backdrop.querySelector("#ala-pwd-input-confirm");
-			const toggleBtn = backdrop.querySelector(".ala-pwd-toggle");
-			const errBox = backdrop.querySelector("#ala-pwd-err");
-			const submitBtn = backdrop.querySelector("#ala-pwd-btn-submit");
-			const cancelBtn = backdrop.querySelector("#ala-pwd-btn-cancel");
-			const closeBtn = backdrop.querySelector(".ala-pwd-btn-close");
-			let isVisible = false;
-			const cleanup = () => {
-				document.removeEventListener("keydown", onKeyDown);
-				backdrop.remove();
-			};
-			const cancel = () => {
-				cleanup();
-				resolve(null);
-			};
-			const submit = () => {
-				const val = input.value;
-				if (!options.allowEmpty && !val.trim()) {
-					errBox.textContent = "Password cannot be empty.";
-					errBox.style.display = "block";
-					input.focus();
-					return;
-				}
-				if (options.confirm && confirmInput) {
-					if (val && val !== confirmInput.value) {
-						errBox.textContent = "Passwords do not match.";
-						errBox.style.display = "block";
-						confirmInput.focus();
-						return;
-					}
-				}
-				cleanup();
-				resolve(val);
-			};
-			toggleBtn.addEventListener("click", () => {
-				isVisible = !isVisible;
-				const type = isVisible ? "text" : "password";
-				input.type = type;
-				if (confirmInput) confirmInput.type = type;
-				toggleBtn.innerHTML = isVisible ? EYE_OFF : EYE_OPEN;
-				toggleBtn.title = isVisible ? "Hide password" : "Show password";
-			});
-			submitBtn.addEventListener("click", submit);
-			cancelBtn.addEventListener("click", cancel);
-			closeBtn.addEventListener("click", cancel);
-			backdrop.addEventListener("click", (e) => {
-				if (e.target === backdrop) cancel();
-			});
-			const onKeyDown = (e) => {
-				if (e.key === "Escape") {
-					e.preventDefault();
-					cancel();
-				} else if (e.key === "Enter") {
-					e.preventDefault();
-					submit();
-				}
-			};
-			document.addEventListener("keydown", onKeyDown);
-			setTimeout(() => input.focus(), 50);
-		});
-	}
-	var BACKUP_FILENAME = "al-additions.settings";
-	var MAGIC_PLAIN = new Uint8Array([
-		65,
-		76,
-		65,
-		83
-	]);
-	var MAGIC_ENCRYPTED = new Uint8Array([
-		65,
-		76,
-		65,
-		69
-	]);
-	var SENSITIVE_KEYS = [
-		"mal_code_verifier",
-		"mal_token",
-		"mal_refresh_token",
-		"mal_expires_at"
-	];
-	var SESSION_CACHE_KEYS = [
-		"al_token",
-		"al_username",
-		"al_user_id",
-		"al_score_format"
-	];
-	var PBKDF2_ITERATIONS = 1e5;
-	function matchesMagic(bytes, magic) {
-		if (bytes.length < magic.length) return false;
-		for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic[i]) return false;
-		return true;
-	}
-	function base64ToUint8(b64) {
-		const binary = atob(b64.replace(/\s+/g, ""));
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-		return bytes;
-	}
-	async function deriveAesKey(password, salt) {
-		const enc = new TextEncoder();
-		const baseKey = await window.crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
-		return window.crypto.subtle.deriveKey({
-			name: "PBKDF2",
-			salt,
-			iterations: PBKDF2_ITERATIONS,
-			hash: "SHA-256"
-		}, baseKey, {
-			name: "AES-GCM",
-			length: 256
-		}, false, ["encrypt", "decrypt"]);
-	}
-	async function decryptData(cryptoData, password) {
-		const salt = base64ToUint8(cryptoData.salt);
-		const iv = base64ToUint8(cryptoData.iv);
-		const ciphertext = base64ToUint8(cryptoData.ciphertext);
-		const key = await deriveAesKey(password, salt);
-		const decryptedBuffer = await window.crypto.subtle.decrypt({
-			name: "AES-GCM",
-			iv
-		}, key, ciphertext);
-		return new TextDecoder().decode(decryptedBuffer);
-	}
-	async function compressDeflateRaw(data) {
-		const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-		const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
-		const buffer = await new Response(stream).arrayBuffer();
-		return new Uint8Array(buffer);
-	}
-	async function decompressDeflateRaw(data) {
-		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-		return await new Response(stream).text();
-	}
-	async function decompressGzip(data) {
-		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"));
-		return await new Response(stream).text();
-	}
-	async function createBackup(includeSecrets, password, overrides) {
-		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
-		const data = {};
-		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
-			data[r.key] = rawVal;
-		}
-		if (includeSecrets) for (const key of SENSITIVE_KEYS) {
-			const val = store$1.get(key, void 0);
-			if (val !== void 0 && val !== null) data[key] = val;
-		}
-		const plainPayload = {
-			version: 1,
-			exportedAt: Date.now(),
-			data
-		};
-		const jsonBytes = new TextEncoder().encode(JSON.stringify(plainPayload));
-		const compressedBytes = await compressDeflateRaw(jsonBytes);
-		if (password && password.trim().length > 0) {
-			const salt = window.crypto.getRandomValues(new Uint8Array(16));
-			const iv = window.crypto.getRandomValues(new Uint8Array(12));
-			const key = await deriveAesKey(password, salt);
-			const ciphertextBuffer = await window.crypto.subtle.encrypt({
-				name: "AES-GCM",
-				iv
-			}, key, compressedBytes);
-			const ciphertext = new Uint8Array(ciphertextBuffer);
-			const out = new Uint8Array(33 + ciphertext.length);
-			out.set(MAGIC_ENCRYPTED, 0);
-			out[4] = 1;
-			out.set(salt, 5);
-			out.set(iv, 21);
-			out.set(ciphertext, 33);
-			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
-			return out;
-		} else {
-			const out = new Uint8Array(5 + compressedBytes.length);
-			out.set(MAGIC_PLAIN, 0);
-			out[4] = 1;
-			out.set(compressedBytes, 5);
-			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
-			return out;
-		}
-	}
-	function createRawBackup(overrides) {
-		const data = {};
-		for (const r of Object.values(ROWS)) {
-			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
-			data[r.key] = rawVal;
-		}
-		for (const key of SENSITIVE_KEYS) {
-			const val = store$1.get(key, void 0);
-			if (val !== void 0 && val !== null) data[key] = val;
-		}
-		return JSON.stringify({
-			version: 1,
-			exportedAt: Date.now(),
-			data
-		}, null, 2);
-	}
-	function downloadBackupFile(bytes, filename = BACKUP_FILENAME) {
-		const blob = new Blob([bytes], { type: "application/octet-stream" });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = filename;
-		document.body.appendChild(a);
-		a.click();
-		a.remove();
-		setTimeout(() => URL.revokeObjectURL(url), 1e3);
-	}
-	function applyVersion1Settings(data) {
-		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
-		let applied = 0;
-		let secretsApplied = 0;
-		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
-		for (const [key, rawValue] of Object.entries(data)) {
-			if (SESSION_CACHE_KEYS.includes(key)) continue;
-			if (SENSITIVE_KEYS.includes(key)) {
-				if (rawValue !== void 0 && rawValue !== null) {
-					store$1.set(key, rawValue);
-					secretsApplied++;
-				}
-				continue;
-			}
-			const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
-			const r = ROWS[settingKey];
-			if (r) {
-				const normalized = TYPES$1[r.type].normalize(rawValue, r);
-				store$1.set(SETTING_PREFIX + settingKey, normalized);
-				applied++;
-			}
-		}
-		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
-		return {
-			applied,
-			secretsApplied
-		};
-	}
-	async function handleLegacyJsonBackup(jsonText, promptPassword) {
-		let payload;
-		try {
-			payload = JSON.parse(jsonText);
-		} catch {
-			throw new Error("Invalid backup file: corrupted JSON content.");
-		}
-		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
-		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
-		if (payload.encrypted === true) {
-			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
-			const password = await promptPassword("Enter password to decrypt your settings backup:");
-			if (password === null) return {
-				applied: 0,
-				secretsApplied: 0,
-				cancelled: true
-			};
-			if (!password) throw new Error("Password cannot be empty.");
-			let decryptedText;
-			try {
-				decryptedText = await decryptData(payload.crypto, password);
-			} catch {
-				throw new Error("Incorrect password or corrupted backup file.");
-			}
-			let data;
-			try {
-				data = JSON.parse(decryptedText);
-			} catch {
-				throw new Error("Decrypted content is not valid JSON.");
-			}
-			return applyVersion1Settings(data);
-		}
-		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
-	}
-	async function importBackup(fileInput, customPromptPassword) {
-		let bytes;
-		if (typeof fileInput === "string") bytes = new TextEncoder().encode(fileInput);
-		else bytes = fileInput;
-		if (!bytes || bytes.length === 0) throw new Error("Backup file is empty.");
-		const promptPassword = customPromptPassword || ((hint) => promptPasswordModal({
-			title: "Decrypt Settings Backup",
-			description: hint || "Enter your password to decrypt your settings backup:",
-			submitText: "Decrypt & Restore",
-			allowEmpty: false,
-			confirm: false,
-			placeholder: "Enter backup password"
-		}));
-		if (matchesMagic(bytes, MAGIC_ENCRYPTED)) {
-			if (bytes.length < 49) throw new Error("Invalid encrypted backup file: file is truncated.");
-			const version = bytes[4];
-			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
-			const password = await promptPassword("Enter password to decrypt your settings backup:");
-			if (password === null) return {
-				applied: 0,
-				secretsApplied: 0,
-				cancelled: true
-			};
-			if (!password) throw new Error("Password cannot be empty.");
-			const salt = bytes.subarray(5, 21);
-			const iv = bytes.subarray(21, 33);
-			const ciphertext = bytes.subarray(33);
-			const key = await deriveAesKey(password, salt);
-			let decryptedBuffer;
-			try {
-				decryptedBuffer = await window.crypto.subtle.decrypt({
-					name: "AES-GCM",
-					iv
-				}, key, ciphertext);
-			} catch {
-				throw new Error("Incorrect password or corrupted backup file.");
-			}
-			let jsonText;
-			try {
-				jsonText = await decompressDeflateRaw(new Uint8Array(decryptedBuffer));
-			} catch {
-				throw new Error("Corrupted decrypted data: failed to decompress.");
-			}
-			let payload;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				throw new Error("Decrypted content is not valid JSON.");
-			}
-			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
-		}
-		if (matchesMagic(bytes, MAGIC_PLAIN)) {
-			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
-			const version = bytes[4];
-			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
-			let jsonText;
-			try {
-				jsonText = await decompressDeflateRaw(bytes.subarray(5));
-			} catch {
-				throw new Error("Corrupted backup file: failed to decompress.");
-			}
-			let payload;
-			try {
-				payload = JSON.parse(jsonText);
-			} catch {
-				throw new Error("Corrupted backup file: invalid JSON content.");
-			}
-			logDebug("[CORE]", "Imported plain binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
-		}
-		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
-			let jsonText;
-			try {
-				jsonText = await decompressGzip(bytes);
-			} catch {
-				throw new Error("Corrupted or invalid GZIP backup file.");
-			}
-			logDebug("[CORE]", "Imported legacy GZIP backup.");
-			return handleLegacyJsonBackup(jsonText, promptPassword);
-		}
-		let jsonText;
-		try {
-			jsonText = new TextDecoder().decode(bytes);
-		} catch {
-			throw new Error("Failed to decode backup file as UTF-8 text.");
-		}
-		logDebug("[CORE]", "Imported legacy JSON/text backup.");
-		return handleLegacyJsonBackup(jsonText, promptPassword);
-	}
-	async function readFileAsBytes(file) {
-		if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
-		return new Promise((resolve, reject) => {
-			const reader = new FileReader();
-			reader.onload = () => resolve(new Uint8Array(reader.result));
-			reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-			reader.readAsArrayBuffer(file);
-		});
-	}
 	var TYPES = MEDIA_TYPES;
 	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
 	var SETTLED_TTL_MS = 3888e6;
@@ -9091,19 +8531,25 @@
 		cancelled: false,
 		autoSyncRetryAfter: 0
 	};
-	var progressListeners = [];
-	var stateListeners = [];
+	var progressListeners = new Set();
+	var stateListeners = new Set();
 	var onProgressChange = (cb) => {
-		progressListeners.push(cb);
+		progressListeners.add(cb);
+		return () => {
+			progressListeners.delete(cb);
+		};
 	};
 	var onStateChange = (cb) => {
-		stateListeners.push(cb);
+		stateListeners.add(cb);
+		return () => {
+			stateListeners.delete(cb);
+		};
 	};
 	var notifyProgress = (force = false) => {
-		for (const cb of progressListeners) cb(force);
+		for (const cb of [...progressListeners]) cb(force);
 	};
 	var notifyState = () => {
-		for (const cb of stateListeners) cb();
+		for (const cb of [...stateListeners]) cb();
 	};
 	var markDone = (n = 1) => {
 		progress.done += n;
@@ -9896,6 +9342,7 @@
 			runSync(dueTypes);
 		} else if (retryAt > 0 && Date.now() >= retryAt) store$1.del("sync_retry_at");
 	}
+	var panelCtx = null;
 	var PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
   #almal-panel *{box-sizing:border-box}
@@ -9995,7 +9442,7 @@
 	function renderRateLimitWarning(panelEl) {
 		if (!panelEl || !panelEl.isConnected) return;
 		const now = Date.now();
-		const limited = [["AniList", AniList.resumeAt()], ["MAL", malLimiter.resumeAt]].filter(([, at]) => Number(at) > now);
+		const limited = [["AniList", panelCtx?.api.resumeAt() ?? 0], ["MAL", malLimiter.resumeAt]].filter(([, at]) => Number(at) > now);
 		let warn = panelEl.querySelector("#almal-api-limit-warning");
 		if (!limited.length) {
 			warn?.remove();
@@ -10044,9 +9491,9 @@
 	}
 	function renderPanel() {
 		const panelEl = document.getElementById("almal-panel");
-		if (!panelEl) return;
-		const alOk = AniList.hasAuth();
-		const malOk = !!store$1.get("mal_token", null);
+		if (!panelEl || !panelCtx) return;
+		const alOk = panelCtx.api.hasAuth();
+		const malOk = panelCtx.accounts.isConnected("mal");
 		const ready = alOk && malOk;
 		const tone = syncStatus.syncing ? "busy" : ready ? "ok" : "idle";
 		let html = `<div class="almal-head"><div class="almal-flow almal-flow--${tone}" role="img" aria-label="${{
@@ -10099,7 +9546,7 @@
 		renderRateLimitWarning(panelEl);
 	}
 	var ACTIONS = {
-		"mal-connect": malConnect,
+		"mal-connect": () => panelCtx?.accounts.connect("mal"),
 		"manual-toggle": () => {
 			ui.manual = !ui.manual;
 			renderPanel();
@@ -10132,48 +9579,25 @@
 			renderPanel();
 		}
 	};
-	function findPanelAnchor() {
-		const shuffle = document.querySelector("[title*=\"Random List Entry\" i], [aria-label*=\"Random List Entry\" i]");
-		if (shuffle) return shuffle.parentElement || shuffle;
-		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-		for (let t; t = walker.nextNode();) {
-			const el = t.parentElement;
-			if (t.nodeValue?.trim() === "Sort" && el?.matches("div, section, aside") && el.parentElement) return el.parentElement;
-		}
-		return null;
-	}
 	var lastMountTry = 0;
 	var retryTimer = 0;
 	var selfLookup = false;
-	var OWNER_RE = /^\/user\/([^/]+)\/(?:anime|manga)list/;
-	var decodeName = (s) => {
-		try {
-			return decodeURIComponent(s);
-		} catch (_) {
-			return s;
-		}
-	};
-	function navUser() {
-		const href = document.querySelector("nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .nav a[href^=\"/user/\"]")?.getAttribute("href");
-		const m = href && href.match(/^\/user\/([^/?#]+)/);
-		return m ? decodeName(m[1]) : "";
-	}
 	function isOwnList() {
-		const owner = decodeName(location.pathname.match(OWNER_RE)?.[1] || "");
+		const owner = listRoute()?.owner || "";
 		if (!owner) return false;
-		const me = store$1.get("al_username", null) || navUser();
-		if (!me && AniList.hasAuth() && !selfLookup) {
+		const me = store$1.get("al_username", null) || navUserName();
+		if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
 			selfLookup = true;
-			tryOr(() => AniList.viewer()).then(() => mountSoon());
+			tryOr(() => panelCtx.api.viewer()).then(() => mountSoon());
 		}
 		return !!me && me.toLowerCase() === owner.toLowerCase();
 	}
-	var onListRoute = () => Settings.get("syncEnabled") && LIST_PATH_RE.test(location.pathname) && isOwnList();
+	var onListRoute = () => !!panelCtx?.get("syncEnabled") && LIST_PATH_RE.test(location.pathname) && isOwnList();
 	function mountPanel() {
 		clearTimeout(retryTimer);
-		if (!onListRoute() || document.getElementById("almal-panel")) return;
+		if (!panelCtx || !onListRoute() || document.getElementById("almal-panel")) return;
 		lastMountTry = Date.now();
-		const anchor = findPanelAnchor();
+		const anchor = findSyncPanelAnchor();
 		if (!anchor) {
 			retryTimer = setTimeout(mountSoon, 700);
 			return;
@@ -10192,14 +9616,31 @@
 		renderPanel();
 	}
 	var mountSoon = debounce(mountPanel, 250);
-	function initSyncPanel() {
-		addStyle("almal-style", PANEL_CSS);
-		onProgressChange((force) => updateProgressUI(force));
-		onStateChange(renderPanel);
-		Core.onBodyMutation(() => {
+	function initSyncPanel(ctx) {
+		panelCtx = ctx;
+		ctx.ownUi("#almal-panel");
+		ctx.addStyle("almal-style", PANEL_CSS);
+		ctx.onCleanup(setMalUiSink({
+			onLog: () => {
+				const hint = document.getElementById("almal-hint");
+				if (hint) hint.textContent = lastNotice;
+				const logBox = document.getElementById("almal-log");
+				if (logBox) logBox.textContent = logLines.join("\n") || "No activity yet.";
+			},
+			onToast: (msg, isError, closeTab) => {
+				ctx.toast.show(msg, {
+					type: isError ? "error" : "success",
+					closeTab
+				});
+			}
+		}));
+		ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
+		ctx.onCleanup(onStateChange(renderPanel));
+		ctx.onCleanup(store$1.watch("mal_token", () => renderPanel()));
+		ctx.onBodyMutation(() => {
 			if (!document.getElementById("almal-panel") && Date.now() - lastMountTry > 1e3 && onListRoute()) mountSoon();
 		});
-		Core.onNavigate(() => {
+		ctx.onNav(() => {
 			clearTimeout(retryTimer);
 			document.getElementById("almal-panel")?.remove();
 			mountSoon();
@@ -10207,9 +9648,9 @@
 		mountSoon();
 		let lastAl = null;
 		let lastMal = null;
-		setInterval(() => {
-			const al = AniList.hasAuth();
-			const mal = !!store$1.get("mal_token", null);
+		ctx.interval(() => {
+			const al = ctx.api.hasAuth();
+			const mal = ctx.accounts.isConnected("mal");
 			if (al !== lastAl || mal !== lastMal) {
 				lastAl = al;
 				lastMal = mal;
@@ -10219,1083 +9660,13 @@
 			if (onListRoute() && !document.getElementById("almal-panel")) mountSoon();
 			maybeAutoSync();
 		}, 2e3);
-	}
-	var activeCandidate = null;
-	function extractDialogMedia(root = document.body) {
-		const dialog = root.closest(".el-dialog, .el-dialog__wrapper, body")?.querySelector(".el-dialog__body") || document.querySelector(".el-dialog__body");
-		if (!dialog) return null;
-		const title = dialog.querySelector(".title, .header .title")?.textContent?.trim() || "";
-		let type = "ANIME";
-		if (dialog.querySelector(".input-wrap.manga, .form.manga, .manga")) type = "MANGA";
-		else if (dialog.querySelector(".input-wrap.anime, .form.anime, .anime")) type = "ANIME";
-		let mediaId = 0;
-		const vue = dialog.__vue__ || dialog.parentElement?.__vue__;
-		if (vue?.mediaId) mediaId = Number(vue.mediaId);
-		else if (vue?.media?.id) mediaId = Number(vue.media.id);
-		if (!mediaId) {
-			const el = dialog.querySelector(".header[data-src], .header[style*=\"media/\"], .cover img, img[src*=\"/media/\"]");
-			const m = (el?.getAttribute("src") || el?.getAttribute("data-src") || el?.style.backgroundImage || "").match(/\/media\/(anime|manga)\/[^\/]+\/(?:bx)?(\d+)/i);
-			if (m) {
-				type = m[1].toUpperCase();
-				mediaId = Number(m[2]);
-			}
-		}
-		if (!mediaId && title) {
-			const link = Array.from(document.querySelectorAll("a[href*=\"/anime/\"], a[href*=\"/manga/\"]")).find((a) => a.textContent?.trim() === title);
-			if (link) {
-				const m = link.getAttribute("href")?.match(/^\/(anime|manga)\/(\d+)/);
-				if (m) {
-					type = m[1].toUpperCase();
-					mediaId = Number(m[2]);
-				}
-			}
-		}
-		if (!mediaId) {
-			const route = mediaRoute();
-			if (route) {
-				mediaId = route.id;
-				type = route.type;
-			}
-		}
-		if (!mediaId) return null;
-		const override = getOverride(mediaId);
-		if (override && override.malId === 0) return null;
-		const malId = override?.malId || stores[type].ids.data[mediaId]?.m || void 0;
-		return {
-			mediaId,
-			type,
-			title: title || `Media #${mediaId}`,
-			malId
-		};
-	}
-	var installed = false;
-	function initDeletionInterceptor() {
-		if (installed || typeof window === "undefined") return;
-		if (location.hostname !== "anilist.co") return;
-		installed = true;
-		const page = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		const origFetch = page.fetch;
-		if (typeof origFetch !== "function") return;
-		page.fetch = async function(input, init) {
-			const url = typeof input === "string" ? input : input?.url || "";
-			const isGraphQL = typeof url === "string" && (url.includes("graphql.anilist.co") || url.includes("/graphql"));
-			let queryStr = "";
-			let variables = null;
-			if (isGraphQL && init?.body) try {
-				const bodyStr = typeof init.body === "string" ? init.body : "";
-				if (bodyStr) {
-					const parsed = JSON.parse(bodyStr);
-					queryStr = parsed.query || parsed.operationName || "";
-					variables = parsed.variables || null;
-				}
-			} catch (_) {}
-			if (queryStr.includes("DeleteMediaListEntry")) {
-				logDebug("[SYNC]", "DeleteMediaListEntry intercepted for variables:", variables);
-				if (Settings.get("syncMode") === "exact") {
-					const candidate = activeCandidate || extractDialogMedia(document.body);
-					if (candidate) {
-						addPendingDelete({
-							mediaId: candidate.mediaId,
-							malId: candidate.malId,
-							type: candidate.type,
-							title: candidate.title,
-							deletedAt: Date.now()
-						});
-						logDebug("[SYNC]", "Queued pending deletion for exact match:", candidate);
-						activeCandidate = null;
-						log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
-					}
-				}
-			}
-			const res = await origFetch.call(page, input, init);
-			if (queryStr.includes("SaveMediaListEntry") && variables?.mediaId) {
-				const mediaId = Number(variables.mediaId);
-				logDebug("[SYNC]", "SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
-				removePendingDelete(mediaId, "ANIME");
-				removePendingDelete(mediaId, "MANGA");
-			}
-			return res;
-		};
-		document.addEventListener("click", (e) => {
-			if (Settings.get("syncMode") !== "exact") return;
-			const target = e.target;
-			if (!target) return;
-			const btnText = ((target.closest(".delete-btn, .delete, button, [role=\"button\"]") || target).textContent || "").trim().toLowerCase();
-			if (target.classList.contains("delete-btn") || target.classList.contains("delete") || btnText === "delete" || btnText.includes("delete list entry")) {
-				const candidate = extractDialogMedia(target);
-				if (candidate) activeCandidate = candidate;
-				return;
-			}
-			const inWarningBox = !!target.closest(".el-message-box, .el-message-box__wrapper");
-			if ((btnText === "ok" || target.classList.contains("el-button--primary") || !!target.closest(".el-message-box__btns .el-button--primary")) && inWarningBox) {
-				const candidate = activeCandidate || extractDialogMedia(document.body);
-				if (candidate) {
-					addPendingDelete({
-						mediaId: candidate.mediaId,
-						malId: candidate.malId,
-						type: candidate.type,
-						title: candidate.title,
-						deletedAt: Date.now()
-					});
-					activeCandidate = null;
-					log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
-				}
-				return;
-			}
-			if (btnText === "cancel" && inWarningBox) {
-				activeCandidate = null;
-				return;
-			}
-			if (btnText === "save" || target.classList.contains("save-btn")) {
-				const candidate = extractDialogMedia(target);
-				if (candidate) removePendingDelete(candidate.mediaId, candidate.type);
-			}
-		}, true);
-	}
-	var ALL_KEYS = [
-		...SENSITIVE_KEYS,
-		"al_username",
-		"al_user_id",
-		"al_score_format",
-		"al_token_auth",
-		"sync_lock_heartbeat",
-		"sync_onboarded",
-		"sync_retry_at",
-		"sync_account",
-		"sync_pending_deletes",
-		...TYPES.flatMap((t) => [
-			`last_sync_${t}`,
-			`last_run_${t}`,
-			`last_compare_${t}`
-		])
-	];
-	defineFeature({
-		id: "sync",
-		key: "syncEnabled",
-		section: "Sync",
-		hosts: ["anilist.co", "myanimelist.net"],
-		layer: "service",
-		alwaysRun: true,
-		def: false,
-		legacy: ["syncEnabled", "syncOn"],
-		title: "AniList → MyAnimeList Sync",
-		help: "Enable sync and show the list page sync panel",
-		debug: {
-			key: "debugSync",
-			title: "Sync Debug",
-			help: "Log MAL synchronization steps, queue processing, rate limits, and deletions.",
-			pattern: /^\[SYNC/i
-		},
-		options: [
-			{
-				key: "syncAutoAnime",
-				type: "toggle",
-				def: false,
-				legacy: ["syncAutoAnime"],
-				title: "Auto-Sync Anime",
-				help: "Automatically sync your anime list to MyAnimeList in the background."
-			},
-			{
-				key: "syncIntervalAnime",
-				type: "number",
-				childOf: "syncAutoAnime",
-				def: 6,
-				min: 1,
-				max: 720,
-				legacy: [
-					"syncIntervalAnime",
-					"syncIntervalHours",
-					"autoSyncIntervalHours",
-					"autoSyncInterval"
-				],
-				title: "Auto-Sync Anime Interval",
-				help: "How often to automatically sync your anime list (in hours, minimum 1)."
-			},
-			{
-				key: "syncAutoManga",
-				type: "toggle",
-				def: false,
-				legacy: ["syncAutoManga"],
-				title: "Auto-Sync Manga",
-				help: "Automatically sync your manga list to MyAnimeList in the background."
-			},
-			{
-				key: "syncIntervalManga",
-				type: "number",
-				childOf: "syncAutoManga",
-				def: 6,
-				min: 1,
-				max: 720,
-				legacy: [
-					"syncIntervalManga",
-					"syncIntervalMangaHours",
-					"autoSyncIntervalMangaHours",
-					"syncIntervalHours"
-				],
-				title: "Auto-Sync Manga Interval",
-				help: "How often to automatically sync your manga list (in hours, minimum 1)."
-			},
-			{
-				key: "syncScoreRounding",
-				type: "select",
-				def: "round",
-				options: [
-					["ceil", "Ceil"],
-					["round", "Round"],
-					["floor", "Floor"]
-				],
-				legacy: ["syncScoreRounding", "scoreConversionMethod"],
-				title: "Decimal Score Conversion",
-				help: "MyAnimeList only accepts whole-number scores. <b>Ceil</b> always rounds up (7.4 → 8), <b>Round</b> rounds normally (7.4 → 7, 7.5 → 8), and <b>Floor</b> always rounds down (7.9 → 7)."
-			},
-			{
-				key: "syncMode",
-				type: "select",
-				def: "update",
-				options: [["update", "Update Only"], ["exact", "Exact Match (Mirror)"]],
-				legacy: ["syncMode"],
-				title: "Sync Mode",
-				help: "<b>Update Only</b> (default) only adds and updates entries on MyAnimeList, keeping existing MAL entries intact if deleted on AniList. <b>Exact Match (Mirror)</b> automatically deletes entries from MyAnimeList when removed from AniList."
-			}
-		]
-	}, () => {
-		initDeletionInterceptor();
-		if (store$1.get("sync_schema", 0) < 2) safe(() => {
-			for (const k of [
-				"mal_mirror_ANIME",
-				"mal_mirror_MANGA",
-				"retry_queue_ANIME",
-				"retry_queue_MANGA",
-				"force_mirror_refresh",
-				"mal_idmap_ANIME",
-				"mal_idmap_MANGA",
-				"last_full_sync"
-			]) store$1.del(k);
-			for (const t of TYPES) if (!store$1.get(`last_run_${t}`, 0) && store$1.get(`last_sync_${t}`, 0)) store$1.set(`last_run_${t}`, store$1.get(`last_sync_${t}`, 0));
-			store$1.set("sync_schema", 2);
-		}, "sync schema upgrade");
-		_GM_registerMenuCommand("🗑️ AL→MAL Sync: Reset all data", () => {
-			ALL_KEYS.forEach((k) => store$1.del(k));
-			for (const t of TYPES) {
-				clearCache(stores[t].ids);
-				clearCache(stores[t].settled);
-			}
-			log("All stored data cleared.");
-			renderPanel();
+		ctx.onCleanup(() => {
+			clearTimeout(retryTimer);
+			retryTimer = 0;
+			selfLookup = false;
+			document.getElementById("almal-panel")?.remove();
+			if (panelCtx === ctx) panelCtx = null;
 		});
-		_GM_registerMenuCommand("🟦 AL→MAL Sync: Disconnect MAL", () => {
-			clearMalAuth();
-			log("MAL disconnected.");
-			renderPanel();
-		});
-		if (location.hostname === "anilist.co") initSyncPanel();
-	});
-	defineFeature({
-		id: "manualOverrides",
-		key: "syncManualOverrides",
-		type: "json",
-		def: {},
-		section: "External Links, Downloads & Mappings",
-		layer: "service",
-		title: "Manual Mappings & Sync Audit",
-		help: "Manage custom MyAnimeList ID overrides, entries ignored from sync, and review database discrepancies."
-	}, () => {});
-	defineModule({
-		id: "tagPercent",
-		key: "tagFilterEnabled",
-		section: "AniList Enhancements",
-		layer: "intercept",
-		requiresReload: true,
-		def: false,
-		legacy: ["tagFilterEnabled", "browseTagRankFilterEnabled"],
-		title: "Browse Tag Rank Filter",
-		help: "Automatically apply a minimum tag-rank percentage when you search with a tag or genre.",
-		options: [{
-			key: "tagPercentage",
-			type: "number",
-			def: 50,
-			min: 1,
-			max: 100,
-			legacy: ["tagPercentage", "minimumTagRankPercentage"],
-			title: "Minimum Tag Rank",
-			help: "The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles."
-		}],
-		setup(ctx) {
-			const PARAM = "minimumTagRank";
-			const VALUE = String(ctx.get("tagPercentage"));
-			const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
-			const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
-			let fixing = false;
-			function apply(initial) {
-				if (fixing || !isTarget()) return;
-				const u = new URL(location.href);
-				if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
-				u.searchParams.set(PARAM, VALUE);
-				fixing = true;
-				try {
-					if (initial) location.replace(u.toString());
-					else {
-						history.replaceState(history.state, document.title, u.toString());
-						window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
-					}
-				} finally {
-					fixing = false;
-				}
-			}
-			apply(true);
-			ctx.onNav(() => apply(false));
-		}
-	});
-	var DEFAULT_TIERS = [
-		{
-			min: 95,
-			max: 100,
-			label: "S+",
-			color: "#FFD700",
-			textColor: "#000000"
-		},
-		{
-			min: 85,
-			max: 94.9,
-			label: "S",
-			color: "#ff7f00",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 75,
-			max: 84.9,
-			label: "A",
-			color: "#aa00ff",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 65,
-			max: 74.9,
-			label: "B",
-			color: "#007fff",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 55,
-			max: 64.9,
-			label: "C",
-			color: "#00aa00",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 41,
-			max: 54.9,
-			label: "D",
-			color: "#aaaaaa",
-			textColor: "#FFFFFF"
-		},
-		{
-			min: 0,
-			max: 40.9,
-			label: "F",
-			color: "#666666",
-			textColor: "#FFFFFF"
-		}
-	];
-	function getTier(rating, tiers) {
-		if (rating <= 0 || !Number.isFinite(rating)) return null;
-		for (const tier of tiers) if (rating >= tier.min && rating <= tier.max) return tier;
-		for (const tier of tiers) if (rating >= tier.min - .05 && rating <= tier.max + .05) return tier;
-		return null;
-	}
-	var NAMED_COLORS = new Set([
-		"black",
-		"white",
-		"gray",
-		"grey",
-		"silver",
-		"red",
-		"maroon",
-		"yellow",
-		"olive",
-		"lime",
-		"green",
-		"aqua",
-		"cyan",
-		"teal",
-		"blue",
-		"navy",
-		"fuchsia",
-		"magenta",
-		"purple",
-		"orange",
-		"gold",
-		"pink",
-		"brown",
-		"transparent"
-	]);
-	function isValidColor(color) {
-		if (typeof color !== "string") return false;
-		const s = color.trim();
-		if (!s) return false;
-		if (/^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return true;
-		if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
-		if (NAMED_COLORS.has(s.toLowerCase())) return true;
-		if (typeof CSS !== "undefined" && typeof CSS.supports === "function") try {
-			if (CSS.supports("color", s)) return true;
-		} catch (_) {}
-		if (typeof Option !== "undefined") try {
-			const opt = new Option();
-			opt.style.color = s;
-			return !!opt.style.color;
-		} catch (_) {}
-		return false;
-	}
-	function normalizeHexColor(color) {
-		const s = (color || "").trim();
-		const m3 = s.match(/^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/);
-		if (m3) return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`.toLowerCase();
-		if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
-		return s;
-	}
-	function validateTiers(input) {
-		if (!Array.isArray(input)) return {
-			valid: false,
-			error: "Tiers configuration must be an array."
-		};
-		if (input.length === 0) return {
-			valid: false,
-			error: "At least one tier must be defined."
-		};
-		const validated = [];
-		for (let i = 0; i < input.length; i++) {
-			const item = input[i];
-			const idx = i + 1;
-			if (!item || typeof item !== "object") return {
-				valid: false,
-				error: `Tier #${idx} is invalid (must be an object).`
-			};
-			const label = typeof item.label === "string" ? item.label.trim() : "";
-			if (!label) return {
-				valid: false,
-				error: `Tier #${idx} must have a non-empty label.`
-			};
-			if (label.length > 20) return {
-				valid: false,
-				error: `Tier "${label}" label is too long (maximum 20 characters).`
-			};
-			const min = typeof item.min === "number" ? item.min : parseFloat(item.min);
-			if (!Number.isFinite(min)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid min score (must be a number).`
-			};
-			if (min < 0 || min > 100) return {
-				valid: false,
-				error: `Tier "${label}" min score (${min}) must be between 0 and 100.`
-			};
-			const max = typeof item.max === "number" ? item.max : parseFloat(item.max);
-			if (!Number.isFinite(max)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid max score (must be a number).`
-			};
-			if (max < 0 || max > 100) return {
-				valid: false,
-				error: `Tier "${label}" max score (${max}) must be between 0 and 100.`
-			};
-			if (min > max) return {
-				valid: false,
-				error: `Tier "${label}" min score (${min}) cannot be greater than max score (${max}).`
-			};
-			const color = typeof item.color === "string" ? item.color.trim() : "";
-			if (!isValidColor(color)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid badge color: "${item.color}". Must be a valid hex or CSS color.`
-			};
-			const textColor = typeof item.textColor === "string" ? item.textColor.trim() : "";
-			if (!isValidColor(textColor)) return {
-				valid: false,
-				error: `Tier "${label}" has an invalid text color: "${item.textColor}". Must be a valid hex or CSS color.`
-			};
-			validated.push({
-				label,
-				min: Math.round(min * 100) / 100,
-				max: Math.round(max * 100) / 100,
-				color: normalizeHexColor(color),
-				textColor: normalizeHexColor(textColor)
-			});
-		}
-		return {
-			valid: true,
-			tiers: validated
-		};
-	}
-	function getValidTiers() {
-		const check = validateTiers(Settings.get("tierLabels"));
-		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
-	}
-	function migrateLegacyTierLabels() {
-		try {
-			const legacy = localStorage.getItem("anilistTierLabelsSettings");
-			if (legacy) {
-				const parsed = JSON.parse(legacy);
-				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
-					const check = validateTiers(parsed.tiers);
-					if (check.valid && check.tiers) store$1.set(SETTING_PREFIX + "tierLabels", check.tiers);
-				}
-				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(SETTING_PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
-			}
-		} catch (_) {}
-	}
-	defineModule({
-		id: "tierLabels",
-		key: "tierLabelsEnabled",
-		section: "AniList Enhancements",
-		layer: "feature",
-		requiresReload: true,
-		def: false,
-		legacy: ["tierLabelsEnabled"],
-		title: "AniList Tier Labels",
-		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
-		debug: {
-			key: "debugTierLabels",
-			title: "Tier Labels Debug",
-			help: "Log scoring system detection, tier matching, and badge rendering.",
-			pattern: /^\[TIER/i
-		},
-		standalone: {
-			name: "AniList Tier Labels",
-			probe: () => detectStandalone("tierLabels")
-		},
-		options: [
-			{
-				key: "tierLabelsColorScore",
-				type: "toggle",
-				def: true,
-				title: "Color score value",
-				help: "Color the score number text to match its tier badge."
-			},
-			{
-				key: "tierLabelsAverageScore",
-				type: "toggle",
-				def: false,
-				title: "Show on Weighted Score",
-				help: "Display tier badge next to the Weighted Score on media pages."
-			},
-			{
-				key: "tierLabels",
-				type: "json",
-				def: DEFAULT_TIERS,
-				title: "Tier Ranges & Colors",
-				help: "Customize score ranges, badge labels, and colors.",
-				validate: validateTiers
-			}
-		],
-		migrate: migrateLegacyTierLabels,
-		setup(ctx) {
-			migrateLegacyTierLabels();
-			ctx.addStyle("ala-tier-labels-css", `
-      .ala-tier-badge {
-        display: inline-block;
-        font-weight: 700;
-        border-radius: 4px;
-        vertical-align: middle;
-        white-space: nowrap;
-        line-height: 1.2;
-        box-sizing: border-box;
-      }
-      .ala-tier-badge--list {
-        font-size: 11px;
-        padding: 2px 5px;
-        margin-left: 5px;
-      }
-      .ala-tier-badge--block {
-        font-size: 10px;
-        padding: 1px 4px;
-        margin-left: 4px;
-      }
-      .ala-tier-container {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-      }
-      .ala-tier-container--block {
-        background-color: rgba(0, 0, 0, 0.55);
-        padding: 2px 6px;
-        border-radius: 4px;
-        overflow: hidden;
-      }
-      `);
-			function createBadge(tier, isBlockView = false) {
-				const badge = document.createElement("span");
-				badge.className = `ala-tier-badge ${isBlockView ? "ala-tier-badge--block" : "ala-tier-badge--list"}`;
-				badge.textContent = tier.label;
-				badge.style.backgroundColor = tier.color;
-				badge.style.color = tier.textColor;
-				return badge;
-			}
-			function getScoreSystem() {
-				const container = document.querySelector(".content.container, .medialist");
-				if (container) {
-					if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
-					if (container.querySelector(".medialist.table.POINT_10_DECIMAL, .medialist.POINT_10_DECIMAL")) return "POINT_10_DECIMAL";
-					if (container.querySelector(".medialist.table.POINT_10, .medialist.POINT_10")) return "POINT_10";
-					if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
-					if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
-				}
-				const viewerFmt = store$1.get("al_score_format", null);
-				if (viewerFmt) return viewerFmt;
-				return "UNKNOWN";
-			}
-			function getCompareColumnFormat(el) {
-				const compareRoot = el.closest(".compare");
-				if (!compareRoot) return "UNKNOWN";
-				const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
-				const sideKey = isAuthUser ? "auth" : "target";
-				if (!compareRoot._colFormats) compareRoot._colFormats = {};
-				if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
-				if (isAuthUser) {
-					const viewerFmt = store$1.get("al_score_format", null);
-					if (viewerFmt) {
-						compareRoot._colFormats[sideKey] = viewerFmt;
-						return viewerFmt;
-					}
-				}
-				const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
-				const cells = compareRoot.querySelectorAll(colSelector);
-				let maxScore = 0;
-				let hasDecimal = false;
-				let hasStarIcon = false;
-				for (const cell of cells) {
-					if (cell.querySelector("svg, .icon")) hasStarIcon = true;
-					const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
-					const num = parseFloat(s);
-					if (!isNaN(num) && num > 0) {
-						if (num > maxScore) maxScore = num;
-						if (s.includes(".")) hasDecimal = true;
-					}
-				}
-				let detected = "UNKNOWN";
-				if (maxScore > 10) detected = "POINT_100";
-				else if (hasDecimal) detected = "POINT_10_DECIMAL";
-				else if (hasStarIcon) detected = "POINT_5";
-				else if (maxScore > 5) detected = "POINT_10";
-				else if (maxScore > 0) detected = "POINT_10";
-				compareRoot._colFormats[sideKey] = detected;
-				ctx.debug.log(`Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
-					maxScore,
-					hasDecimal,
-					hasStarIcon
-				});
-				return detected;
-			}
-			function normalizeScore(score, scoreSystem, isPercentage = false) {
-				if (isNaN(score) || score <= 0) return null;
-				if (isPercentage) return score;
-				switch (scoreSystem) {
-					case "POINT_100": return score;
-					case "POINT_10_DECIMAL":
-					case "POINT_10": return score * 10;
-					case "POINT_5": return score * 20;
-					case "POINT_3": return score === 3 ? 100 : score === 2 ? 60 : 20;
-					default: return score > 10 ? score : score * 10;
-				}
-			}
-			function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
-				if (el.hasAttribute("data-ala-probe")) return;
-				if (el.dataset.tierModified) {
-					const attrNow = el.getAttribute("score");
-					const changed = attrNow !== null && attrNow !== el.dataset.tierSource;
-					if (el.querySelector(".ala-tier-container") && !changed) return;
-					delete el.dataset.tierModified;
-				}
-				const attr = el.getAttribute("score");
-				const rawText = (attr || el.textContent || "").replace("%", "").trim();
-				if (!rawText || rawText === "-" || rawText === "0") return;
-				const num = parseFloat(rawText);
-				if (isNaN(num) || num <= 0) return;
-				const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
-				if (normalizedRating === null) return;
-				const tier = getTier(normalizedRating, tiers);
-				if (!tier) return;
-				ctx.debug.log("Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
-				el.dataset.tierModified = "true";
-				el.dataset.tierSource = attr ?? "";
-				const container = document.createElement("div");
-				container.className = `ala-tier-container ${isBlockView ? "ala-tier-container--block" : ""}`;
-				const scoreSpan = document.createElement("span");
-				scoreSpan.className = "ala-tier-score-text";
-				if (colorScore) scoreSpan.style.color = tier.color;
-				const icon = el.querySelector("svg, .icon");
-				if (icon) {
-					scoreSpan.appendChild(icon.cloneNode(true));
-					scoreSpan.appendChild(document.createTextNode(" " + rawText));
-				} else scoreSpan.textContent = isPercentage ? `${rawText}%` : rawText;
-				container.appendChild(scoreSpan);
-				container.appendChild(createBadge(tier, isBlockView));
-				el.textContent = "";
-				el.appendChild(container);
-			}
-			function processTop100Elements(tiers, colorScore) {
-				document.querySelectorAll(".row.score").forEach((row) => {
-					const percentageEl = row.querySelector(".percentage");
-					if (!percentageEl || percentageEl.classList.contains("popularity")) return;
-					if (percentageEl.dataset.tierModified) {
-						if (percentageEl.querySelector(".ala-tier-container")) return;
-						delete percentageEl.dataset.tierModified;
-					}
-					const textNode = Array.from(percentageEl.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim() !== "");
-					if (!textNode) return;
-					const ratingText = (textNode.textContent || "").trim().replace("%", "");
-					const numericRating = parseFloat(ratingText);
-					if (isNaN(numericRating) || numericRating <= 0) return;
-					const tier = getTier(numericRating, tiers);
-					if (!tier) return;
-					percentageEl.dataset.tierModified = "true";
-					textNode.remove();
-					const ratingWrapper = document.createElement("div");
-					ratingWrapper.className = "ala-tier-container";
-					ratingWrapper.style.display = "inline-flex";
-					ratingWrapper.style.alignItems = "center";
-					ratingWrapper.style.gap = "6px";
-					const textSpan = document.createElement("span");
-					textSpan.className = "ala-tier-score-text";
-					textSpan.textContent = numericRating + "%";
-					if (colorScore) textSpan.style.color = tier.color;
-					ratingWrapper.appendChild(textSpan);
-					ratingWrapper.appendChild(createBadge(tier));
-					const popularityEl = percentageEl.querySelector(".sub-row.popularity");
-					if (popularityEl) percentageEl.insertBefore(ratingWrapper, popularityEl);
-					else percentageEl.appendChild(ratingWrapper);
-				});
-			}
-			function applyTierLabels() {
-				const tiers = getValidTiers();
-				const colorScore = !!ctx.get("tierLabelsColorScore");
-				const showAverage = !!ctx.get("tierLabelsAverageScore");
-				document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
-					processScoreElement(el, tiers, colorScore, false, false);
-				});
-				document.querySelectorAll(".entry-card .score").forEach((el) => {
-					processScoreElement(el, tiers, colorScore, false, true);
-				});
-				if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
-					const label = dataSet.querySelector(".type");
-					const value = dataSet.querySelector(".value");
-					if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
-				});
-				processTop100Elements(tiers, colorScore);
-			}
-			const HINT_KEY = "ala_standalone_seen_tierLabels";
-			let paused = !!store$1.get(HINT_KEY, false);
-			const runScan = () => {
-				if (!paused) applyTierLabels();
-			};
-			ctx.ready(() => {
-				runScan();
-				const unsubNav = ctx.onNav(() => {
-					document.querySelectorAll(".compare").forEach((c) => {
-						delete c._colFormats;
-					});
-					runScan();
-				});
-				let scanQueued = false;
-				const unsubBody = ctx.onBodyMutation(() => {
-					if (scanQueued) return;
-					scanQueued = true;
-					ctx.timeout(() => {
-						scanQueued = false;
-						runScan();
-					}, 100);
-				});
-				detectStandalone("tierLabels").then((found) => {
-					store$1.set(HINT_KEY, found);
-					const wasPaused = paused;
-					paused = found;
-					ctx.setStandalonePaused(found);
-					if (found) {
-						unsubNav();
-						unsubBody();
-						if (!wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
-					} else if (wasPaused) runScan();
-				});
-			});
-		}
-	});
-	var DEV_MODE_DEF = {
-		id: "devMode",
-		key: "devModeEnabled",
-		section: "Advanced",
-		title: "Developer Mode",
-		help: "Enable developer diagnostics and verbose module logging in the browser console.",
-		generalDebug: {
-			key: "debugGeneral",
-			title: "Core & Observer Debug",
-			help: "Log DOM observer mutations, route changes, and general script lifecycle events."
-		}
-	};
-	Settings.registerCoreSetting({
-		key: DEV_MODE_DEF.key,
-		type: "toggle",
-		def: false,
-		title: DEV_MODE_DEF.title,
-		help: DEV_MODE_DEF.help
-	});
-	Settings.registerCoreSetting({
-		key: DEV_MODE_DEF.generalDebug.key,
-		type: "toggle",
-		def: false,
-		title: DEV_MODE_DEF.generalDebug.title,
-		help: DEV_MODE_DEF.generalDebug.help
-	});
-	registerDebugChannel("general", `${SETTING_PREFIX}${DEV_MODE_DEF.generalDebug.key}`, false, /^\[(?:CORE|OBSERVER)/i);
-	var CREDITS = [
-		{
-			name: "Daiya",
-			url: "https://github.com/Daiya404",
-			note: "Combining, fixing and maintaining this script, and the standalone script check for Fast Load and Tier Labels. Everything not credited below, such as the Keyframe Staff List button, the List Score & Progress Editor, and AniList Fast Load, is original work.",
-			works: [["AL-Additions on GitHub", "https://github.com/Daiya404/AL-Additions"], ["AniList Fast Load on GitHub", "https://github.com/Daiya404/AL-Fast-Load"]]
-		},
-		{
-			name: "MatiX221",
-			url: "https://github.com/MatiX221",
-			note: "The API limit fix idea, modularising the script, general bug fixes, AniList Fast Load and Tier Labels integration and improvements, Compare View improvements, manual sync mappings, and the backup and restore feature.",
-			works: [["MatiX221/AL-Additions", "https://github.com/MatiX221/AL-Additions"]]
-		},
-		{
-			name: "Plennhar",
-			url: "https://greasyfork.org/en/users/1323916-plennhar",
-			note: "Browse Tag Rank Filter and Airing Progress Indicator.",
-			works: [["AniList Browse: set default minimum tag percentage to 50", "https://greasyfork.org/en/scripts/559539-anilist-browse-set-default-minimum-tag-percentage-to-50"], ["AniList: color airing dots on anime lists orange if the user is behind on episodes", "https://greasyfork.org/en/scripts/563899-anilist-color-airing-dots-on-anime-lists-orange-if-the-user-is-behind-on-episodes"]]
-		},
-		{
-			name: "Morimasa",
-			url: "https://greasyfork.org/en/users/61126-morimasa",
-			note: "Anime OP/ED songs.",
-			works: [["Anisongs", "https://greasyfork.org/en/scripts/374785-anisongs"]]
-		},
-		{
-			name: "Samu",
-			url: "https://greasyfork.org/en/users/17840-samu",
-			note: "Nyaa search link.",
-			works: [["Find on Nyaa", "https://greasyfork.org/en/scripts/379776-find-on-nyaa"]]
-		},
-		{
-			name: "trevor229",
-			url: "https://greasyfork.org/en/users/158806-trevor229",
-			note: "Banner Downloader.",
-			works: [["AniList Banner Downloader", "https://greasyfork.org/en/scripts/370470-anilist-banner-downloader"]]
-		},
-		{
-			name: "meatloaf1",
-			url: "https://greasyfork.org/en/users/1630083-meatloaf1",
-			note: "Short AniList URLs.",
-			works: [["Remove AniList titles from URL", "https://greasyfork.org/en/scripts/589540-remove-anilist-titles-from-url"]]
-		},
-		{
-			name: "MALSync",
-			url: "https://github.com/MALSync",
-			note: "Inspiration for the MyAnimeList sync, and for the episode/chapter and score embedding.",
-			works: [["MALSync on GitHub", "https://github.com/MALSync/MALSync"]]
-		},
-		{
-			name: "ercarp",
-			url: "https://greasyfork.org/en/users/1434372-ercarp",
-			note: "AniList Tier Labels.",
-			works: [["AniList Tier Labels", "https://greasyfork.org/en/scripts/526694-anilist-tier-labels"]]
-		},
-		{
-			name: "Claude & ChatGPT",
-			note: "AI assistance throughout the consolidation and fixes."
-		}
-	];
-	var creditLink = (url, text, cls = "") => `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
-	var creditsHtml = () => CREDITS.map((c) => `<div class="ala-credit"><b>${c.url ? creditLink(c.url, c.name) : esc(c.name)}</b> — ${esc(c.note)}${c.works ? `<ul>${c.works.map(([label, url]) => `<li>${creditLink(url, label)}</li>`).join("")}</ul>` : ""}</div>`).join("");
-	function openTierEditor(inputEl) {
-		let tiers;
-		try {
-			const check = validateTiers(JSON.parse(inputEl.value));
-			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		} catch {
-			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		}
-		const existing = document.getElementById("ala-tier-editor-backdrop");
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = "ala-tier-editor-backdrop";
-		backdrop.innerHTML = `
-    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
-      <header class="ala-sheet-head">
-        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
-        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-sheet-body">
-        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
-        <div class="ala-tier-table-wrap">
-          <table class="ala-tier-table">
-            <thead>
-              <tr>
-                <th style="width:75px">Label</th>
-                <th style="width:70px">Min</th>
-                <th style="width:70px">Max</th>
-                <th style="width:48px">Badge</th>
-                <th style="width:48px">Text</th>
-                <th style="width:75px">Preview</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="ala-tier-tbody"></tbody>
-          </table>
-        </div>
-        <div class="ala-tier-actions">
-          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
-        </div>
-        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
-          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
-          </div>
-        </div>
-      </div>
-      <footer class="ala-sheet-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
-        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const tbody = backdrop.querySelector("#ala-tier-tbody");
-		const status = backdrop.querySelector("#ala-tier-status");
-		const setModalStatus = (msg, isError = false) => {
-			status.textContent = msg;
-			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
-		};
-		const createRowHtml = (t, idx) => {
-			const badgeColor = normalizeHexColor(t.color) || "#000000";
-			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
-			return `
-    <tr data-idx="${idx}">
-      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
-      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
-      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
-      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
-      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
-      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
-      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
-    </tr>
-  `;
-		};
-		const renderTable = (list) => {
-			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
-		};
-		const getRowsData = () => {
-			const rows = tbody.querySelectorAll("tr");
-			const result = [];
-			rows.forEach((tr) => {
-				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
-				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
-				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
-				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-				result.push({
-					label: label || "Tier",
-					min: isNaN(min) ? 0 : min,
-					max: isNaN(max) ? 100 : max,
-					color,
-					textColor
-				});
-			});
-			return result;
-		};
-		const updatePreview = (tr) => {
-			const label = tr.querySelector(".ala-t-label")?.value || "";
-			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
-			const preview = tr.querySelector(".ala-t-preview");
-			if (preview) {
-				preview.textContent = label;
-				preview.style.backgroundColor = color;
-				preview.style.color = textColor;
-			}
-		};
-		tbody.addEventListener("input", (e) => {
-			const tr = e.target.closest("tr");
-			if (tr) updatePreview(tr);
-		});
-		tbody.addEventListener("click", (e) => {
-			const btn = e.target.closest(".ala-tier-del-btn");
-			if (btn) {
-				const tr = btn.closest("tr");
-				if (tr) {
-					tr.remove();
-					setModalStatus("Tier removed.");
-				}
-			}
-		});
-		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
-			const current = getRowsData();
-			current.push({
-				min: 0,
-				max: 0,
-				label: "New",
-				color: "#3db4f2",
-				textColor: "#ffffff"
-			});
-			renderTable(current);
-			setModalStatus("Added new tier.");
-		});
-		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
-			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
-			setModalStatus("Reset to default tiers.");
-		});
-		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
-		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
-		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
-			if (jsonWrap.style.display === "none") {
-				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
-				jsonWrap.style.display = "block";
-			} else jsonWrap.style.display = "none";
-		});
-		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
-			try {
-				const check = validateTiers(JSON.parse(jsonArea.value));
-				if (!check.valid || !check.tiers) {
-					setModalStatus(check.error || "Invalid tier JSON.", true);
-					return;
-				}
-				renderTable(check.tiers);
-				jsonWrap.style.display = "none";
-				setModalStatus("JSON applied successfully.");
-			} catch (e) {
-				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
-			}
-		});
-		const closeModal = () => {
-			document.removeEventListener("keydown", onKey, true);
-			backdrop.remove();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				closeModal();
-			}
-		};
-		document.addEventListener("keydown", onKey, true);
-		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
-		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) closeModal();
-		});
-		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
-			const check = validateTiers(getRowsData());
-			if (!check.valid || !check.tiers) {
-				setModalStatus(check.error || "Invalid tier configuration.", true);
-				return;
-			}
-			inputEl.value = JSON.stringify(check.tiers);
-			Settings.set("tierLabels", check.tiers);
-			closeModal();
-			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
-			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
-		});
-		renderTable(tiers);
 	}
 	var MODAL_ID = "ala-overrides-backdrop";
 	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
@@ -11393,8 +9764,25 @@
     .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
   }
   `;
-	function ensureOverridesStyle() {
-		addStyle("ala-overrides-style", OVERRIDES_CSS);
+	var modalAddStyle = null;
+	function configureOverridesModalStyle(addStyleFn) {
+		modalAddStyle = addStyleFn;
+		return () => {
+			if (modalAddStyle === addStyleFn) modalAddStyle = null;
+		};
+	}
+	function ensureOverridesStyle(addStyleFn) {
+		const inject = addStyleFn || modalAddStyle;
+		if (inject) {
+			inject("ala-overrides-style", OVERRIDES_CSS);
+			return;
+		}
+		if (typeof document !== "undefined" && !document.getElementById("ala-overrides-style")) {
+			const s = document.createElement("style");
+			s.id = "ala-overrides-style";
+			s.textContent = OVERRIDES_CSS;
+			(document.head || document.documentElement).appendChild(s);
+		}
 	}
 	function extractAlId(raw) {
 		const str = String(raw || "").trim();
@@ -11448,8 +9836,115 @@
 			}
 		}
 	}
-	function openOverridesModal() {
-		ensureOverridesStyle();
+	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", addStyleFn) {
+		ensureOverridesStyle(addStyleFn);
+		const existing = document.getElementById(QUICK_MODAL_ID);
+		if (existing) existing.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = QUICK_MODAL_ID;
+		const existingOverride = getManualOverrides()[String(mediaId)];
+		backdrop.innerHTML = `
+    <div class="ala-ov-sheet ala-ov-quick-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-qo-modal-title">
+      <header class="ala-ov-head">
+        <h2 id="ala-qo-modal-title">Set MAL Mapping</h2>
+        <button class="ala-icon-btn ala-qo-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-ov-body">
+        <div id="ala-qo-preview" class="ala-ov-preview">
+          <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
+        </div>
+
+        <div class="ala-ov-field">
+          <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
+          <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
+        </div>
+
+        <div class="ala-ov-form-actions">
+          <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
+          <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
+          ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
+        </div>
+      </div>
+      <footer class="ala-ov-foot">
+        <button class="ala-btn ala-qo-close" type="button">Cancel</button>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const close = () => backdrop.remove();
+		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close();
+		});
+		const previewBox = backdrop.querySelector("#ala-qo-preview");
+		const malInput = backdrop.querySelector("#ala-qo-mal-input");
+		const saveBtn = backdrop.querySelector("#ala-qo-btn-save");
+		const ignoreBtn = backdrop.querySelector("#ala-qo-btn-ignore");
+		const removeBtn = backdrop.querySelector("#ala-qo-btn-remove");
+		if (existingOverride && existingOverride.malId > 0) malInput.value = String(existingOverride.malId);
+		let loadedTitle = existingOverride?.title || `Media #${mediaId}`;
+		let loadedCover = existingOverride?.cover;
+		let loadedType = existingOverride?.type || mediaType;
+		let detectedMalId;
+		const q = `query ($id: Int) {
+    Media(id: $id) {
+      id
+      idMal
+      type
+      title { userPreferred english romaji }
+      coverImage { medium }
+    }
+  }`;
+		try {
+			const m = (await AniList.query(q, { id: mediaId }))?.Media;
+			if (m) {
+				loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
+				loadedCover = m.coverImage?.medium || loadedCover;
+				loadedType = m.type === "MANGA" ? "MANGA" : "ANIME";
+				detectedMalId = Number(m.idMal) || void 0;
+			}
+		} catch (_) {}
+		const isIgnored = existingOverride && existingOverride.malId === 0;
+		const isCustom = existingOverride && existingOverride.malId > 0;
+		previewBox.innerHTML = `
+    ${loadedCover ? `<img class="ala-ov-preview-cover" src="${loadedCover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+    <div class="ala-ov-preview-info">
+      <div class="ala-ov-preview-title">${loadedTitle}</div>
+      <div class="ala-ov-preview-meta">
+        <span class="ala-ov-badge ${loadedType === "MANGA" ? "ala-ov-badge--manga" : ""}">${loadedType}</span>
+        ${isIgnored ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>` : isCustom ? `<span>Overridden to MAL ID: <b>${existingOverride.malId}</b></span>` : detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+      </div>
+    </div>
+  `;
+		if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
+		saveBtn.addEventListener("click", () => {
+			let malId = extractMalId(malInput.value);
+			if (!malId && detectedMalId) malId = detectedMalId;
+			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
+			setOverride(mediaId, {
+				malId,
+				type: loadedType,
+				title: loadedTitle,
+				cover: loadedCover
+			});
+			close();
+		});
+		ignoreBtn.addEventListener("click", () => {
+			setOverride(mediaId, {
+				malId: 0,
+				type: loadedType,
+				title: loadedTitle,
+				cover: loadedCover
+			});
+			close();
+		});
+		removeBtn?.addEventListener("click", () => {
+			removeOverride(mediaId);
+			close();
+		});
+	}
+	function openOverridesModal(ctxOrAddStyle) {
+		ensureOverridesStyle(typeof ctxOrAddStyle === "function" ? ctxOrAddStyle : ctxOrAddStyle?.addStyle);
 		const existing = document.getElementById(MODAL_ID);
 		if (existing) existing.remove();
 		refreshStaleOverrides().then(() => {
@@ -12161,6 +10656,1632 @@
 			renderList();
 		});
 		renderList();
+	}
+	var activeCandidate = null;
+	function extractDialogMedia(root = document.body) {
+		const dialog = root.closest(".el-dialog, .el-dialog__wrapper, body")?.querySelector(".el-dialog__body") || document.querySelector(".el-dialog__body");
+		if (!dialog) return null;
+		const title = dialog.querySelector(".title, .header .title")?.textContent?.trim() || "";
+		let type = "ANIME";
+		if (dialog.querySelector(".input-wrap.manga, .form.manga, .manga")) type = "MANGA";
+		else if (dialog.querySelector(".input-wrap.anime, .form.anime, .anime")) type = "ANIME";
+		let mediaId = 0;
+		const vue = dialog.__vue__ || dialog.parentElement?.__vue__;
+		if (vue?.mediaId) mediaId = Number(vue.mediaId);
+		else if (vue?.media?.id) mediaId = Number(vue.media.id);
+		if (!mediaId) {
+			const el = dialog.querySelector(".header[data-src], .header[style*=\"media/\"], .cover img, img[src*=\"/media/\"]");
+			const m = (el?.getAttribute("src") || el?.getAttribute("data-src") || el?.style.backgroundImage || "").match(/\/media\/(anime|manga)\/[^\/]+\/(?:bx)?(\d+)/i);
+			if (m) {
+				type = m[1].toUpperCase();
+				mediaId = Number(m[2]);
+			}
+		}
+		if (!mediaId && title) {
+			const link = Array.from(document.querySelectorAll("a[href*=\"/anime/\"], a[href*=\"/manga/\"]")).find((a) => a.textContent?.trim() === title);
+			if (link) {
+				const m = link.getAttribute("href")?.match(/^\/(anime|manga)\/(\d+)/);
+				if (m) {
+					type = m[1].toUpperCase();
+					mediaId = Number(m[2]);
+				}
+			}
+		}
+		if (!mediaId) {
+			const route = mediaRoute();
+			if (route) {
+				mediaId = route.id;
+				type = route.type;
+			}
+		}
+		if (!mediaId) return null;
+		const override = getOverride(mediaId);
+		if (override && override.malId === 0) return null;
+		const malId = override?.malId || stores[type].ids.data[mediaId]?.m || void 0;
+		return {
+			mediaId,
+			type,
+			title: title || `Media #${mediaId}`,
+			malId
+		};
+	}
+	var installed = false;
+	function initDeletionInterceptor() {
+		if (installed || typeof window === "undefined") return;
+		if (location.hostname !== "anilist.co") return;
+		installed = true;
+		const page = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+		const origFetch = page.fetch;
+		if (typeof origFetch !== "function") return;
+		page.fetch = async function(input, init) {
+			const url = typeof input === "string" ? input : input?.url || "";
+			const isGraphQL = typeof url === "string" && (url.includes("graphql.anilist.co") || url.includes("/graphql"));
+			let queryStr = "";
+			let variables = null;
+			if (isGraphQL && init?.body) try {
+				const bodyStr = typeof init.body === "string" ? init.body : "";
+				if (bodyStr) {
+					const parsed = JSON.parse(bodyStr);
+					queryStr = parsed.query || parsed.operationName || "";
+					variables = parsed.variables || null;
+				}
+			} catch (_) {}
+			if (queryStr.includes("DeleteMediaListEntry")) {
+				logDebug("[SYNC]", "DeleteMediaListEntry intercepted for variables:", variables);
+				if (Settings.get("syncMode") === "exact") {
+					const candidate = activeCandidate || extractDialogMedia(document.body);
+					if (candidate) {
+						addPendingDelete({
+							mediaId: candidate.mediaId,
+							malId: candidate.malId,
+							type: candidate.type,
+							title: candidate.title,
+							deletedAt: Date.now()
+						});
+						logDebug("[SYNC]", "Queued pending deletion for exact match:", candidate);
+						activeCandidate = null;
+						log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
+					}
+				}
+			}
+			const res = await origFetch.call(page, input, init);
+			if (queryStr.includes("SaveMediaListEntry") && variables?.mediaId) {
+				const mediaId = Number(variables.mediaId);
+				logDebug("[SYNC]", "SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
+				removePendingDelete(mediaId, "ANIME");
+				removePendingDelete(mediaId, "MANGA");
+			}
+			return res;
+		};
+		document.addEventListener("click", (e) => {
+			if (Settings.get("syncMode") !== "exact") return;
+			const target = e.target;
+			if (!target) return;
+			const btnText = ((target.closest(".delete-btn, .delete, button, [role=\"button\"]") || target).textContent || "").trim().toLowerCase();
+			if (target.classList.contains("delete-btn") || target.classList.contains("delete") || btnText === "delete" || btnText.includes("delete list entry")) {
+				const candidate = extractDialogMedia(target);
+				if (candidate) activeCandidate = candidate;
+				return;
+			}
+			const inWarningBox = !!target.closest(".el-message-box, .el-message-box__wrapper");
+			if ((btnText === "ok" || target.classList.contains("el-button--primary") || !!target.closest(".el-message-box__btns .el-button--primary")) && inWarningBox) {
+				const candidate = activeCandidate || extractDialogMedia(document.body);
+				if (candidate) {
+					addPendingDelete({
+						mediaId: candidate.mediaId,
+						malId: candidate.malId,
+						type: candidate.type,
+						title: candidate.title,
+						deletedAt: Date.now()
+					});
+					activeCandidate = null;
+					log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
+				}
+				return;
+			}
+			if (btnText === "cancel" && inWarningBox) {
+				activeCandidate = null;
+				return;
+			}
+			if (btnText === "save" || target.classList.contains("save-btn")) {
+				const candidate = extractDialogMedia(target);
+				if (candidate) removePendingDelete(candidate.mediaId, candidate.type);
+			}
+		}, true);
+	}
+	var SYNC_DATA_KEYS = [
+		...ANILIST_SESSION_KEYS,
+		"sync_schema",
+		"sync_lock_heartbeat",
+		"sync_onboarded",
+		"sync_retry_at",
+		"sync_account",
+		PENDING_DELETES_KEY,
+		...TYPES.flatMap((t) => [
+			`last_sync_${t}`,
+			`last_run_${t}`,
+			`last_compare_${t}`
+		])
+	];
+	defineModule({
+		id: "sync",
+		key: "syncEnabled",
+		section: "Sync",
+		hosts: ["anilist.co", "myanimelist.net"],
+		layer: "service",
+		requiresReload: false,
+		accounts: ["mal"],
+		def: false,
+		legacy: ["syncEnabled", "syncOn"],
+		title: "AniList → MyAnimeList Sync",
+		help: "Enable sync and show the list page sync panel",
+		debug: {
+			key: "debugSync",
+			title: "Sync Debug",
+			help: "Log MAL synchronization steps, queue processing, rate limits, and deletions.",
+			pattern: /^\[SYNC/i
+		},
+		options: [
+			{
+				key: "syncAutoAnime",
+				type: "toggle",
+				def: false,
+				legacy: ["syncAutoAnime"],
+				title: "Auto-Sync Anime",
+				help: "Automatically sync your anime list to MyAnimeList in the background."
+			},
+			{
+				key: "syncIntervalAnime",
+				type: "number",
+				childOf: "syncAutoAnime",
+				def: 6,
+				min: 1,
+				max: 720,
+				legacy: [
+					"syncIntervalAnime",
+					"syncIntervalHours",
+					"autoSyncIntervalHours",
+					"autoSyncInterval"
+				],
+				title: "Auto-Sync Anime Interval",
+				help: "How often to automatically sync your anime list (in hours, minimum 1)."
+			},
+			{
+				key: "syncAutoManga",
+				type: "toggle",
+				def: false,
+				legacy: ["syncAutoManga"],
+				title: "Auto-Sync Manga",
+				help: "Automatically sync your manga list to MyAnimeList in the background."
+			},
+			{
+				key: "syncIntervalManga",
+				type: "number",
+				childOf: "syncAutoManga",
+				def: 6,
+				min: 1,
+				max: 720,
+				legacy: [
+					"syncIntervalManga",
+					"syncIntervalMangaHours",
+					"autoSyncIntervalMangaHours",
+					"syncIntervalHours"
+				],
+				title: "Auto-Sync Manga Interval",
+				help: "How often to automatically sync your manga list (in hours, minimum 1)."
+			},
+			{
+				key: "syncScoreRounding",
+				type: "select",
+				def: "round",
+				options: [
+					["ceil", "Ceil"],
+					["round", "Round"],
+					["floor", "Floor"]
+				],
+				legacy: ["syncScoreRounding", "scoreConversionMethod"],
+				title: "Decimal Score Conversion",
+				help: "MyAnimeList only accepts whole-number scores. <b>Ceil</b> always rounds up (7.4 → 8), <b>Round</b> rounds normally (7.4 → 7, 7.5 → 8), and <b>Floor</b> always rounds down (7.9 → 7)."
+			},
+			{
+				key: "syncMode",
+				type: "select",
+				def: "update",
+				options: [["update", "Update Only"], ["exact", "Exact Match (Mirror)"]],
+				legacy: ["syncMode"],
+				title: "Sync Mode",
+				help: "<b>Update Only</b> (default) only adds and updates entries on MyAnimeList, keeping existing MAL entries intact if deleted on AniList. <b>Exact Match (Mirror)</b> automatically deletes entries from MyAnimeList when removed from AniList."
+			}
+		],
+		migrate() {
+			if (store$1.get("sync_schema", 0) < 2) safe(() => {
+				for (const k of [
+					"mal_mirror_ANIME",
+					"mal_mirror_MANGA",
+					"retry_queue_ANIME",
+					"retry_queue_MANGA",
+					"force_mirror_refresh",
+					"mal_idmap_ANIME",
+					"mal_idmap_MANGA",
+					"last_full_sync"
+				]) store$1.del(k);
+				for (const t of TYPES) if (!store$1.get(`last_run_${t}`, 0) && store$1.get(`last_sync_${t}`, 0)) store$1.set(`last_run_${t}`, store$1.get(`last_sync_${t}`, 0));
+				store$1.set("sync_schema", 2);
+			}, "sync schema upgrade");
+		},
+		setup(ctx) {
+			initDeletionInterceptor();
+			ctx.menuCommand("🗑️ AL→MAL Sync: Reset all data", () => {
+				SYNC_DATA_KEYS.forEach((k) => store$1.del(k));
+				ctx.api.clearViewer();
+				ctx.accounts.clearSecrets("mal");
+				ctx.storage.clear();
+				for (const t of TYPES) {
+					clearCache(stores[t].ids);
+					clearCache(stores[t].settled);
+				}
+				log("All stored data cleared.");
+				renderPanel();
+			});
+			ctx.menuCommand("🟦 AL→MAL Sync: Disconnect MAL", () => {
+				ctx.accounts.disconnect("mal");
+				log("MAL disconnected.");
+				renderPanel();
+			});
+			if (location.hostname === "anilist.co") initSyncPanel(ctx);
+			ctx.onCleanup(() => {
+				if (syncStatus.syncing) syncStatus.cancelled = true;
+			});
+		}
+	});
+	defineModule({
+		id: "manualOverrides",
+		key: MANUAL_OVERRIDES_ENABLED_KEY,
+		section: "External Links, Downloads & Mappings",
+		layer: "service",
+		requiresReload: false,
+		def: false,
+		legacy: [MANUAL_OVERRIDES_ENABLED_KEY],
+		title: "Manual Mappings & Sync Audit",
+		help: "Manage custom MyAnimeList ID overrides, entries ignored from sync, and review database discrepancies.",
+		options: [{
+			key: OVERRIDES_SETTING_KEY,
+			type: "json",
+			def: {},
+			legacy: [OVERRIDES_SETTING_KEY],
+			title: "Manual Overrides & Audit",
+			help: "Configure custom AniList → MyAnimeList ID mappings, ignore titles, and audit unmatched or orphaned entries.",
+			validate: validateOverrides
+		}],
+		migrate() {
+			if (store$1.get("ala_setting_manualOverridesEnabled", void 0) === void 0 && Object.keys(getManualOverrides()).length > 0) store$1.set(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, true);
+		},
+		setup(ctx) {
+			ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
+			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx.addStyle));
+		}
+	});
+	defineModule({
+		id: "tagPercent",
+		key: "tagFilterEnabled",
+		section: "AniList Enhancements",
+		layer: "intercept",
+		requiresReload: true,
+		def: false,
+		legacy: ["tagFilterEnabled", "browseTagRankFilterEnabled"],
+		title: "Browse Tag Rank Filter",
+		help: "Automatically apply a minimum tag-rank percentage when you search with a tag or genre.",
+		options: [{
+			key: "tagPercentage",
+			type: "number",
+			def: 50,
+			min: 1,
+			max: 100,
+			legacy: ["tagPercentage", "minimumTagRankPercentage"],
+			title: "Minimum Tag Rank",
+			help: "The minimum percentage a selected tag must meet. For example, 50 means the tag must be present on at least half of the relevant titles."
+		}],
+		setup(ctx) {
+			const PARAM = "minimumTagRank";
+			const VALUE = String(ctx.get("tagPercentage"));
+			const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
+			const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
+			let fixing = false;
+			function apply(initial) {
+				if (fixing || !isTarget()) return;
+				const u = new URL(location.href);
+				if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
+				u.searchParams.set(PARAM, VALUE);
+				fixing = true;
+				try {
+					if (initial) location.replace(u.toString());
+					else {
+						history.replaceState(history.state, document.title, u.toString());
+						window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+					}
+				} finally {
+					fixing = false;
+				}
+			}
+			apply(true);
+			ctx.onNav(() => apply(false));
+		}
+	});
+	var DEFAULT_TIERS = [
+		{
+			min: 95,
+			max: 100,
+			label: "S+",
+			color: "#FFD700",
+			textColor: "#000000"
+		},
+		{
+			min: 85,
+			max: 94.9,
+			label: "S",
+			color: "#ff7f00",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 75,
+			max: 84.9,
+			label: "A",
+			color: "#aa00ff",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 65,
+			max: 74.9,
+			label: "B",
+			color: "#007fff",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 55,
+			max: 64.9,
+			label: "C",
+			color: "#00aa00",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 41,
+			max: 54.9,
+			label: "D",
+			color: "#aaaaaa",
+			textColor: "#FFFFFF"
+		},
+		{
+			min: 0,
+			max: 40.9,
+			label: "F",
+			color: "#666666",
+			textColor: "#FFFFFF"
+		}
+	];
+	function getTier(rating, tiers) {
+		if (rating <= 0 || !Number.isFinite(rating)) return null;
+		for (const tier of tiers) if (rating >= tier.min && rating <= tier.max) return tier;
+		for (const tier of tiers) if (rating >= tier.min - .05 && rating <= tier.max + .05) return tier;
+		return null;
+	}
+	var NAMED_COLORS = new Set([
+		"black",
+		"white",
+		"gray",
+		"grey",
+		"silver",
+		"red",
+		"maroon",
+		"yellow",
+		"olive",
+		"lime",
+		"green",
+		"aqua",
+		"cyan",
+		"teal",
+		"blue",
+		"navy",
+		"fuchsia",
+		"magenta",
+		"purple",
+		"orange",
+		"gold",
+		"pink",
+		"brown",
+		"transparent"
+	]);
+	function isValidColor(color) {
+		if (typeof color !== "string") return false;
+		const s = color.trim();
+		if (!s) return false;
+		if (/^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return true;
+		if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
+		if (NAMED_COLORS.has(s.toLowerCase())) return true;
+		if (typeof CSS !== "undefined" && typeof CSS.supports === "function") try {
+			if (CSS.supports("color", s)) return true;
+		} catch (_) {}
+		if (typeof Option !== "undefined") try {
+			const opt = new Option();
+			opt.style.color = s;
+			return !!opt.style.color;
+		} catch (_) {}
+		return false;
+	}
+	function normalizeHexColor(color) {
+		const s = (color || "").trim();
+		const m3 = s.match(/^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/);
+		if (m3) return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`.toLowerCase();
+		if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+		return s;
+	}
+	function validateTiers(input) {
+		if (!Array.isArray(input)) return {
+			valid: false,
+			error: "Tiers configuration must be an array."
+		};
+		if (input.length === 0) return {
+			valid: false,
+			error: "At least one tier must be defined."
+		};
+		const validated = [];
+		for (let i = 0; i < input.length; i++) {
+			const item = input[i];
+			const idx = i + 1;
+			if (!item || typeof item !== "object") return {
+				valid: false,
+				error: `Tier #${idx} is invalid (must be an object).`
+			};
+			const label = typeof item.label === "string" ? item.label.trim() : "";
+			if (!label) return {
+				valid: false,
+				error: `Tier #${idx} must have a non-empty label.`
+			};
+			if (label.length > 20) return {
+				valid: false,
+				error: `Tier "${label}" label is too long (maximum 20 characters).`
+			};
+			const min = typeof item.min === "number" ? item.min : parseFloat(item.min);
+			if (!Number.isFinite(min)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid min score (must be a number).`
+			};
+			if (min < 0 || min > 100) return {
+				valid: false,
+				error: `Tier "${label}" min score (${min}) must be between 0 and 100.`
+			};
+			const max = typeof item.max === "number" ? item.max : parseFloat(item.max);
+			if (!Number.isFinite(max)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid max score (must be a number).`
+			};
+			if (max < 0 || max > 100) return {
+				valid: false,
+				error: `Tier "${label}" max score (${max}) must be between 0 and 100.`
+			};
+			if (min > max) return {
+				valid: false,
+				error: `Tier "${label}" min score (${min}) cannot be greater than max score (${max}).`
+			};
+			const color = typeof item.color === "string" ? item.color.trim() : "";
+			if (!isValidColor(color)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid badge color: "${item.color}". Must be a valid hex or CSS color.`
+			};
+			const textColor = typeof item.textColor === "string" ? item.textColor.trim() : "";
+			if (!isValidColor(textColor)) return {
+				valid: false,
+				error: `Tier "${label}" has an invalid text color: "${item.textColor}". Must be a valid hex or CSS color.`
+			};
+			validated.push({
+				label,
+				min: Math.round(min * 100) / 100,
+				max: Math.round(max * 100) / 100,
+				color: normalizeHexColor(color),
+				textColor: normalizeHexColor(textColor)
+			});
+		}
+		return {
+			valid: true,
+			tiers: validated
+		};
+	}
+	function getValidTiers() {
+		const check = validateTiers(Settings.get("tierLabels"));
+		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
+	}
+	function migrateLegacyTierLabels() {
+		try {
+			const legacy = localStorage.getItem("anilistTierLabelsSettings");
+			if (legacy) {
+				const parsed = JSON.parse(legacy);
+				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
+					const check = validateTiers(parsed.tiers);
+					if (check.valid && check.tiers) store$1.set(SETTING_PREFIX + "tierLabels", check.tiers);
+				}
+				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(SETTING_PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
+			}
+		} catch (_) {}
+	}
+	defineModule({
+		id: "tierLabels",
+		key: "tierLabelsEnabled",
+		section: "AniList Enhancements",
+		layer: "feature",
+		requiresReload: true,
+		def: false,
+		legacy: ["tierLabelsEnabled"],
+		title: "AniList Tier Labels",
+		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
+		debug: {
+			key: "debugTierLabels",
+			title: "Tier Labels Debug",
+			help: "Log scoring system detection, tier matching, and badge rendering.",
+			pattern: /^\[TIER/i
+		},
+		standalone: {
+			name: "AniList Tier Labels",
+			probe: () => detectStandalone("tierLabels")
+		},
+		options: [
+			{
+				key: "tierLabelsColorScore",
+				type: "toggle",
+				def: true,
+				title: "Color score value",
+				help: "Color the score number text to match its tier badge."
+			},
+			{
+				key: "tierLabelsAverageScore",
+				type: "toggle",
+				def: false,
+				title: "Show on Weighted Score",
+				help: "Display tier badge next to the Weighted Score on media pages."
+			},
+			{
+				key: "tierLabels",
+				type: "json",
+				def: DEFAULT_TIERS,
+				title: "Tier Ranges & Colors",
+				help: "Customize score ranges, badge labels, and colors.",
+				validate: validateTiers
+			}
+		],
+		migrate: migrateLegacyTierLabels,
+		setup(ctx) {
+			migrateLegacyTierLabels();
+			ctx.addStyle("ala-tier-labels-css", `
+      .ala-tier-badge {
+        display: inline-block;
+        font-weight: 700;
+        border-radius: 4px;
+        vertical-align: middle;
+        white-space: nowrap;
+        line-height: 1.2;
+        box-sizing: border-box;
+      }
+      .ala-tier-badge--list {
+        font-size: 11px;
+        padding: 2px 5px;
+        margin-left: 5px;
+      }
+      .ala-tier-badge--block {
+        font-size: 10px;
+        padding: 1px 4px;
+        margin-left: 4px;
+      }
+      .ala-tier-container {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .ala-tier-container--block {
+        background-color: rgba(0, 0, 0, 0.55);
+        padding: 2px 6px;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      `);
+			function createBadge(tier, isBlockView = false) {
+				const badge = document.createElement("span");
+				badge.className = `ala-tier-badge ${isBlockView ? "ala-tier-badge--block" : "ala-tier-badge--list"}`;
+				badge.textContent = tier.label;
+				badge.style.backgroundColor = tier.color;
+				badge.style.color = tier.textColor;
+				return badge;
+			}
+			function getScoreSystem() {
+				const container = document.querySelector(".content.container, .medialist");
+				if (container) {
+					if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
+					if (container.querySelector(".medialist.table.POINT_10_DECIMAL, .medialist.POINT_10_DECIMAL")) return "POINT_10_DECIMAL";
+					if (container.querySelector(".medialist.table.POINT_10, .medialist.POINT_10")) return "POINT_10";
+					if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
+					if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
+				}
+				const viewerFmt = store$1.get("al_score_format", null);
+				if (viewerFmt) return viewerFmt;
+				return "UNKNOWN";
+			}
+			function getCompareColumnFormat(el) {
+				const compareRoot = el.closest(".compare");
+				if (!compareRoot) return "UNKNOWN";
+				const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
+				const sideKey = isAuthUser ? "auth" : "target";
+				if (!compareRoot._colFormats) compareRoot._colFormats = {};
+				if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
+				if (isAuthUser) {
+					const viewerFmt = store$1.get("al_score_format", null);
+					if (viewerFmt) {
+						compareRoot._colFormats[sideKey] = viewerFmt;
+						return viewerFmt;
+					}
+				}
+				const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
+				const cells = compareRoot.querySelectorAll(colSelector);
+				let maxScore = 0;
+				let hasDecimal = false;
+				let hasStarIcon = false;
+				for (const cell of cells) {
+					if (cell.querySelector("svg, .icon")) hasStarIcon = true;
+					const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
+					const num = parseFloat(s);
+					if (!isNaN(num) && num > 0) {
+						if (num > maxScore) maxScore = num;
+						if (s.includes(".")) hasDecimal = true;
+					}
+				}
+				let detected = "UNKNOWN";
+				if (maxScore > 10) detected = "POINT_100";
+				else if (hasDecimal) detected = "POINT_10_DECIMAL";
+				else if (hasStarIcon) detected = "POINT_5";
+				else if (maxScore > 5) detected = "POINT_10";
+				else if (maxScore > 0) detected = "POINT_10";
+				compareRoot._colFormats[sideKey] = detected;
+				ctx.debug.log(`Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
+					maxScore,
+					hasDecimal,
+					hasStarIcon
+				});
+				return detected;
+			}
+			function normalizeScore(score, scoreSystem, isPercentage = false) {
+				if (isNaN(score) || score <= 0) return null;
+				if (isPercentage) return score;
+				switch (scoreSystem) {
+					case "POINT_100": return score;
+					case "POINT_10_DECIMAL":
+					case "POINT_10": return score * 10;
+					case "POINT_5": return score * 20;
+					case "POINT_3": return score === 3 ? 100 : score === 2 ? 60 : 20;
+					default: return score > 10 ? score : score * 10;
+				}
+			}
+			function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
+				if (el.hasAttribute("data-ala-probe")) return;
+				if (el.dataset.tierModified) {
+					const attrNow = el.getAttribute("score");
+					const changed = attrNow !== null && attrNow !== el.dataset.tierSource;
+					if (el.querySelector(".ala-tier-container") && !changed) return;
+					delete el.dataset.tierModified;
+				}
+				const attr = el.getAttribute("score");
+				const rawText = (attr || el.textContent || "").replace("%", "").trim();
+				if (!rawText || rawText === "-" || rawText === "0") return;
+				const num = parseFloat(rawText);
+				if (isNaN(num) || num <= 0) return;
+				const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
+				if (normalizedRating === null) return;
+				const tier = getTier(normalizedRating, tiers);
+				if (!tier) return;
+				ctx.debug.log("Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
+				el.dataset.tierModified = "true";
+				el.dataset.tierSource = attr ?? "";
+				const container = document.createElement("div");
+				container.className = `ala-tier-container ${isBlockView ? "ala-tier-container--block" : ""}`;
+				const scoreSpan = document.createElement("span");
+				scoreSpan.className = "ala-tier-score-text";
+				if (colorScore) scoreSpan.style.color = tier.color;
+				const icon = el.querySelector("svg, .icon");
+				if (icon) {
+					scoreSpan.appendChild(icon.cloneNode(true));
+					scoreSpan.appendChild(document.createTextNode(" " + rawText));
+				} else scoreSpan.textContent = isPercentage ? `${rawText}%` : rawText;
+				container.appendChild(scoreSpan);
+				container.appendChild(createBadge(tier, isBlockView));
+				el.textContent = "";
+				el.appendChild(container);
+			}
+			function processTop100Elements(tiers, colorScore) {
+				document.querySelectorAll(".row.score").forEach((row) => {
+					const percentageEl = row.querySelector(".percentage");
+					if (!percentageEl || percentageEl.classList.contains("popularity")) return;
+					if (percentageEl.dataset.tierModified) {
+						if (percentageEl.querySelector(".ala-tier-container")) return;
+						delete percentageEl.dataset.tierModified;
+					}
+					const textNode = Array.from(percentageEl.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim() !== "");
+					if (!textNode) return;
+					const ratingText = (textNode.textContent || "").trim().replace("%", "");
+					const numericRating = parseFloat(ratingText);
+					if (isNaN(numericRating) || numericRating <= 0) return;
+					const tier = getTier(numericRating, tiers);
+					if (!tier) return;
+					percentageEl.dataset.tierModified = "true";
+					textNode.remove();
+					const ratingWrapper = document.createElement("div");
+					ratingWrapper.className = "ala-tier-container";
+					ratingWrapper.style.display = "inline-flex";
+					ratingWrapper.style.alignItems = "center";
+					ratingWrapper.style.gap = "6px";
+					const textSpan = document.createElement("span");
+					textSpan.className = "ala-tier-score-text";
+					textSpan.textContent = numericRating + "%";
+					if (colorScore) textSpan.style.color = tier.color;
+					ratingWrapper.appendChild(textSpan);
+					ratingWrapper.appendChild(createBadge(tier));
+					const popularityEl = percentageEl.querySelector(".sub-row.popularity");
+					if (popularityEl) percentageEl.insertBefore(ratingWrapper, popularityEl);
+					else percentageEl.appendChild(ratingWrapper);
+				});
+			}
+			function applyTierLabels() {
+				const tiers = getValidTiers();
+				const colorScore = !!ctx.get("tierLabelsColorScore");
+				const showAverage = !!ctx.get("tierLabelsAverageScore");
+				document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
+					processScoreElement(el, tiers, colorScore, false, false);
+				});
+				document.querySelectorAll(".entry-card .score").forEach((el) => {
+					processScoreElement(el, tiers, colorScore, false, true);
+				});
+				if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
+					const label = dataSet.querySelector(".type");
+					const value = dataSet.querySelector(".value");
+					if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
+				});
+				processTop100Elements(tiers, colorScore);
+			}
+			const HINT_KEY = "ala_standalone_seen_tierLabels";
+			let paused = !!store$1.get(HINT_KEY, false);
+			const runScan = () => {
+				if (!paused) applyTierLabels();
+			};
+			ctx.ready(() => {
+				runScan();
+				const unsubNav = ctx.onNav(() => {
+					document.querySelectorAll(".compare").forEach((c) => {
+						delete c._colFormats;
+					});
+					runScan();
+				});
+				let scanQueued = false;
+				const unsubBody = ctx.onBodyMutation(() => {
+					if (scanQueued) return;
+					scanQueued = true;
+					ctx.timeout(() => {
+						scanQueued = false;
+						runScan();
+					}, 100);
+				});
+				detectStandalone("tierLabels").then((found) => {
+					store$1.set(HINT_KEY, found);
+					const wasPaused = paused;
+					paused = found;
+					ctx.setStandalonePaused(found);
+					if (found) {
+						unsubNav();
+						unsubBody();
+						if (!wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
+					} else if (wasPaused) runScan();
+				});
+			});
+		}
+	});
+	var DEV_MODE_DEF = {
+		id: "devMode",
+		key: "devModeEnabled",
+		section: "Advanced",
+		title: "Developer Mode",
+		help: "Enable developer diagnostics and verbose module logging in the browser console.",
+		generalDebug: {
+			key: "debugGeneral",
+			title: "Core & Observer Debug",
+			help: "Log DOM observer mutations, route changes, and general script lifecycle events."
+		}
+	};
+	Settings.registerCoreSetting({
+		key: DEV_MODE_DEF.key,
+		type: "toggle",
+		def: false,
+		title: DEV_MODE_DEF.title,
+		help: DEV_MODE_DEF.help
+	});
+	Settings.registerCoreSetting({
+		key: DEV_MODE_DEF.generalDebug.key,
+		type: "toggle",
+		def: false,
+		title: DEV_MODE_DEF.generalDebug.title,
+		help: DEV_MODE_DEF.generalDebug.help
+	});
+	registerDebugChannel("general", `${SETTING_PREFIX}${DEV_MODE_DEF.generalDebug.key}`, false, /^\[(?:CORE|OBSERVER)/i);
+	var CREDITS = [
+		{
+			name: "Daiya",
+			url: "https://github.com/Daiya404",
+			note: "Combining, fixing and maintaining this script, and the standalone script check for Fast Load and Tier Labels. Everything not credited below, such as the Keyframe Staff List button, the List Score & Progress Editor, and AniList Fast Load, is original work.",
+			works: [["AL-Additions on GitHub", "https://github.com/Daiya404/AL-Additions"], ["AniList Fast Load on GitHub", "https://github.com/Daiya404/AL-Fast-Load"]]
+		},
+		{
+			name: "MatiX221",
+			url: "https://github.com/MatiX221",
+			note: "The API limit fix idea, modularising the script, general bug fixes, AniList Fast Load and Tier Labels integration and improvements, Compare View improvements, manual sync mappings, and the backup and restore feature.",
+			works: [["MatiX221/AL-Additions", "https://github.com/MatiX221/AL-Additions"]]
+		},
+		{
+			name: "Plennhar",
+			url: "https://greasyfork.org/en/users/1323916-plennhar",
+			note: "Browse Tag Rank Filter and Airing Progress Indicator.",
+			works: [["AniList Browse: set default minimum tag percentage to 50", "https://greasyfork.org/en/scripts/559539-anilist-browse-set-default-minimum-tag-percentage-to-50"], ["AniList: color airing dots on anime lists orange if the user is behind on episodes", "https://greasyfork.org/en/scripts/563899-anilist-color-airing-dots-on-anime-lists-orange-if-the-user-is-behind-on-episodes"]]
+		},
+		{
+			name: "Morimasa",
+			url: "https://greasyfork.org/en/users/61126-morimasa",
+			note: "Anime OP/ED songs.",
+			works: [["Anisongs", "https://greasyfork.org/en/scripts/374785-anisongs"]]
+		},
+		{
+			name: "Samu",
+			url: "https://greasyfork.org/en/users/17840-samu",
+			note: "Nyaa search link.",
+			works: [["Find on Nyaa", "https://greasyfork.org/en/scripts/379776-find-on-nyaa"]]
+		},
+		{
+			name: "trevor229",
+			url: "https://greasyfork.org/en/users/158806-trevor229",
+			note: "Banner Downloader.",
+			works: [["AniList Banner Downloader", "https://greasyfork.org/en/scripts/370470-anilist-banner-downloader"]]
+		},
+		{
+			name: "meatloaf1",
+			url: "https://greasyfork.org/en/users/1630083-meatloaf1",
+			note: "Short AniList URLs.",
+			works: [["Remove AniList titles from URL", "https://greasyfork.org/en/scripts/589540-remove-anilist-titles-from-url"]]
+		},
+		{
+			name: "MALSync",
+			url: "https://github.com/MALSync",
+			note: "Inspiration for the MyAnimeList sync, and for the episode/chapter and score embedding.",
+			works: [["MALSync on GitHub", "https://github.com/MALSync/MALSync"]]
+		},
+		{
+			name: "ercarp",
+			url: "https://greasyfork.org/en/users/1434372-ercarp",
+			note: "AniList Tier Labels.",
+			works: [["AniList Tier Labels", "https://greasyfork.org/en/scripts/526694-anilist-tier-labels"]]
+		},
+		{
+			name: "Claude & ChatGPT",
+			note: "AI assistance throughout the consolidation and fixes."
+		}
+	];
+	var creditLink = (url, text, cls = "") => `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
+	var creditsHtml = () => CREDITS.map((c) => `<div class="ala-credit"><b>${c.url ? creditLink(c.url, c.name) : esc(c.name)}</b> — ${esc(c.note)}${c.works ? `<ul>${c.works.map(([label, url]) => `<li>${creditLink(url, label)}</li>`).join("")}</ul>` : ""}</div>`).join("");
+	var MODAL_CSS = `
+  #ala-pwd-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 12, 20, 0.75);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 100005;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  .ala-pwd-sheet {
+    width: 100%;
+    max-width: 420px;
+    background: rgb(var(--color-foreground, 31, 38, 49));
+    color: rgb(var(--color-text, 240, 243, 246));
+    border-radius: 10px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: alaModalPop 0.15s ease-out;
+  }
+  @keyframes alaModalPop {
+    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .ala-pwd-desc {
+    margin: 0 0 16px;
+    font-size: 13px;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    line-height: 1.45;
+  }
+  .ala-pwd-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ala-pwd-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+  }
+  .ala-pwd-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+  }
+  .ala-pwd-field {
+    width: 100%;
+    height: 40px;
+    padding: 0 38px 0 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
+    background: rgb(var(--color-background, 15, 23, 42));
+    color: rgb(var(--color-text, 240, 243, 246));
+    font: inherit;
+    font-size: 14px;
+    box-sizing: border-box;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .ala-pwd-field:focus {
+    outline: none;
+    border-color: rgb(var(--color-blue, 61, 180, 242));
+    box-shadow: 0 0 0 2px rgba(var(--color-blue, 61, 180, 242), 0.25);
+  }
+  .ala-pwd-toggle {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+  .ala-pwd-toggle:hover {
+    color: rgb(var(--color-text, 240, 243, 246));
+    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.12);
+  }
+  .ala-pwd-error {
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: rgba(var(--color-red, 224, 85, 85), 0.12);
+    border: 1px solid rgba(var(--color-red, 224, 85, 85), 0.3);
+    color: rgb(var(--color-red, 224, 85, 85));
+    font-size: 12px;
+    font-weight: 500;
+  }
+`;
+	var EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+	var EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+	function promptPasswordModal(options) {
+		return new Promise((resolve) => {
+			addStyle("ala-pwd-modal-style", MODAL_CSS);
+			const existing = document.getElementById("ala-pwd-backdrop");
+			if (existing) existing.remove();
+			const backdrop = document.createElement("div");
+			backdrop.id = "ala-pwd-backdrop";
+			backdrop.innerHTML = `
+      <div class="ala-sheet ala-pwd-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-pwd-title">
+        <header class="ala-sheet-head">
+          <h2 id="ala-pwd-title">${esc(options.title)}</h2>
+          <button class="ala-icon-btn ala-pwd-btn-close" type="button" aria-label="Close">✕</button>
+        </header>
+        <div class="ala-sheet-body">
+          ${options.description ? `<p class="ala-pwd-desc">${esc(options.description)}</p>` : ""}
+          <div class="ala-pwd-group">
+            <label for="ala-pwd-input-main" class="ala-pwd-label">Password</label>
+            <div class="ala-pwd-input-wrap">
+              <input
+                id="ala-pwd-input-main"
+                class="ala-pwd-field"
+                type="password"
+                placeholder="${esc(options.placeholder || "Enter password")}"
+                autocomplete="${options.confirm ? "new-password" : "current-password"}"
+              />
+              <button type="button" class="ala-pwd-toggle" title="Show / Hide password" aria-label="Toggle password visibility">
+                ${EYE_OPEN}
+              </button>
+            </div>
+          </div>
+          ${options.confirm ? `
+            <div class="ala-pwd-group" style="margin-top:12px">
+              <label for="ala-pwd-input-confirm" class="ala-pwd-label">Confirm Password</label>
+              <div class="ala-pwd-input-wrap">
+                <input
+                  id="ala-pwd-input-confirm"
+                  class="ala-pwd-field"
+                  type="password"
+                  placeholder="Re-enter password"
+                  autocomplete="new-password"
+                />
+              </div>
+            </div>
+          ` : ""}
+          <div class="ala-pwd-error" id="ala-pwd-err" style="display:none"></div>
+        </div>
+        <footer class="ala-sheet-foot">
+          <button class="ala-btn ala-btn--primary" id="ala-pwd-btn-submit" type="button">
+            ${esc(options.submitText || "Submit")}
+          </button>
+          <button class="ala-btn" id="ala-pwd-btn-cancel" type="button">
+            ${esc(options.cancelText || "Cancel")}
+          </button>
+        </footer>
+      </div>
+    `;
+			document.body.appendChild(backdrop);
+			const input = backdrop.querySelector("#ala-pwd-input-main");
+			const confirmInput = backdrop.querySelector("#ala-pwd-input-confirm");
+			const toggleBtn = backdrop.querySelector(".ala-pwd-toggle");
+			const errBox = backdrop.querySelector("#ala-pwd-err");
+			const submitBtn = backdrop.querySelector("#ala-pwd-btn-submit");
+			const cancelBtn = backdrop.querySelector("#ala-pwd-btn-cancel");
+			const closeBtn = backdrop.querySelector(".ala-pwd-btn-close");
+			let isVisible = false;
+			const cleanup = () => {
+				document.removeEventListener("keydown", onKeyDown);
+				backdrop.remove();
+			};
+			const cancel = () => {
+				cleanup();
+				resolve(null);
+			};
+			const submit = () => {
+				const val = input.value;
+				if (!options.allowEmpty && !val.trim()) {
+					errBox.textContent = "Password cannot be empty.";
+					errBox.style.display = "block";
+					input.focus();
+					return;
+				}
+				if (options.confirm && confirmInput) {
+					if (val && val !== confirmInput.value) {
+						errBox.textContent = "Passwords do not match.";
+						errBox.style.display = "block";
+						confirmInput.focus();
+						return;
+					}
+				}
+				cleanup();
+				resolve(val);
+			};
+			toggleBtn.addEventListener("click", () => {
+				isVisible = !isVisible;
+				const type = isVisible ? "text" : "password";
+				input.type = type;
+				if (confirmInput) confirmInput.type = type;
+				toggleBtn.innerHTML = isVisible ? EYE_OFF : EYE_OPEN;
+				toggleBtn.title = isVisible ? "Hide password" : "Show password";
+			});
+			submitBtn.addEventListener("click", submit);
+			cancelBtn.addEventListener("click", cancel);
+			closeBtn.addEventListener("click", cancel);
+			backdrop.addEventListener("click", (e) => {
+				if (e.target === backdrop) cancel();
+			});
+			const onKeyDown = (e) => {
+				if (e.key === "Escape") {
+					e.preventDefault();
+					cancel();
+				} else if (e.key === "Enter") {
+					e.preventDefault();
+					submit();
+				}
+			};
+			document.addEventListener("keydown", onKeyDown);
+			setTimeout(() => input.focus(), 50);
+		});
+	}
+	var BACKUP_FILENAME = "al-additions.settings";
+	var MAGIC_PLAIN = new Uint8Array([
+		65,
+		76,
+		65,
+		83
+	]);
+	var MAGIC_ENCRYPTED = new Uint8Array([
+		65,
+		76,
+		65,
+		69
+	]);
+	var SESSION_CACHE_KEYS = [
+		"al_token",
+		"al_username",
+		"al_user_id",
+		"al_score_format"
+	];
+	var PBKDF2_ITERATIONS = 1e5;
+	function matchesMagic(bytes, magic) {
+		if (bytes.length < magic.length) return false;
+		for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic[i]) return false;
+		return true;
+	}
+	function base64ToUint8(b64) {
+		const binary = atob(b64.replace(/\s+/g, ""));
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+		return bytes;
+	}
+	async function deriveAesKey(password, salt) {
+		const enc = new TextEncoder();
+		const baseKey = await window.crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+		return window.crypto.subtle.deriveKey({
+			name: "PBKDF2",
+			salt,
+			iterations: PBKDF2_ITERATIONS,
+			hash: "SHA-256"
+		}, baseKey, {
+			name: "AES-GCM",
+			length: 256
+		}, false, ["encrypt", "decrypt"]);
+	}
+	async function decryptData(cryptoData, password) {
+		const salt = base64ToUint8(cryptoData.salt);
+		const iv = base64ToUint8(cryptoData.iv);
+		const ciphertext = base64ToUint8(cryptoData.ciphertext);
+		const key = await deriveAesKey(password, salt);
+		const decryptedBuffer = await window.crypto.subtle.decrypt({
+			name: "AES-GCM",
+			iv
+		}, key, ciphertext);
+		return new TextDecoder().decode(decryptedBuffer);
+	}
+	async function compressDeflateRaw(data) {
+		const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+		const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+		const buffer = await new Response(stream).arrayBuffer();
+		return new Uint8Array(buffer);
+	}
+	async function decompressDeflateRaw(data) {
+		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+		return await new Response(stream).text();
+	}
+	async function decompressGzip(data) {
+		const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"));
+		return await new Response(stream).text();
+	}
+	async function createBackup(includeSecrets, password, overrides) {
+		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
+		const data = {};
+		for (const r of Object.values(ROWS)) {
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
+			data[r.key] = rawVal;
+		}
+		if (includeSecrets) for (const key of getAccountSecretKeys()) {
+			const val = store$1.get(key, void 0);
+			if (val !== void 0 && val !== null) data[key] = val;
+		}
+		const plainPayload = {
+			version: 1,
+			exportedAt: Date.now(),
+			data
+		};
+		const jsonBytes = new TextEncoder().encode(JSON.stringify(plainPayload));
+		const compressedBytes = await compressDeflateRaw(jsonBytes);
+		if (password && password.trim().length > 0) {
+			const salt = window.crypto.getRandomValues(new Uint8Array(16));
+			const iv = window.crypto.getRandomValues(new Uint8Array(12));
+			const key = await deriveAesKey(password, salt);
+			const ciphertextBuffer = await window.crypto.subtle.encrypt({
+				name: "AES-GCM",
+				iv
+			}, key, compressedBytes);
+			const ciphertext = new Uint8Array(ciphertextBuffer);
+			const out = new Uint8Array(33 + ciphertext.length);
+			out.set(MAGIC_ENCRYPTED, 0);
+			out[4] = 1;
+			out.set(salt, 5);
+			out.set(iv, 21);
+			out.set(ciphertext, 33);
+			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			return out;
+		} else {
+			const out = new Uint8Array(5 + compressedBytes.length);
+			out.set(MAGIC_PLAIN, 0);
+			out[4] = 1;
+			out.set(compressedBytes, 5);
+			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			return out;
+		}
+	}
+	function createRawBackup(overrides) {
+		const data = {};
+		for (const r of Object.values(ROWS)) {
+			const rawVal = overrides && r.key in overrides ? overrides[r.key] : store$1.get(SETTING_PREFIX + r.key, r.def);
+			data[r.key] = rawVal;
+		}
+		for (const key of getAccountSecretKeys()) {
+			const val = store$1.get(key, void 0);
+			if (val !== void 0 && val !== null) data[key] = val;
+		}
+		return JSON.stringify({
+			version: 1,
+			exportedAt: Date.now(),
+			data
+		}, null, 2);
+	}
+	function downloadBackupFile(bytes, filename = BACKUP_FILENAME) {
+		const blob = new Blob([bytes], { type: "application/octet-stream" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 1e3);
+	}
+	function applyVersion1Settings(data) {
+		if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Backup data is invalid or empty.");
+		let applied = 0;
+		let secretsApplied = 0;
+		for (const k of SESSION_CACHE_KEYS) store$1.del(k);
+		const secretKeys = new Set(getAccountSecretKeys());
+		for (const [key, rawValue] of Object.entries(data)) {
+			if (SESSION_CACHE_KEYS.includes(key)) continue;
+			if (secretKeys.has(key)) {
+				if (rawValue !== void 0 && rawValue !== null) {
+					store$1.set(key, rawValue);
+					secretsApplied++;
+				}
+				continue;
+			}
+			const settingKey = key.startsWith("ala_setting_") ? key.slice(SETTING_PREFIX.length) : key;
+			const r = ROWS[settingKey];
+			if (r) {
+				const normalized = TYPES$1[r.type].normalize(rawValue, r);
+				store$1.set(SETTING_PREFIX + settingKey, normalized);
+				applied++;
+			}
+		}
+		if (applied === 0 && secretsApplied === 0) throw new Error("No recognized settings found in the backup file.");
+		return {
+			applied,
+			secretsApplied
+		};
+	}
+	async function handleLegacyJsonBackup(jsonText, promptPassword) {
+		let payload;
+		try {
+			payload = JSON.parse(jsonText);
+		} catch {
+			throw new Error("Invalid backup file: corrupted JSON content.");
+		}
+		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
+		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
+		if (payload.encrypted === true) {
+			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
+			const password = await promptPassword("Enter password to decrypt your settings backup:");
+			if (password === null) return {
+				applied: 0,
+				secretsApplied: 0,
+				cancelled: true
+			};
+			if (!password) throw new Error("Password cannot be empty.");
+			let decryptedText;
+			try {
+				decryptedText = await decryptData(payload.crypto, password);
+			} catch {
+				throw new Error("Incorrect password or corrupted backup file.");
+			}
+			let data;
+			try {
+				data = JSON.parse(decryptedText);
+			} catch {
+				throw new Error("Decrypted content is not valid JSON.");
+			}
+			return applyVersion1Settings(data);
+		}
+		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
+	}
+	async function importBackup(fileInput, customPromptPassword) {
+		let bytes;
+		if (typeof fileInput === "string") bytes = new TextEncoder().encode(fileInput);
+		else bytes = fileInput;
+		if (!bytes || bytes.length === 0) throw new Error("Backup file is empty.");
+		const promptPassword = customPromptPassword || ((hint) => promptPasswordModal({
+			title: "Decrypt Settings Backup",
+			description: hint || "Enter your password to decrypt your settings backup:",
+			submitText: "Decrypt & Restore",
+			allowEmpty: false,
+			confirm: false,
+			placeholder: "Enter backup password"
+		}));
+		if (matchesMagic(bytes, MAGIC_ENCRYPTED)) {
+			if (bytes.length < 49) throw new Error("Invalid encrypted backup file: file is truncated.");
+			const version = bytes[4];
+			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
+			const password = await promptPassword("Enter password to decrypt your settings backup:");
+			if (password === null) return {
+				applied: 0,
+				secretsApplied: 0,
+				cancelled: true
+			};
+			if (!password) throw new Error("Password cannot be empty.");
+			const salt = bytes.subarray(5, 21);
+			const iv = bytes.subarray(21, 33);
+			const ciphertext = bytes.subarray(33);
+			const key = await deriveAesKey(password, salt);
+			let decryptedBuffer;
+			try {
+				decryptedBuffer = await window.crypto.subtle.decrypt({
+					name: "AES-GCM",
+					iv
+				}, key, ciphertext);
+			} catch {
+				throw new Error("Incorrect password or corrupted backup file.");
+			}
+			let jsonText;
+			try {
+				jsonText = await decompressDeflateRaw(new Uint8Array(decryptedBuffer));
+			} catch {
+				throw new Error("Corrupted decrypted data: failed to decompress.");
+			}
+			let payload;
+			try {
+				payload = JSON.parse(jsonText);
+			} catch {
+				throw new Error("Decrypted content is not valid JSON.");
+			}
+			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
+			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+		}
+		if (matchesMagic(bytes, MAGIC_PLAIN)) {
+			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
+			const version = bytes[4];
+			if (version !== 1) throw new Error(`Unsupported backup version: ${version}. This version of AL Additions only supports version 1.`);
+			let jsonText;
+			try {
+				jsonText = await decompressDeflateRaw(bytes.subarray(5));
+			} catch {
+				throw new Error("Corrupted backup file: failed to decompress.");
+			}
+			let payload;
+			try {
+				payload = JSON.parse(jsonText);
+			} catch {
+				throw new Error("Corrupted backup file: invalid JSON content.");
+			}
+			logDebug("[CORE]", "Imported plain binary backup successfully.");
+			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+		}
+		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
+			let jsonText;
+			try {
+				jsonText = await decompressGzip(bytes);
+			} catch {
+				throw new Error("Corrupted or invalid GZIP backup file.");
+			}
+			logDebug("[CORE]", "Imported legacy GZIP backup.");
+			return handleLegacyJsonBackup(jsonText, promptPassword);
+		}
+		let jsonText;
+		try {
+			jsonText = new TextDecoder().decode(bytes);
+		} catch {
+			throw new Error("Failed to decode backup file as UTF-8 text.");
+		}
+		logDebug("[CORE]", "Imported legacy JSON/text backup.");
+		return handleLegacyJsonBackup(jsonText, promptPassword);
+	}
+	async function readFileAsBytes(file) {
+		if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(new Uint8Array(reader.result));
+			reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+			reader.readAsArrayBuffer(file);
+		});
+	}
+	function openTierEditor(inputEl) {
+		let tiers;
+		try {
+			const check = validateTiers(JSON.parse(inputEl.value));
+			tiers = check.valid && check.tiers ? check.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		} catch {
+			tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS));
+		}
+		const existing = document.getElementById("ala-tier-editor-backdrop");
+		if (existing) existing.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = "ala-tier-editor-backdrop";
+		backdrop.innerHTML = `
+    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
+      <header class="ala-sheet-head">
+        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
+        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-sheet-body">
+        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
+        <div class="ala-tier-table-wrap">
+          <table class="ala-tier-table">
+            <thead>
+              <tr>
+                <th style="width:75px">Label</th>
+                <th style="width:70px">Min</th>
+                <th style="width:70px">Max</th>
+                <th style="width:48px">Badge</th>
+                <th style="width:48px">Text</th>
+                <th style="width:75px">Preview</th>
+                <th style="width:36px"></th>
+              </tr>
+            </thead>
+            <tbody id="ala-tier-tbody"></tbody>
+          </table>
+        </div>
+        <div class="ala-tier-actions">
+          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
+          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
+        </div>
+        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
+          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
+          </div>
+        </div>
+      </div>
+      <footer class="ala-sheet-foot">
+        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
+        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
+      </footer>
+    </div>
+  `;
+		document.body.appendChild(backdrop);
+		const tbody = backdrop.querySelector("#ala-tier-tbody");
+		const status = backdrop.querySelector("#ala-tier-status");
+		const setModalStatus = (msg, isError = false) => {
+			status.textContent = msg;
+			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
+		};
+		const createRowHtml = (t, idx) => {
+			const badgeColor = normalizeHexColor(t.color) || "#000000";
+			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
+			return `
+    <tr data-idx="${idx}">
+      <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
+      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
+      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
+      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
+      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
+      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
+      <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
+    </tr>
+  `;
+		};
+		const renderTable = (list) => {
+			tbody.innerHTML = list.map((t, i) => createRowHtml(t, i)).join("");
+		};
+		const getRowsData = () => {
+			const rows = tbody.querySelectorAll("tr");
+			const result = [];
+			rows.forEach((tr) => {
+				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
+				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
+				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
+				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+				result.push({
+					label: label || "Tier",
+					min: isNaN(min) ? 0 : min,
+					max: isNaN(max) ? 100 : max,
+					color,
+					textColor
+				});
+			});
+			return result;
+		};
+		const updatePreview = (tr) => {
+			const label = tr.querySelector(".ala-t-label")?.value || "";
+			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
+			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+			const preview = tr.querySelector(".ala-t-preview");
+			if (preview) {
+				preview.textContent = label;
+				preview.style.backgroundColor = color;
+				preview.style.color = textColor;
+			}
+		};
+		tbody.addEventListener("input", (e) => {
+			const tr = e.target.closest("tr");
+			if (tr) updatePreview(tr);
+		});
+		tbody.addEventListener("click", (e) => {
+			const btn = e.target.closest(".ala-tier-del-btn");
+			if (btn) {
+				const tr = btn.closest("tr");
+				if (tr) {
+					tr.remove();
+					setModalStatus("Tier removed.");
+				}
+			}
+		});
+		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
+			const current = getRowsData();
+			current.push({
+				min: 0,
+				max: 0,
+				label: "New",
+				color: "#3db4f2",
+				textColor: "#ffffff"
+			});
+			renderTable(current);
+			setModalStatus("Added new tier.");
+		});
+		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
+			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
+			setModalStatus("Reset to default tiers.");
+		});
+		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
+		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
+		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
+			if (jsonWrap.style.display === "none") {
+				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
+				jsonWrap.style.display = "block";
+			} else jsonWrap.style.display = "none";
+		});
+		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
+			try {
+				const check = validateTiers(JSON.parse(jsonArea.value));
+				if (!check.valid || !check.tiers) {
+					setModalStatus(check.error || "Invalid tier JSON.", true);
+					return;
+				}
+				renderTable(check.tiers);
+				jsonWrap.style.display = "none";
+				setModalStatus("JSON applied successfully.");
+			} catch (e) {
+				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
+			}
+		});
+		const closeModal = () => {
+			document.removeEventListener("keydown", onKey, true);
+			backdrop.remove();
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				closeModal();
+			}
+		};
+		document.addEventListener("keydown", onKey, true);
+		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
+		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) closeModal();
+		});
+		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
+			const check = validateTiers(getRowsData());
+			if (!check.valid || !check.tiers) {
+				setModalStatus(check.error || "Invalid tier configuration.", true);
+				return;
+			}
+			inputEl.value = JSON.stringify(check.tiers);
+			Settings.set("tierLabels", check.tiers);
+			closeModal();
+			const panelStatus = document.querySelector("#ala-settings-panel .ala-status");
+			if (panelStatus) panelStatus.textContent = "Custom tiers applied. Press \"Save and reload\" to activate.";
+		});
+		renderTable(tiers);
 	}
 	var PINNED_FIRST = ["Sync", "General"];
 	var PINNED_LAST = ["Advanced"];

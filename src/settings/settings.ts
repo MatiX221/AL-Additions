@@ -160,7 +160,7 @@ function register(f: FeatureMeta): void {
     help: f.help,
     toggle,
     options,
-    layer: f.layer ?? (f.early ? 'intercept' : 'feature'),
+    layer: f.layer ?? 'feature',
     hosts: f.hosts,
     requiresReload: f.requiresReload,
     dependsOn: f.dependsOn,

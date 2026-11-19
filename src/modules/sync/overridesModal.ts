@@ -1,5 +1,4 @@
 import { AniList } from '../../api/anilist';
-import { addStyle } from '../../core/styles';
 import { malFetchList, malDeleteEntry } from '../../api/mal';
 import { stores } from './state';
 import { alFetchAll } from './engine';
@@ -111,8 +110,27 @@ const OVERRIDES_CSS = `
   }
   `;
 
-function ensureOverridesStyle(): void {
-  addStyle('ala-overrides-style', OVERRIDES_CSS);
+let modalAddStyle: ((id: string, css: string) => void) | null = null;
+
+export function configureOverridesModalStyle(addStyleFn: ((id: string, css: string) => void) | null): () => void {
+  modalAddStyle = addStyleFn;
+  return () => {
+    if (modalAddStyle === addStyleFn) modalAddStyle = null;
+  };
+}
+
+function ensureOverridesStyle(addStyleFn?: (id: string, css: string) => void): void {
+  const inject = addStyleFn || modalAddStyle;
+  if (inject) {
+    inject('ala-overrides-style', OVERRIDES_CSS);
+    return;
+  }
+  if (typeof document !== 'undefined' && !document.getElementById('ala-overrides-style')) {
+    const s = document.createElement('style');
+    s.id = 'ala-overrides-style';
+    s.textContent = OVERRIDES_CSS;
+    (document.head || document.documentElement).appendChild(s);
+  }
 }
 
 function extractAlId(raw: string): number {
@@ -190,8 +208,12 @@ async function batchFetchUnmatchedMeta(ids: number[]): Promise<void> {
   }
 }
 
-export async function openQuickOverrideModal(mediaId: number, mediaType: SyncMediaType = 'ANIME'): Promise<void> {
-  ensureOverridesStyle();
+export async function openQuickOverrideModal(
+  mediaId: number,
+  mediaType: SyncMediaType = 'ANIME',
+  addStyleFn?: (id: string, css: string) => void
+): Promise<void> {
+  ensureOverridesStyle(addStyleFn);
   const existing = document.getElementById(QUICK_MODAL_ID);
   if (existing) existing.remove();
 
@@ -329,8 +351,10 @@ export async function openQuickOverrideModal(mediaId: number, mediaType: SyncMed
   });
 }
 
-export function openOverridesModal(): void {
-  ensureOverridesStyle();
+export function openOverridesModal(
+  ctxOrAddStyle?: { value?: any; onApply?: (next: any) => void; addStyle?: (id: string, css: string) => void } | ((id: string, css: string) => void)
+): void {
+  ensureOverridesStyle(typeof ctxOrAddStyle === 'function' ? ctxOrAddStyle : ctxOrAddStyle?.addStyle);
   const existing = document.getElementById(MODAL_ID);
   if (existing) existing.remove();
 
