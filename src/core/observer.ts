@@ -2,9 +2,14 @@ import { safe, logDebug } from '../utils/helpers';
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import type { CleanupFn } from '../types';
 
+interface ObserverEntry<T> {
+  cb: T;
+  active: boolean;
+}
+
 export const Core = (() => {
-  const navCbs: Array<() => void> = [];
-  const bodyCbs: Array<(mutations: MutationRecord[]) => void> = [];
+  const navCbs = new Set<ObserverEntry<() => void>>();
+  const bodyCbs = new Set<ObserverEntry<(mutations: MutationRecord[]) => void>>();
   const ownSelectors = new Map<symbol, string>();
   const BASE_OWN_UI = ['#almal-panel', '#almal-toast', '#ala-toast', '#ala-media-info', '#daiya-anisongs', '#ala-settings-backdrop'];
 
@@ -16,8 +21,11 @@ export const Core = (() => {
   let queued: MutationRecord[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | 0 = 0;
 
-  const fire = <T>(list: Array<(arg: T) => void>, arg?: T): void => {
-    for (const cb of list.slice()) safe(() => cb(arg!), 'core');
+  const fire = <T extends (...args: any[]) => void>(set: Set<ObserverEntry<T>>, ...args: Parameters<T>): void => {
+    for (const entry of [...set]) {
+      if (!entry.active) continue;
+      safe(() => entry.cb(...args), 'core');
+    }
   };
 
   function notifyNav(): void {
@@ -98,7 +106,7 @@ export const Core = (() => {
   }
 
   function ensureObserver(): void {
-    if (!bodyCbs.length || observer) return;
+    if (bodyCbs.size === 0 || observer) return;
     if (!document.body) {
       if (!readyCancel) {
         readyCancel = ready(() => {
@@ -115,7 +123,7 @@ export const Core = (() => {
           flushTimer = 0;
           const batch = queued;
           queued = [];
-          logDebug('[OBSERVER]', `Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.length} listener(s)`);
+          logDebug('[OBSERVER]', `Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
           fire(bodyCbs, batch);
         }, 50);
       }
@@ -126,28 +134,35 @@ export const Core = (() => {
   function registerOwnUi(selector: string): CleanupFn {
     const cleanSel = String(selector || '').trim();
     if (!cleanSel) return () => {};
+    let active = true;
     const token = Symbol(cleanSel);
     ownSelectors.set(token, cleanSel);
     return () => {
+      if (!active) return;
+      active = false;
       ownSelectors.delete(token);
     };
   }
 
   function onNavigate(cb: () => void): CleanupFn {
-    navCbs.push(cb);
+    const entry: ObserverEntry<() => void> = { cb, active: true };
+    navCbs.add(entry);
     return () => {
-      const i = navCbs.indexOf(cb);
-      if (i !== -1) navCbs.splice(i, 1);
+      if (!entry.active) return;
+      entry.active = false;
+      navCbs.delete(entry);
     };
   }
 
   function onBodyMutation(cb: (mutations: MutationRecord[]) => void): CleanupFn {
-    bodyCbs.push(cb);
+    const entry: ObserverEntry<(mutations: MutationRecord[]) => void> = { cb, active: true };
+    bodyCbs.add(entry);
     ensureObserver();
     return () => {
-      const i = bodyCbs.indexOf(cb);
-      if (i !== -1) bodyCbs.splice(i, 1);
-      if (bodyCbs.length === 0) disconnectObserver();
+      if (!entry.active) return;
+      entry.active = false;
+      bodyCbs.delete(entry);
+      if (bodyCbs.size === 0) disconnectObserver();
     };
   }
 

@@ -22,6 +22,7 @@ export const mediaRoute = (): MediaRoute | null => {
 };
 
 export function findExactText(text: string): HTMLElement | null {
+  if (!document.body) return null;
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   for (let t: Node | null; (t = walker.nextNode()); ) {
     if (t.nodeValue?.trim() !== text || !t.parentElement) continue;

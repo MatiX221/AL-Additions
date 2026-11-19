@@ -3,7 +3,6 @@ import { sleep } from './helpers';
 
 const builtInRunning = new Set<string>();
 
-/** Called by a built-in feature once it has actually started, so it is never mistaken for a standalone script. */
 export const markBuiltIn = (id: string): void => {
   builtInRunning.add(id);
 };

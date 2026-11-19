@@ -212,3 +212,135 @@ describe('RateLimiter: Cooldowns & Coordinated Cooldown State', () => {
     expect(limiter.until).toBe(0);
   });
 });
+
+describe('RateLimiter: Cross-Tab Cooldown Integrity & Bounds Safety (B1-24)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    store.del('test_limiter_key');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    store.del('test_limiter_key');
+  });
+
+  it('sanitizes invalid constructor bounds (burst <= 0, NaN/Infinity rate/min/max) without spinning', async () => {
+    const zeroBurst = new RateLimiter({ rate: 60, burst: 0 });
+    expect(zeroBurst.burst).toBe(1);
+    expect(zeroBurst.tokens).toBe(1);
+    await expect(zeroBurst.acquire()).resolves.toBeUndefined();
+
+    const badBounds = new RateLimiter({ rate: NaN, min: -5, max: NaN, burst: -3 });
+    expect(badBounds.min).toBe(1);
+    expect(badBounds.max).toBe(1);
+    expect(badBounds.rate).toBe(1);
+    expect(badBounds.burst).toBe(1);
+    await expect(badBounds.acquire()).resolves.toBeUndefined();
+
+    const inverted = new RateLimiter({ rate: 10, min: 5, max: 2 });
+    expect(inverted.min).toBe(5);
+    expect(inverted.max).toBe(5);
+    expect(inverted.rate).toBe(5);
+  });
+
+  it('ignores non-finite setRate() and limit() values and clamps finite setRate(0) to min', () => {
+    const limiter = new RateLimiter({ rate: 10, min: 2, max: 20, persistKey: 'test_limiter_key' });
+
+    limiter.setRate(NaN);
+    expect(limiter.rate).toBe(10);
+    limiter.setRate(Infinity);
+    expect(limiter.rate).toBe(10);
+    limiter.setRate(0);
+    expect(limiter.rate).toBe(2);
+
+    limiter.limit(Infinity);
+    expect(limiter.until).toBe(0);
+    expect(store.get('test_limiter_key', null)).toBeNull();
+
+    limiter.limit(NaN);
+    expect(limiter.until).toBe(0);
+    expect(store.get('test_limiter_key', null)).toBeNull();
+
+    const jittered = new RateLimiter({ rate: 10, jitter: true });
+    jittered.limit(Number.MAX_VALUE);
+    expect(Number.isFinite(jittered.until)).toBe(true);
+  });
+
+  it('tolerates corrupted or throwing persistKey values in resumeAt', () => {
+    const key = 'test_limiter_key';
+    const limiter = new RateLimiter({ rate: 60, persistKey: key });
+
+    store.set(key, 'not-a-number');
+    expect(limiter.resumeAt).toBe(0);
+
+    store.set(key, Infinity);
+    expect(limiter.resumeAt).toBe(0);
+
+    const spy = vi.spyOn(store, 'get').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+    try {
+      expect(limiter.resumeAt).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('preserves a longer stored cross-tab cooldown when another instance records a shorter limit()', () => {
+    const key = 'test_limiter_key';
+    const tab1 = new RateLimiter({ rate: 60, persistKey: key });
+    const tab3 = new RateLimiter({ rate: 60, persistKey: key });
+
+    tab1.limit(60_000);
+    const longUntil = tab1.until;
+    expect(store.get(key)).toBe(longUntil);
+
+    const setSpy = vi.spyOn(store, 'set');
+    tab3.limit(2_000);
+
+    expect(tab3.until).toBe(longUntil);
+    expect(tab3.resumeAt).toBe(longUntil);
+    expect(store.get(key)).toBe(longUntil);
+    expect(setSpy).not.toHaveBeenCalled();
+
+    tab3.limit(120_000);
+    expect(tab3.until).toBeGreaterThan(longUntil);
+    expect(store.get(key)).toBe(tab3.until);
+    setSpy.mockRestore();
+  });
+
+  it('does not accumulate negative tokens if persistKey is cleared mid-cooldown or clock steps backward', async () => {
+    const key = 'test_limiter_key';
+    const limiter = new RateLimiter({ rate: 60, burst: 1, persistKey: key });
+
+    store.set(key, Date.now() + 60_000);
+
+    let acquired = false;
+    const p = limiter.acquire().then(() => {
+      acquired = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(500);
+    store.del(key);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(limiter.tokens).toBeGreaterThanOrEqual(0);
+    expect(acquired).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(acquired).toBe(true);
+
+    const tNow = Date.now();
+    vi.setSystemTime(tNow - 30_000);
+    let acquiredAfterSkew = false;
+    const p2 = limiter.acquire().then(() => {
+      acquiredAfterSkew = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(limiter.tokens).toBeGreaterThanOrEqual(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    await p2;
+    expect(acquiredAfterSkew).toBe(true);
+  });
+});

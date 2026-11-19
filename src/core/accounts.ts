@@ -1,4 +1,4 @@
-import { store, safe } from '../utils/helpers';
+import { store } from '../utils/helpers';
 import type { AccountProvider, CleanupFn } from '../types';
 
 const providers = new Map<string, AccountProvider>();
@@ -41,8 +41,10 @@ export function clearAccountSecrets(providerId?: string): void {
 export async function runAccountAuthCallbacks(): Promise<void> {
   for (const p of [...providers.values()]) {
     if (!p.onAuthCallback) continue;
-    await safe(async () => {
+    try {
       await p.onAuthCallback!();
-    }, `account auth callback (${p.id})`);
+    } catch (e) {
+      console.error('[AL-Additions]', `account auth callback (${p.id})`, e);
+    }
   }
 }

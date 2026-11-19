@@ -36,6 +36,35 @@ export interface ImportResult {
 
 const PBKDF2_ITERATIONS = 100_000;
 
+const hasOwn = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
+
+function isValidSecretValue(key: string, value: unknown): boolean {
+  if (key.endsWith('_at')) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  }
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function collectBackupData(includeSecrets: boolean, overrides?: Record<string, any>): Record<string, any> {
+  const data: Record<string, any> = {};
+
+  for (const r of Object.values(ROWS)) {
+    const rawVal = overrides && hasOwn(overrides, r.key) ? overrides[r.key] : store.get(PREFIX + r.key, r.def);
+    data[r.key] = rawVal;
+  }
+
+  if (includeSecrets) {
+    for (const key of getAccountSecretKeys()) {
+      const val = store.get(key, undefined);
+      if (val !== undefined && val !== null) {
+        data[key] = val;
+      }
+    }
+  }
+
+  return data;
+}
+
 function matchesMagic(bytes: Uint8Array, magic: Uint8Array): boolean {
   if (bytes.length < magic.length) return false;
   for (let i = 0; i < magic.length; i++) {
@@ -151,21 +180,7 @@ export async function createBackup(
     throw new Error('A password is required to export credentials.');
   }
 
-  const data: Record<string, any> = {};
-
-  for (const r of Object.values(ROWS)) {
-    const rawVal = overrides && r.key in overrides ? overrides[r.key] : store.get(PREFIX + r.key, r.def);
-    data[r.key] = rawVal;
-  }
-
-  if (includeSecrets) {
-    for (const key of getAccountSecretKeys()) {
-      const val = store.get(key, undefined);
-      if (val !== undefined && val !== null) {
-        data[key] = val;
-      }
-    }
-  }
+  const data = collectBackupData(includeSecrets, overrides);
 
   const exportedAt = Date.now();
   const plainPayload = {
@@ -209,19 +224,7 @@ export async function createBackup(
 }
 
 export function createRawBackup(overrides?: Record<string, any>): string {
-  const data: Record<string, any> = {};
-
-  for (const r of Object.values(ROWS)) {
-    const rawVal = overrides && r.key in overrides ? overrides[r.key] : store.get(PREFIX + r.key, r.def);
-    data[r.key] = rawVal;
-  }
-
-  for (const key of getAccountSecretKeys()) {
-    const val = store.get(key, undefined);
-    if (val !== undefined && val !== null) {
-      data[key] = val;
-    }
-  }
+  const data = collectBackupData(true, overrides);
 
   const exportedAt = Date.now();
   const plainPayload = {
@@ -263,7 +266,7 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
     for (const [key, rawValue] of Object.entries(data)) {
       if ((ANILIST_SESSION_KEYS as readonly string[]).includes(key)) continue;
       if (secretKeys.has(key)) {
-        if (rawValue !== undefined && rawValue !== null) {
+        if (isValidSecretValue(key, rawValue)) {
           store.set(key, rawValue);
           secretsApplied++;
         }
@@ -271,7 +274,7 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
       }
 
       const settingKey = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : key;
-      const r = ROWS[settingKey];
+      const r = hasOwn(ROWS, settingKey) ? ROWS[settingKey] : undefined;
       if (r) {
         const normalized = TYPES[r.type].normalize(rawValue, r);
         store.set(PREFIX + settingKey, normalized);
@@ -280,13 +283,18 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
     }
 
     const hasExplicitOverridesFlag =
-      'manualOverridesEnabled' in data || `${PREFIX}manualOverridesEnabled` in data;
-    const rawOverrides = data.syncManualOverrides ?? data[`${PREFIX}syncManualOverrides`];
-    if (!hasExplicitOverridesFlag && rawOverrides !== undefined && ROWS.syncManualOverrides && ROWS.manualOverridesEnabled) {
-      const normalizedOverrides = TYPES[ROWS.syncManualOverrides.type].normalize(
-        rawOverrides,
-        ROWS.syncManualOverrides
-      );
+      hasOwn(data, 'manualOverridesEnabled') || hasOwn(data, `${PREFIX}manualOverridesEnabled`);
+    const rawOverrides =
+      (hasOwn(data, 'syncManualOverrides') ? data.syncManualOverrides : undefined) ??
+      (hasOwn(data, `${PREFIX}syncManualOverrides`) ? data[`${PREFIX}syncManualOverrides`] : undefined);
+    if (
+      !hasExplicitOverridesFlag &&
+      rawOverrides !== undefined &&
+      hasOwn(ROWS, 'syncManualOverrides') &&
+      hasOwn(ROWS, 'manualOverridesEnabled')
+    ) {
+      const overridesRow = ROWS.syncManualOverrides;
+      const normalizedOverrides = TYPES[overridesRow.type].normalize(rawOverrides, overridesRow);
       if (
         normalizedOverrides &&
         typeof normalizedOverrides === 'object' &&

@@ -45,14 +45,22 @@ export function log(msg: any, level: 'info' | 'warn' | 'error' | 'success' = 'in
   const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
   console[method]('[AL→MAL Sync]', msg);
   lastNotice = String(msg);
-  uiSink?.onLog?.({ line, message: lastNotice, level });
+  try {
+    uiSink?.onLog?.({ line, message: lastNotice, level });
+  } catch (e) {
+    console.error('[AL→MAL Sync] uiSink.onLog failed:', e);
+  }
 }
 
 export function toast(msg: string, isError?: boolean, closeTab?: boolean): void {
   log(msg, isError ? 'error' : 'info');
-  if (uiSink?.onToast) {
-    uiSink.onToast(msg, isError, closeTab);
-    return;
+  try {
+    if (uiSink?.onToast) {
+      uiSink.onToast(msg, isError, closeTab);
+      return;
+    }
+  } catch (e) {
+    console.error('[AL→MAL Sync] uiSink.onToast failed:', e);
   }
   showToast(msg, { type: isError ? 'error' : 'success', closeTab });
 }
@@ -73,7 +81,7 @@ export async function malTokenRequest(params: Record<string, string>): Promise<s
   try {
     json = JSON.parse(res.responseText);
   } catch (_) {}
-  if (!json.access_token) {
+  if (typeof json.access_token !== 'string' || !json.access_token) {
     if (params.grant_type === 'refresh_token' && [400, 401, 403].includes(res.status)) {
       clearMalAuth();
       throw authError('MAL', 'MAL session expired — reconnect MAL.');
@@ -81,8 +89,11 @@ export async function malTokenRequest(params: Record<string, string>): Promise<s
     throw new Error(json.hint || json.message || json.error || res.responseText || `HTTP ${res.status}`);
   }
   store.set('mal_token', json.access_token);
-  if (json.refresh_token) store.set('mal_refresh_token', json.refresh_token);
-  store.set('mal_expires_at', Date.now() + (Number(json.expires_in) || 3600) * 1000);
+  if (typeof json.refresh_token === 'string' && json.refresh_token) {
+    store.set('mal_refresh_token', json.refresh_token);
+  }
+  const expiresIn = Number(json.expires_in);
+  store.set('mal_expires_at', Date.now() + (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600) * 1000);
   return json.access_token;
 }
 
@@ -99,12 +110,31 @@ export async function exchangeMalCode(code: string): Promise<string> {
 
 let malRefresh: Promise<string> | null = null;
 
-export async function malEnsureToken(): Promise<string> {
-  if (Date.now() < store.get('mal_expires_at', 0) - 60000) return store.get('mal_token');
+function isStoredTokenValid(token: unknown, expiresAt: unknown, failedToken?: string): token is string {
+  return (
+    typeof token === 'string' &&
+    token.length > 0 &&
+    typeof expiresAt === 'number' &&
+    Number.isFinite(expiresAt) &&
+    token !== failedToken &&
+    Date.now() < expiresAt - 60000
+  );
+}
+
+export async function malEnsureToken(failedToken?: string): Promise<string> {
+  const current = store.get<unknown>('mal_token', null);
+  const expiresAt = store.get<unknown>('mal_expires_at', 0);
+  if (isStoredTokenValid(current, expiresAt, failedToken)) return current;
+
   if (!malRefresh) {
     malRefresh = (async () => {
-      const refresh = store.get<string | null>('mal_refresh_token', null);
-      if (!refresh) throw authError('MAL', 'No MAL refresh token stored — reconnect MAL.');
+      const latest = store.get<unknown>('mal_token', null);
+      const latestExp = store.get<unknown>('mal_expires_at', 0);
+      if (isStoredTokenValid(latest, latestExp, failedToken)) return latest;
+      const refresh = store.get<unknown>('mal_refresh_token', null);
+      if (typeof refresh !== 'string' || !refresh) {
+        throw authError('MAL', 'No MAL refresh token stored — reconnect MAL.');
+      }
       return malTokenRequest({ grant_type: 'refresh_token', refresh_token: refresh });
     })().finally(() => {
       malRefresh = null;
@@ -220,29 +250,52 @@ export const looksLimited = (res: any): boolean =>
 
 const backoff = (attempt: number) => Math.min(30000, 1000 * 2 ** attempt) * (0.8 + Math.random() * 0.4);
 
-export async function malRequest(
-  { method = 'GET', url, data, headers = {}, timeout = 30000 }: { method?: string; url: string; data?: any; headers?: any; timeout?: number },
-  checkCancel?: () => void
-): Promise<any> {
+async function malRequestWithToken(
+  {
+    method = 'GET',
+    url,
+    data,
+    headers = {},
+    timeout = 30000
+  }: { method?: string; url: string; data?: any; headers?: any; timeout?: number },
+  checkCancel?: () => void,
+  failedToken?: string,
+  onTokenResolved?: () => void
+): Promise<{ res: any; token: string }> {
   await malLimiter.acquire(checkCancel ?? hooks.checkCancel);
-  const token = await malEnsureToken();
+  const token = await malEnsureToken(failedToken);
+  onTokenResolved?.();
   logDebug('[SYNC]', `MAL ${method} ${url}`, data ? { data } : '');
   const res = await gm.request(url, { method, data, timeout, headers: { Authorization: `Bearer ${token}`, ...headers } });
   logDebug('[SYNC]', `MAL ${method} response: ${res.status} for ${url}`);
   if (looksLimited(res)) malLimiter.limit(parseRetryAfterMs(res.responseHeaders, res.status === 429 ? 5000 : 60000));
   else if (res.status >= 500) malLimiter.limit(2000);
   else if (res.status >= 200 && res.status < 300) malLimiter.success();
+  return { res, token };
+}
+
+export async function malRequest(
+  opts: { method?: string; url: string; data?: any; headers?: any; timeout?: number },
+  checkCancel?: () => void
+): Promise<any> {
+  const { res } = await malRequestWithToken(opts, checkCancel);
   return res;
 }
 
 export async function malCall(opts: any, retries = 4, checkCancel?: () => void): Promise<any> {
   const check = checkCancel ?? hooks.checkCancel;
   let refreshed = false;
+  let failedToken: string | undefined;
   for (let attempt = 0; ; attempt++) {
     check?.();
     let res: any;
+    let usedToken = '';
     try {
-      res = await malRequest(opts, check);
+      const out = await malRequestWithToken(opts, check, failedToken, () => {
+        failedToken = undefined;
+      });
+      res = out.res;
+      usedToken = out.token;
     } catch (e: any) {
       if (e.auth || e.cancelled || attempt >= retries) throw e;
       await sleep(backoff(attempt));
@@ -254,7 +307,7 @@ export async function malCall(opts: any, retries = 4, checkCancel?: () => void):
         throw authError('MAL', 'MAL rejected the access token — reconnect MAL.');
       }
       refreshed = true;
-      store.set('mal_expires_at', 0);
+      failedToken = usedToken;
       continue;
     }
     if (!looksLimited(res) && res.status < 500) return res;

@@ -26,7 +26,6 @@ function toRelPosix(absPath: string): string {
 }
 
 function stripCommentsAndStringsForImports(source: string): string {
-  // Replace comments with spaces while keeping string literals intact so import specifiers remain parseable.
   let out = '';
   let i = 0;
   const len = source.length;
@@ -75,13 +74,11 @@ function extractRelativeSpecifiers(source: string): string[] {
   const cleaned = stripCommentsAndStringsForImports(source);
   const specifiers: string[] = [];
 
-  // Static ES imports & re-exports: import ... from '...', import '...', export ... from '...'
   const staticRe = /(?:^|[\s;])(?:import|export)\s+(?:type\s+)?(?:[^;'"]*?\s+from\s+)?(['"])([^'"]+)\1/gm;
   for (const m of cleaned.matchAll(staticRe)) {
     specifiers.push(m[2]);
   }
 
-  // Dynamic import('...'), ignoring import.meta.glob(...)
   const dynamicRe = /(?<![.\w])import\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
   for (const m of cleaned.matchAll(dynamicRe)) {
     specifiers.push(m[2]);
@@ -216,7 +213,6 @@ describe('Architecture: Zero Import-Time Side Effects', () => {
 
     for (const dir of moduleDirs) {
       vi.resetModules();
-      // Pre-load core observer/registry so observer's global history/popstate install is exempt.
       await import('../src/core/observer');
       await import('../src/core/registry');
 

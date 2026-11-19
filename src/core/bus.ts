@@ -11,45 +11,57 @@ import type {
   ServiceMap
 } from '../types';
 
+interface ServiceRecord {
+  impl: unknown;
+  owner: symbol;
+}
+
+interface ServiceWatcherEntry {
+  cb: (impl: any) => void | CleanupFn;
+  cleanup: CleanupFn | null;
+  active: boolean;
+  gen: number;
+}
+
 class ServiceRegistryImpl {
-  private readonly services = new Map<string, unknown>();
-  private readonly watchers = new Map<
-    string,
-    Set<{
-      cb: (impl: any) => void | CleanupFn;
-      cleanup: CleanupFn | null;
-    }>
-  >();
+  private readonly services = new Map<string, ServiceRecord>();
+  private readonly watchers = new Map<string, Set<ServiceWatcherEntry>>();
 
   provide<K extends keyof ServiceMap>(name: K, impl: ServiceMap[K]): CleanupFn {
     const key = String(name);
-    this.services.set(key, impl);
+    const owner = Symbol(key);
+    const serviceRecord: ServiceRecord = { impl, owner };
+    this.services.set(key, serviceRecord);
     const subs = this.watchers.get(key);
     if (subs) {
       for (const entry of [...subs]) {
+        if (!entry.active) continue;
         this.runCleanup(entry);
-        try {
-          const res = entry.cb(impl);
-          entry.cleanup = typeof res === 'function' ? res : null;
-        } catch (e) {
-          console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
-        }
+        if (this.services.get(key) !== serviceRecord) break;
+        if (!entry.active) continue;
+        this.invokeWatcher(entry, impl, key);
+        if (this.services.get(key) !== serviceRecord) break;
       }
     }
+    let active = true;
     return () => {
-      if (this.services.get(key) !== impl) return;
+      if (!active) return;
+      active = false;
+      if (this.services.get(key)?.owner !== owner) return;
       this.services.delete(key);
       const currentSubs = this.watchers.get(key);
       if (currentSubs) {
         for (const entry of [...currentSubs]) {
+          if (!entry.active) continue;
           this.runCleanup(entry);
+          if (this.services.has(key)) break;
         }
       }
     };
   }
 
   get<K extends keyof ServiceMap>(name: K): ServiceMap[K] | undefined {
-    return this.services.get(String(name)) as ServiceMap[K] | undefined;
+    return this.services.get(String(name))?.impl as ServiceMap[K] | undefined;
   }
 
   onAvailable<K extends keyof ServiceMap>(
@@ -57,9 +69,11 @@ class ServiceRegistryImpl {
     cb: (impl: ServiceMap[K]) => void | CleanupFn
   ): CleanupFn {
     const key = String(name);
-    const entry = {
+    const entry: ServiceWatcherEntry = {
       cb,
-      cleanup: null as CleanupFn | null
+      cleanup: null,
+      active: true,
+      gen: 0
     };
     let subs = this.watchers.get(key);
     if (!subs) {
@@ -68,20 +82,43 @@ class ServiceRegistryImpl {
     }
     subs.add(entry);
 
-    if (this.services.has(key)) {
-      try {
-        const res = cb(this.services.get(key) as ServiceMap[K]);
-        entry.cleanup = typeof res === 'function' ? res : null;
-      } catch (e) {
-        console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
-      }
+    const current = this.services.get(key);
+    if (current) {
+      this.invokeWatcher(entry, current.impl as ServiceMap[K], key);
     }
 
     return () => {
+      if (!entry.active) return;
+      entry.active = false;
       this.runCleanup(entry);
       subs?.delete(entry);
-      if (subs && subs.size === 0) this.watchers.delete(key);
+      if (subs && subs.size === 0 && this.watchers.get(key) === subs) {
+        this.watchers.delete(key);
+      }
     };
+  }
+
+  private invokeWatcher(entry: ServiceWatcherEntry, impl: any, key: string): void {
+    const myGen = ++entry.gen;
+    try {
+      const res = entry.cb(impl);
+      if (typeof res === 'function') {
+        if (entry.active && entry.gen === myGen) {
+          this.runCleanup(entry);
+          entry.cleanup = res;
+        } else {
+          try {
+            res();
+          } catch (e) {
+            console.error('[AL-Additions] Service subscriber cleanup failed:', e);
+          }
+        }
+      } else if (entry.gen === myGen) {
+        entry.cleanup = null;
+      }
+    } catch (e) {
+      console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
+    }
   }
 
   private runCleanup(entry: { cleanup: CleanupFn | null }): void {
@@ -96,16 +133,22 @@ class ServiceRegistryImpl {
   }
 }
 
+interface EventListenerEntry {
+  cb: (payload?: any) => void;
+  active: boolean;
+}
+
 class EventBusImpl {
-  private readonly listeners = new Map<string, Set<(payload?: any) => void>>();
+  private readonly listeners = new Map<string, Set<EventListenerEntry>>();
   private readonly retained = new Map<string, { payload: unknown; owner?: symbol }>();
 
   private dispatch(key: string, payload: unknown): void {
     const set = this.listeners.get(key);
     if (!set) return;
-    for (const cb of [...set]) {
+    for (const entry of [...set]) {
+      if (!entry.active) continue;
       try {
-        cb(payload);
+        entry.cb(payload);
       } catch (e) {
         console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
       }
@@ -131,15 +174,20 @@ class EventBusImpl {
 
   on<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn {
     const key = String(event);
+    const entry: EventListenerEntry = { cb, active: true };
     let set = this.listeners.get(key);
     if (!set) {
       set = new Set();
       this.listeners.set(key, set);
     }
-    set.add(cb);
+    set.add(entry);
     return () => {
-      set?.delete(cb);
-      if (set && set.size === 0) this.listeners.delete(key);
+      if (!entry.active) return;
+      entry.active = false;
+      set?.delete(entry);
+      if (set && set.size === 0 && this.listeners.get(key) === set) {
+        this.listeners.delete(key);
+      }
     };
   }
 
@@ -211,18 +259,33 @@ function isAniListGraphqlUrl(rawUrl: string): boolean {
   }
 }
 
+interface HookEntry<T> {
+  cb: T;
+  active: boolean;
+}
+
+function normalizeGqlQuery(query: unknown): string {
+  return typeof query === 'string' ? query : String(query ?? '');
+}
+
+function normalizeGqlVariables(variables: unknown): Record<string, any> {
+  return variables && typeof variables === 'object' && !Array.isArray(variables) ? variables : {};
+}
+
 export const CoreHooks: CoreHooksApi = (() => {
   let clearingDepth = 0;
   let cacheBridge: FastLoadCacheBridge | null = null;
+  let cacheBridgeOwner: symbol | null = null;
   let fetchOwnerActive = false;
-  const gqlListeners = new Set<GqlFetchListener>();
-  const rpcBlockers = new Set<RpcBlocker>();
+  const gqlListeners = new Set<HookEntry<GqlFetchListener>>();
+  const rpcBlockers = new Set<HookEntry<RpcBlocker>>();
   const prefetchTokens = new Set<symbol>();
 
   let fallbackInstalled = false;
   let fallbackTargetWin: any = null;
   let origFetch: typeof fetch | null = null;
   let wrappedFetch: typeof fetch | null = null;
+  let deactivateFallback: (() => void) | null = null;
 
   function syncMirror(): void {
     try {
@@ -257,14 +320,23 @@ export const CoreHooks: CoreHooksApi = (() => {
     const currentFetch = typeof win.fetch === 'function' ? win.fetch : typeof fetch === 'function' ? fetch : null;
     if (!currentFetch) return;
 
-    origFetch = currentFetch;
+    const localOrig = currentFetch;
+    let instanceActive = true;
+    const canIntercept = (): boolean => {
+      const curHost = win?.location?.hostname || location.hostname;
+      return instanceActive && !fetchOwnerActive && gqlListeners.size > 0 && curHost === 'anilist.co';
+    };
+
+    origFetch = localOrig;
     fallbackTargetWin = win;
+    deactivateFallback = () => {
+      instanceActive = false;
+    };
 
     wrappedFetch = async function (this: any, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-      const baseFetch = origFetch!;
-      const curHost = win?.location?.hostname || location.hostname;
-      if (fetchOwnerActive || gqlListeners.size === 0 || curHost !== 'anilist.co') {
-        return baseFetch.apply(this, arguments as any);
+      const args = arguments;
+      if (!canIntercept()) {
+        return localOrig.apply(this ?? win, args as any);
       }
 
       const rawUrl =
@@ -281,7 +353,7 @@ export const CoreHooks: CoreHooksApi = (() => {
       ).toUpperCase();
 
       if (method !== 'POST' || !isAniListGraphqlUrl(rawUrl)) {
-        return baseFetch.apply(this, arguments as any);
+        return localOrig.apply(this ?? win, args as any);
       }
 
       let parsedBody: any = null;
@@ -298,9 +370,12 @@ export const CoreHooks: CoreHooksApi = (() => {
         }
       } catch {}
 
+      if (!canIntercept()) {
+        return localOrig.apply(this ?? win, args as any);
+      }
+
       const query = typeof parsedBody?.query === 'string' ? parsedBody.query : '';
-      const variables =
-        parsedBody?.variables && typeof parsedBody.variables === 'object' ? parsedBody.variables : {};
+      const variables = normalizeGqlVariables(parsedBody?.variables);
       const operationName =
         typeof parsedBody?.operationName === 'string' ? parsedBody.operationName : undefined;
 
@@ -314,9 +389,9 @@ export const CoreHooks: CoreHooksApi = (() => {
         });
       }
 
-      const res = await baseFetch.apply(this, arguments as any);
+      const res = await localOrig.apply(this ?? win, args as any);
 
-      if (query && !fetchOwnerActive && gqlListeners.size > 0) {
+      if (query && canIntercept()) {
         let data: any = undefined;
         if (res && !res.bodyUsed && typeof res.clone === 'function') {
           try {
@@ -324,16 +399,18 @@ export const CoreHooks: CoreHooksApi = (() => {
             data = json?.data;
           } catch {}
         }
-        emitGqlFetch({
-          phase: 'response',
-          url: rawUrl,
-          query,
-          variables,
-          operationName,
-          status: res.status,
-          ok: res.ok,
-          data
-        });
+        if (canIntercept()) {
+          emitGqlFetch({
+            phase: 'response',
+            url: rawUrl,
+            query,
+            variables,
+            operationName,
+            status: res.status,
+            ok: res.ok,
+            data
+          });
+        }
       }
 
       return res;
@@ -343,6 +420,8 @@ export const CoreHooks: CoreHooksApi = (() => {
       win.fetch = wrappedFetch;
       fallbackInstalled = true;
     } catch {
+      instanceActive = false;
+      deactivateFallback = null;
       origFetch = null;
       wrappedFetch = null;
       fallbackTargetWin = null;
@@ -351,6 +430,8 @@ export const CoreHooks: CoreHooksApi = (() => {
 
   function uninstallFallbackFetch(): void {
     if (!fallbackInstalled) return;
+    deactivateFallback?.();
+    deactivateFallback = null;
     try {
       if (fallbackTargetWin && fallbackTargetWin.fetch === wrappedFetch && origFetch) {
         fallbackTargetWin.fetch = origFetch;
@@ -363,9 +444,15 @@ export const CoreHooks: CoreHooksApi = (() => {
   }
 
   function emitGqlFetch(event: GqlFetchEvent): void {
-    for (const cb of [...gqlListeners]) {
+    if (!event || typeof event !== 'object') return;
+    const query = normalizeGqlQuery(event.query);
+    const variables = normalizeGqlVariables(event.variables);
+    const normalizedEvent: GqlFetchEvent =
+      query === event.query && variables === event.variables ? event : { ...event, query, variables };
+    for (const entry of [...gqlListeners]) {
+      if (!entry.active) continue;
       try {
-        cb(event);
+        entry.cb(normalizedEvent);
       } catch (e) {
         console.error('[AL-Additions] onGqlFetch listener failed:', e);
       }
@@ -388,11 +475,17 @@ export const CoreHooks: CoreHooksApi = (() => {
       }
     },
     registerCacheBridge(bridge: FastLoadCacheBridge): CleanupFn {
+      let active = true;
+      const owner = Symbol('cache-bridge');
       cacheBridge = bridge;
+      cacheBridgeOwner = owner;
       syncMirror();
       return () => {
-        if (cacheBridge === bridge) {
+        if (!active) return;
+        active = false;
+        if (cacheBridgeOwner === owner) {
           cacheBridge = null;
+          cacheBridgeOwner = null;
           syncMirror();
         }
       };
@@ -414,27 +507,36 @@ export const CoreHooks: CoreHooksApi = (() => {
     },
     emitGqlFetch,
     onGqlFetch(cb: GqlFetchListener): CleanupFn {
-      gqlListeners.add(cb);
+      const entry: HookEntry<GqlFetchListener> = { cb, active: true };
+      gqlListeners.add(entry);
       installFallbackFetch();
       syncMirror();
       return () => {
-        gqlListeners.delete(cb);
+        if (!entry.active) return;
+        entry.active = false;
+        gqlListeners.delete(entry);
         if (gqlListeners.size === 0) uninstallFallbackFetch();
         syncMirror();
       };
     },
     blockRpc(fn: RpcBlocker): CleanupFn {
-      rpcBlockers.add(fn);
+      const entry: HookEntry<RpcBlocker> = { cb: fn, active: true };
+      rpcBlockers.add(entry);
       syncMirror();
       return () => {
-        rpcBlockers.delete(fn);
+        if (!entry.active) return;
+        entry.active = false;
+        rpcBlockers.delete(entry);
         syncMirror();
       };
     },
     isRpcBlocked(query: string, variables: Record<string, any>): boolean {
-      for (const fn of [...rpcBlockers]) {
+      const normalizedQuery = normalizeGqlQuery(query);
+      const normalizedVars = normalizeGqlVariables(variables);
+      for (const entry of [...rpcBlockers]) {
+        if (!entry.active) continue;
         try {
-          if (fn(query, variables)) return true;
+          if (entry.cb(normalizedQuery, normalizedVars)) return true;
         } catch (e) {
           console.error('[AL-Additions] RPC blocker failed:', e);
         }
@@ -443,10 +545,13 @@ export const CoreHooks: CoreHooksApi = (() => {
     },
     setPrefetchPaused(paused: boolean): CleanupFn {
       if (!paused) return () => {};
+      let active = true;
       const token = Symbol('prefetch-pause');
       prefetchTokens.add(token);
       syncMirror();
       return () => {
+        if (!active) return;
+        active = false;
         prefetchTokens.delete(token);
         syncMirror();
       };

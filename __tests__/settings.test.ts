@@ -19,7 +19,6 @@ import { showPanel, closePanel, initSettingsPage } from '../src/settings/panel';
 import { createModuleHost } from '../src/core/registry';
 import type { SettingRow } from '../src/types';
 
-// Snapshot initial registered key set before test-only Settings.register calls mutate ROWS.
 const INITIAL_REGISTERED_KEYS = Object.keys(ROWS).sort();
 
 describe('Settings: Type Normalizers (TYPES)', () => {
@@ -424,7 +423,6 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
       pctInput.dispatchEvent(new Event('change', { bubbles: true }));
       expect(saveBtn.textContent).toBe('Save and reload');
 
-      // Equivalent normalized value reverts Save plan back to no-op Save
       pctInput.value = '50';
       pctInput.dispatchEvent(new Event('change', { bubbles: true }));
       expect(saveBtn.textContent).toBe('Save');
@@ -435,5 +433,139 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
       Settings.set('nyaaEnabled', prevNyaa);
       Settings.set('tierLabelsEnabled', prevTier);
     }
+  });
+});
+
+describe('Settings: B1-21 Regression Guards', () => {
+  it('rejects Object.prototype keys in Settings.get and Settings.set without touching storage', () => {
+    const gmSetSpy = globalThis.GM_setValue as ReturnType<typeof vi.fn>;
+    for (const key of ['toString', 'constructor', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      gmSetSpy.mockClear();
+      expect(() => Settings.get(key)).toThrow(`Unknown setting: ${key}`);
+      expect(() => Settings.set(key, 1)).toThrow(`Unknown setting: ${key}`);
+      expect(gmSetSpy).not.toHaveBeenCalled();
+      expect(store.get(PREFIX + key, '__MISSING__')).toBe('__MISSING__');
+    }
+  });
+
+  it('writes nothing on Settings.set for unknown keys and fires store.watch once with normalized value on valid set', () => {
+    const gmSetSpy = globalThis.GM_setValue as ReturnType<typeof vi.fn>;
+    gmSetSpy.mockClear();
+
+    expect(() => Settings.set('unknown', 1)).toThrow('Unknown setting: unknown');
+    expect(gmSetSpy).not.toHaveBeenCalled();
+    expect(store.get(PREFIX + 'unknown', '__MISSING__')).toBe('__MISSING__');
+
+    const watched: Array<{ oldVal: any; newVal: any }> = [];
+    const unwatch = store.watch(PREFIX + 'tagPercentage', (_k, oldVal, newVal) => {
+      watched.push({ oldVal, newVal });
+    });
+    try {
+      Settings.set('tagPercentage', 250);
+      expect(watched).toEqual([{ oldVal: undefined, newVal: 100 }]);
+      expect(store.get(PREFIX + 'tagPercentage')).toBe(100);
+    } finally {
+      unwatch();
+      store.del(PREFIX + 'tagPercentage');
+    }
+  });
+
+  it('deep-clones JSON defaults so mutating Settings.get() or fallback results never mutates ROWS.*.def', () => {
+    const firstTiers = Settings.get('tierLabels');
+    expect(firstTiers).not.toBe(ROWS.tierLabels.def);
+    firstTiers[0].label = 'MUTATED';
+    firstTiers.push({ min: 0, max: 1, label: 'EXTRA', color: '#000000', textColor: '#ffffff' });
+
+    expect(ROWS.tierLabels.def[0].label).toBe('S+');
+    expect(ROWS.tierLabels.def).toHaveLength(7);
+    expect(Settings.get('tierLabels')[0].label).toBe('S+');
+
+    const providers = Settings.get('aniSongsProviders');
+    providers.active.push('youtube');
+    providers.presets[0].name = 'MUTATED';
+    expect(ROWS.aniSongsProviders.def.active).toEqual([]);
+    expect(ROWS.aniSongsProviders.def.presets[0].name).toBe('YouTube');
+
+    const tempKey = 'tempJsonCloneTest';
+    const tempDef = { nested: { items: [1, 2] } };
+    Settings.registerCoreSetting({
+      key: tempKey,
+      type: 'json',
+      def: tempDef,
+      title: 'Temp JSON',
+      help: 'Help'
+    });
+    try {
+      const val = Settings.get(tempKey);
+      expect(val).toEqual(tempDef);
+      expect(val).not.toBe(tempDef);
+      val.nested.items.push(3);
+      expect(tempDef.nested.items).toEqual([1, 2]);
+      expect(Settings.get(tempKey)).toEqual({ nested: { items: [1, 2] } });
+    } finally {
+      delete ROWS[tempKey];
+      store.del(PREFIX + tempKey);
+    }
+  });
+
+  it('catches throwing JSON validators and returns cloned default', () => {
+    const row: SettingRow = {
+      key: 'throwingJson',
+      type: 'json',
+      def: { safe: [1] },
+      title: 'Throwing JSON',
+      help: 'Help',
+      legacy: [],
+      validate: () => {
+        throw new Error('validator exploded');
+      }
+    };
+
+    const res = TYPES.json.normalize({ any: 'value' }, row);
+    expect(res).toEqual({ safe: [1] });
+    expect(res).not.toBe(row.def);
+    res.safe.push(2);
+    expect(row.def.safe).toEqual([1]);
+
+    const badInput = document.createElement('input');
+    badInput.value = '{bad';
+    badInput.dataset.key = 'toString';
+    expect(TYPES.json.read(badInput)).toBeUndefined();
+  });
+
+  it('rejects booleans, objects, arrays, and non-finite inputs in TYPES.number and invalid values/items in TYPES.list', () => {
+    const numRow: SettingRow = {
+      key: 'numGuard',
+      type: 'number',
+      def: 50,
+      min: 0,
+      max: 100,
+      title: 'Num',
+      help: 'Help',
+      legacy: []
+    };
+    for (const bad of [true, false, {}, [], [42], NaN, Infinity, -Infinity, 'Infinity']) {
+      expect(TYPES.number.normalize(bad, numRow)).toBe(50);
+    }
+
+    const listRow: SettingRow = {
+      key: 'listGuard',
+      type: 'list',
+      def: ['SubsPlease', 'ToonsHub'],
+      title: 'List',
+      help: 'Help',
+      legacy: []
+    };
+    for (const bad of [{}, { length: 1 }, true, false, 123, [null, {}], [NaN, Infinity, true]]) {
+      const normalized = TYPES.list.normalize(bad, listRow);
+      expect(normalized).toEqual(['SubsPlease', 'ToonsHub']);
+      expect(normalized).not.toBe(listRow.def);
+    }
+    expect(TYPES.list.normalize(['A', 42, 0, null, {}, [], true, undefined, NaN, '  ', 'B'], listRow)).toEqual([
+      'A',
+      '42',
+      '0',
+      'B'
+    ]);
   });
 });

@@ -106,63 +106,345 @@ interface EntityMeta {
   requiredFields: Set<string>;
 }
 
-const KNOWN_LIST_FIELDS = [
-  'mediaId', 'id', 'score', 'status', 'progress', 'progressVolumes',
-  'notes', 'startedAt', 'completedAt', 'repeat', 'priority', 'private',
-  'hiddenFromStatusLists', 'customLists', 'advancedScores', 'updatedAt',
-  'media', 'title', 'coverImage', 'format', 'episodes', 'volumes',
-  'chapters', 'averageScore', 'popularity', 'genres', 'tags', 'bannerImage'
-];
+function stripCommentsAndStrings(q: string): string {
+  let out = '';
+  let i = 0;
+  const len = q.length;
+  while (i < len) {
+    const ch = q[i];
+    if (ch === '#') {
+      while (i < len && q[i] !== '\n' && q[i] !== '\r') i++;
+      out += ' ';
+      continue;
+    }
+    if (ch === '"') {
+      if (q[i + 1] === '"' && q[i + 2] === '"') {
+        i += 3;
+        while (i < len) {
+          if (q[i] === '\\' && q[i + 1] === '"' && q[i + 2] === '"' && q[i + 3] === '"') {
+            i += 4;
+            continue;
+          }
+          if (q[i] === '"' && q[i + 1] === '"' && q[i + 2] === '"') {
+            i += 3;
+            break;
+          }
+          i++;
+        }
+      } else {
+        i++;
+        while (i < len) {
+          if (q[i] === '\\') {
+            i += 2;
+            continue;
+          }
+          if (q[i] === '"') {
+            i++;
+            break;
+          }
+          i++;
+        }
+      }
+      out += ' "" ';
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
 
-const KNOWN_MEDIA_FIELDS = [
-  'id', 'idMal', 'type', 'title', 'format', 'episodes', 'chapters', 'status',
-  'mediaListEntry', 'season', 'seasonYear', 'nextAiringEpisode', 'synonyms',
-  'isAdult', 'genres', 'tags', 'bannerImage', 'coverImage', 'description'
-];
+function isGqlMutation(q: string): boolean {
+  return /\bmutation\b/i.test(stripCommentsAndStrings(q));
+}
+
+function parseRootSelection(q: string): { rootField: string; rootArgs: string; innerSelection: string } | null {
+  const stripped = stripCommentsAndStrings(q);
+  const firstBrace = stripped.indexOf('{');
+  if (firstBrace === -1) return null;
+
+  const header = stripped.slice(0, firstBrace).trim();
+  if (/\b(?:mutation|subscription|fragment)\b/i.test(header) || /@/.test(header)) return null;
+
+  let braceDepth = 0;
+  let rootCount = 0;
+  let rootField = '';
+  let rootArgs = '';
+  const innerChars: string[] = [];
+  let inRootFieldBody = false;
+
+  const len = stripped.length;
+  let i = firstBrace;
+  while (i < len) {
+    const ch = stripped[i];
+
+    if (ch === '{') {
+      braceDepth++;
+      if (braceDepth === 2 && rootCount === 1 && !inRootFieldBody) {
+        inRootFieldBody = true;
+      } else if (inRootFieldBody) {
+        innerChars.push(ch);
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === '}') {
+      if (braceDepth === 2 && inRootFieldBody) {
+        inRootFieldBody = false;
+      } else if (inRootFieldBody) {
+        innerChars.push(ch);
+      }
+      braceDepth--;
+      i++;
+      if (braceDepth === 0) {
+        if (stripped.slice(i).trim()) return null;
+        break;
+      }
+      continue;
+    }
+
+    if (inRootFieldBody) {
+      innerChars.push(ch);
+      i++;
+      continue;
+    }
+
+    if (braceDepth === 1) {
+      if (/\s|,/.test(ch)) {
+        i++;
+        continue;
+      }
+      if (ch === '.' && stripped.slice(i, i + 3) === '...') {
+        return null;
+      }
+      if (/[a-zA-Z_]/.test(ch)) {
+        let end = i + 1;
+        while (end < len && /[a-zA-Z0-9_]/.test(stripped[end])) end++;
+        const ident = stripped.slice(i, end);
+        let j = end;
+        while (j < len && /\s/.test(stripped[j])) j++;
+
+        if (stripped[j] === ':') {
+          return null;
+        }
+
+        rootCount++;
+        if (rootCount > 1) return null;
+        rootField = ident;
+
+        if (stripped[j] === '(') {
+          let pd = 1;
+          let k = j + 1;
+          while (k < len && pd > 0) {
+            if (stripped[k] === '(') pd++;
+            else if (stripped[k] === ')') pd--;
+            k++;
+          }
+          if (pd !== 0) return null;
+          rootArgs = stripped.slice(j + 1, k - 1).trim();
+          i = k;
+          continue;
+        }
+        i = end;
+        continue;
+      }
+      return null;
+    }
+
+    i++;
+  }
+
+  if (braceDepth !== 0 || rootCount !== 1 || !rootField) return null;
+  const innerSelection = innerChars.join('');
+  return { rootField, rootArgs, innerSelection };
+}
+
+function parseTopLevelArgs(args: string): Record<string, string> | null {
+  if (!args) return {};
+  const result: Record<string, string> = {};
+  let i = 0;
+  const len = args.length;
+  while (i < len) {
+    while (i < len && /[\s,]/.test(args[i])) i++;
+    if (i >= len) break;
+    if (!/[a-zA-Z_]/.test(args[i])) return null;
+    let nameEnd = i + 1;
+    while (nameEnd < len && /[a-zA-Z0-9_]/.test(args[nameEnd])) nameEnd++;
+    const key = args.slice(i, nameEnd);
+    let j = nameEnd;
+    while (j < len && /\s/.test(args[j])) j++;
+    if (args[j] !== ':') return null;
+    j++;
+    while (j < len && /\s/.test(args[j])) j++;
+    if (j >= len) return null;
+
+    let valEnd = j;
+    let depth = 0;
+    while (valEnd < len) {
+      const c = args[valEnd];
+      if (c === '{' || c === '[' || c === '(') depth++;
+      else if (c === '}' || c === ']' || c === ')') {
+        if (depth === 0) return null;
+        depth--;
+        if (depth === 0) {
+          valEnd++;
+          break;
+        }
+      } else if (depth === 0 && /[\s,]/.test(c)) {
+        break;
+      }
+      valEnd++;
+    }
+    if (depth !== 0) return null;
+    result[key] = args.slice(j, valEnd).trim();
+    i = valEnd;
+  }
+  return result;
+}
+
+const UNRESOLVABLE_ARG = Symbol('unresolvable');
+
+function extractSelectionPaths(inner: string): Set<string> | null {
+  const paths = new Set<string>();
+  const stack: string[] = [];
+  const blockHasField: boolean[] = [];
+  let lastIdent = '';
+  const tokenRe = /[{}]|[a-zA-Z_][a-zA-Z0-9_]*/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = tokenRe.exec(inner)) !== null) {
+    const tok = m[0];
+    if (tok === '{') {
+      if (!lastIdent) return null;
+      stack.push(lastIdent);
+      blockHasField.push(false);
+      lastIdent = '';
+    } else if (tok === '}') {
+      if (stack.length === 0 || !blockHasField.pop()) return null;
+      stack.pop();
+      lastIdent = '';
+    } else {
+      if (blockHasField.length > 0) blockHasField[blockHasField.length - 1] = true;
+      paths.add(stack.length > 0 ? `${stack.join('.')}.${tok}` : tok);
+      lastIdent = tok;
+    }
+  }
+
+  return stack.length === 0 && paths.size > 0 ? paths : null;
+}
 
 function parseEntityMeta(query: string, vars: Record<string, any>): EntityMeta | null {
-  const clean = query.replace(/#[^\n\r]*/g, ' ').replace(/\s+/g, ' ');
+  if (typeof query !== 'string') return null;
+  const parsed = parseRootSelection(query);
+  if (!parsed) return null;
+  if (/[:.@()]/.test(parsed.innerSelection)) return null;
 
-  if (/\bMediaListCollection\b/i.test(clean)) {
-    const type = (vars.type || 'ANIME').toUpperCase();
-    const who = vars.userId || (vars.userName ? String(vars.userName).toLowerCase() : 'me');
-    const chunkPart = vars.chunk != null ? `:${vars.chunk}` : '';
-    const fieldCount = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length;
-    const isSuperset = fieldCount > 12;
+  const requiredFields = extractSelectionPaths(parsed.innerSelection);
+  if (!requiredFields) return null;
 
-    const requiredFields = new Set<string>();
-    for (const f of KNOWN_LIST_FIELDS) {
-      if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
+  const argMap = parseTopLevelArgs(parsed.rootArgs);
+  if (!argMap) return null;
+  const safeVars = vars && typeof vars === 'object' ? vars : {};
+
+  if (parsed.rootField === 'MediaListCollection') {
+    const allowedArgs = new Set(['userId', 'userName', 'type']);
+    for (const k of Object.keys(argMap)) {
+      if (!allowedArgs.has(k)) return null;
+    }
+    const boundVars = new Set<string>();
+    const resolveArg = (argName: string): any => {
+      const raw = argMap[argName];
+      if (!raw) return undefined;
+      if (raw.startsWith('$')) {
+        const varName = raw.slice(1);
+        boundVars.add(varName);
+        return safeVars[varName];
+      }
+      if (argName === 'userId' && /^\d+$/.test(raw)) return Number(raw);
+      if (argName === 'type' && /^(?:ANIME|MANGA)$/i.test(raw)) return raw.toUpperCase();
+      return UNRESOLVABLE_ARG;
+    };
+
+    const rawType = resolveArg('type');
+    const rawUserId = resolveArg('userId');
+    const rawUserName = resolveArg('userName');
+    if (
+      rawType === UNRESOLVABLE_ARG ||
+      rawUserId === UNRESOLVABLE_ARG ||
+      rawUserName === UNRESOLVABLE_ARG
+    ) {
+      return null;
     }
 
+    for (const k of Object.keys(safeVars)) {
+      if (!boundVars.has(k) && safeVars[k] !== undefined && safeVars[k] !== null) {
+        return null;
+      }
+    }
+
+    if (typeof rawType !== 'string') return null;
+    const type = rawType.trim().toUpperCase();
+    if (type !== 'ANIME' && type !== 'MANGA') return null;
+    if (rawUserId != null && (typeof rawUserId !== 'number' || !Number.isSafeInteger(rawUserId) || rawUserId <= 0)) {
+      return null;
+    }
+    if (rawUserName != null && (typeof rawUserName !== 'string' || !rawUserName.trim())) {
+      return null;
+    }
+    const normName = rawUserName ? rawUserName.trim().toLowerCase() : '';
+    const who = rawUserId || normName || 'me';
+
     return {
-      entityKey: `MediaListCollection:${type}:${who}${chunkPart}`,
-      isSuperset,
+      entityKey: `MediaListCollection:${type}:${who}`,
+      isSuperset: requiredFields.size > 12,
       requiredFields
     };
   }
 
-  const mediaMatch = clean.match(/\bMedia\s*\(\s*id\s*:\s*\$([a-zA-Z0-9_]+)/i);
-  if (mediaMatch && vars[mediaMatch[1]]) {
-    const id = vars[mediaMatch[1]];
-    const fieldCount = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length;
-    const requiredFields = new Set<string>();
-    for (const f of KNOWN_MEDIA_FIELDS) {
-      if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
+  if (parsed.rootField === 'Media') {
+    const allowedArgs = new Set(['id', 'type']);
+    for (const k of Object.keys(argMap)) {
+      if (!allowedArgs.has(k)) return null;
+    }
+    const boundVars = new Set<string>();
+    let mediaId: any;
+    if (argMap.id) {
+      if (argMap.id.startsWith('$')) {
+        const varName = argMap.id.slice(1);
+        boundVars.add(varName);
+        mediaId = safeVars[varName];
+      } else if (/^\d+$/.test(argMap.id)) {
+        mediaId = Number(argMap.id);
+      }
+    }
+    if (argMap.type && argMap.type.startsWith('$')) {
+      boundVars.add(argMap.type.slice(1));
+    }
+    if (typeof mediaId !== 'number' || !Number.isSafeInteger(mediaId) || mediaId <= 0) return null;
+
+    for (const k of Object.keys(safeVars)) {
+      if (!boundVars.has(k) && safeVars[k] !== undefined && safeVars[k] !== null) {
+        return null;
+      }
     }
 
     return {
-      entityKey: `Media:${id}`,
-      isSuperset: fieldCount > 10,
+      entityKey: `Media:${mediaId}`,
+      isSuperset: requiredFields.size > 10,
       requiredFields
     };
   }
 
-  if (/\bViewer\b/i.test(clean)) {
+  if (parsed.rootField === 'Viewer') {
+    if (Object.keys(argMap).length > 0) return null;
+    for (const k of Object.keys(safeVars)) {
+      if (safeVars[k] !== undefined && safeVars[k] !== null) return null;
+    }
     return {
       entityKey: 'Viewer',
-      isSuperset: clean.includes('mediaListOptions'),
-      requiredFields: new Set(['id', 'name'])
+      isSuperset: requiredFields.has('mediaListOptions.scoreFormat'),
+      requiredFields
     };
   }
 
@@ -192,12 +474,80 @@ export const AniList = (() => {
     fields: Set<string>;
   }
 
+  interface InflightExact {
+    promise: Promise<any>;
+    entityKey?: string;
+  }
+
   const entityCache = new Map<string, CachedRecord>();
-  const inflightExact = new Map<string, Promise<any>>();
+  const inflightExact = new Map<string, InflightExact>();
   const inflightEntities = new Map<string, InflightEntity>();
   const ENTITY_TTL = 3 * 60_000;
+  let cacheEpoch = 0;
+  let viewerEpoch = 0;
+  let unsubGql: (() => void) | null = null;
 
   const pageWin = (): any => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+
+  function safeBridge<T>(fn: () => T): T | undefined {
+    try {
+      return fn();
+    } catch (e) {
+      logDebug('[ANILIST API] Cache bridge error:', e);
+      return undefined;
+    }
+  }
+
+  function maybeUnsubscribeMutationListener(): void {
+    if (
+      unsubGql &&
+      entityCache.size === 0 &&
+      inflightExact.size === 0 &&
+      inflightEntities.size === 0
+    ) {
+      const unsub = unsubGql;
+      unsubGql = null;
+      try {
+        unsub();
+      } catch (_) {}
+    }
+  }
+
+  function invalidateLocal(entityKeyPrefix?: string): void {
+    cacheEpoch++;
+    if (!entityKeyPrefix) {
+      entityCache.clear();
+      inflightEntities.clear();
+      inflightExact.clear();
+    } else {
+      for (const k of entityCache.keys()) {
+        if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
+      }
+      for (const k of inflightEntities.keys()) {
+        if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
+      }
+      for (const [k, entry] of inflightExact.entries()) {
+        if (entry.entityKey?.startsWith(entityKeyPrefix)) {
+          inflightExact.delete(k);
+        }
+      }
+    }
+    maybeUnsubscribeMutationListener();
+  }
+
+  function ensureMutationListener(): void {
+    if (unsubGql) return;
+    try {
+      unsubGql = CoreHooks.onGqlFetch((event) => {
+        const rawQuery = typeof event?.query === 'string' ? event.query : '';
+        if (rawQuery && isGqlMutation(rawQuery)) {
+          invalidateLocal();
+        }
+      });
+    } catch (_) {
+      unsubGql = null;
+    }
+  }
 
   function getCsrfToken(): string | null {
     const win = pageWin();
@@ -217,11 +567,13 @@ export const AniList = (() => {
   }
 
   const clearViewer = (): void => {
+    viewerEpoch++;
     CoreHooks.setSessionClearing(true);
     try {
       for (const k of ANILIST_SESSION_KEYS) {
         store.del(k);
       }
+      invalidate();
       CoreHooks.clearAuth();
     } finally {
       CoreHooks.setSessionClearing(false);
@@ -232,29 +584,55 @@ export const AniList = (() => {
     const win = pageWin();
     const doc = (win.document || document) as Document;
 
-    // Pass 1: Explicit logged-out nav or NUXT viewer mismatch
     if (isLoggedOutNav(doc)) {
-      clearViewer();
+      const hasStoredSession = ANILIST_SESSION_KEYS.some((k) => store.get(k, undefined) !== undefined);
+      if (hasStoredSession || entityCache.has('Viewer')) {
+        clearViewer();
+      }
       return;
     }
     const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
     if (nuxtUser?.id) {
       const nuxtId = Number(nuxtUser.id);
       const storedId = Number(store.get('al_user_id', 0));
-      if (storedId && storedId !== nuxtId) {
+      const cachedViewerId = Number(entityCache.get('Viewer')?.data?.Viewer?.id || 0);
+      if ((storedId && storedId !== nuxtId) || (cachedViewerId && cachedViewerId !== nuxtId)) {
         clearViewer();
       }
       return;
     }
 
-    // Pass 2: Nav profile link user name mismatch fallback
     const navName = navUserName(doc);
     if (navName) {
       const storedName = store.get<string | null>('al_username', null);
-      if (storedName && storedName.toLowerCase() !== navName.toLowerCase()) {
+      const cachedViewerName = entityCache.get('Viewer')?.data?.Viewer?.name;
+      if (
+        (storedName && storedName.toLowerCase() !== navName.toLowerCase()) ||
+        (typeof cachedViewerName === 'string' &&
+          cachedViewerName &&
+          cachedViewerName.toLowerCase() !== navName.toLowerCase())
+      ) {
         clearViewer();
       }
     }
+  }
+
+  function isViewerMismatchedWithPage(v?: { id?: number; name?: string } | null): boolean {
+    const win = pageWin();
+    const doc = (win.document || document) as Document;
+    if (isLoggedOutNav(doc)) return true;
+
+    const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+    if (nuxtUser?.id) {
+      return Boolean(v?.id && Number(v.id) !== Number(nuxtUser.id));
+    }
+
+    const navName = navUserName(doc);
+    if (navName) {
+      return Boolean(v?.name && String(v.name).toLowerCase() !== navName.toLowerCase());
+    }
+
+    return false;
   }
 
   function isBrowserLoggedIn(): boolean {
@@ -371,12 +749,16 @@ export const AniList = (() => {
         ? { retries: optionsOrRetries }
         : optionsOrRetries || {};
     const retries = opts.retries ?? 3;
-    const isMutation = /\bmutation\b/i.test(q);
+    const isMutation = isGqlMutation(q);
 
     if (isMutation) {
       invalidate();
-      return executeNetworkRequest<T>(q, variables, retries);
+      return executeNetworkRequest<T>(q, variables, retries).finally(() => {
+        invalidateLocal();
+      });
     }
+
+    ensureMutationListener();
 
     const meta = parseEntityMeta(q, variables);
     const now = Date.now();
@@ -400,29 +782,42 @@ export const AniList = (() => {
 
     const flyingExact = inflightExact.get(exactKey);
     if (flyingExact && !opts.forceFresh) {
-      return flyingExact as Promise<T>;
+      return flyingExact.promise as Promise<T>;
     }
 
+    const reqEpoch = cacheEpoch;
     const networkPromise = executeNetworkRequest<T>(q, variables, retries, opts.forceFresh)
       .then((data) => {
-        if (meta && data) {
-          entityCache.set(meta.entityKey, {
-            time: Date.now(),
-            data,
-            isSuperset: meta.isSuperset,
-            fields: meta.requiredFields
-          });
+        if (meta && data && cacheEpoch === reqEpoch && (data as any)?.MediaListCollection?.hasNextChunk !== true) {
+          const existing = entityCache.get(meta.entityKey);
+          const wouldDowngrade =
+            !opts.forceFresh &&
+            existing &&
+            Date.now() - existing.time < ENTITY_TTL &&
+            isSubsetOf(meta.requiredFields, existing.fields) &&
+            !isSubsetOf(existing.fields, meta.requiredFields);
+          if (!wouldDowngrade) {
+            entityCache.set(meta.entityKey, {
+              time: Date.now(),
+              data,
+              isSuperset: meta.isSuperset,
+              fields: meta.requiredFields
+            });
+          }
         }
         return data;
       })
       .finally(() => {
-        inflightExact.delete(exactKey);
+        if (inflightExact.get(exactKey)?.promise === networkPromise) {
+          inflightExact.delete(exactKey);
+        }
         if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) {
           inflightEntities.delete(meta.entityKey);
         }
+        maybeUnsubscribeMutationListener();
       });
 
-    inflightExact.set(exactKey, networkPromise);
+    inflightExact.set(exactKey, { promise: networkPromise, entityKey: meta?.entityKey });
     if (meta) {
       const existing = inflightEntities.get(meta.entityKey);
       if (!existing || (!existing.isSuperset && meta.isSuperset)) {
@@ -438,25 +833,39 @@ export const AniList = (() => {
   }
 
   function formatMediaListResult(mlc: any): MediaListResult {
-    const mergedCollection: MediaListCollectionData = {
-      user: mlc.user,
-      lists: mlc.lists || []
-    };
-
+    const rawLists = Array.isArray(mlc?.lists) ? mlc.lists : [];
+    const lists: MediaListGroup[] = [];
     const seenEntryIds = new Set<number>();
     const allEntries: MediaListEntryItem[] = [];
-    for (const list of mergedCollection.lists) {
-      for (const entry of list.entries || []) {
-        if (!seenEntryIds.has(entry.id)) {
-          seenEntryIds.add(entry.id);
-          allEntries.push(entry);
+
+    for (const list of rawLists) {
+      if (!list || typeof list !== 'object') continue;
+      const validEntries: MediaListEntryItem[] = [];
+      if (Array.isArray(list.entries)) {
+        for (const entry of list.entries) {
+          if (!entry || typeof entry !== 'object') continue;
+          validEntries.push(entry);
+          if (entry.id != null) {
+            if (!seenEntryIds.has(entry.id)) {
+              seenEntryIds.add(entry.id);
+              allEntries.push(entry);
+            }
+          } else {
+            allEntries.push(entry);
+          }
         }
       }
+      lists.push({ ...list, entries: validEntries });
     }
+
+    const mergedCollection: MediaListCollectionData = {
+      user: mlc?.user,
+      lists
+    };
 
     return {
       collection: mergedCollection,
-      lists: mergedCollection.lists,
+      lists,
       allEntries,
       user: mergedCollection.user
     };
@@ -464,9 +873,11 @@ export const AniList = (() => {
 
   function parseRpcMediaList(payload: any): MediaListResult | null {
     if (!payload || typeof payload !== 'object') return null;
+    if (payload.hasNextChunk === true) return null;
 
     const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
     if (mlc && Array.isArray(mlc.lists)) {
+      if (mlc.hasNextChunk === true) return null;
       return formatMediaListResult(mlc);
     }
 
@@ -530,6 +941,47 @@ export const AniList = (() => {
     return null;
   }
 
+  function matchMediaListKey(
+    key: string,
+    prefix: 'gql' | 'rpc',
+    type: string,
+    resolvedId?: number,
+    resolvedName?: string
+  ): boolean {
+    const head = `${prefix}:MediaListCollection:${type.toUpperCase()}:`;
+    if (!key.startsWith(head)) return false;
+    const rest = key.slice(head.length);
+    const sep = rest.indexOf(':');
+    if (sep <= 0) return false;
+    const who = rest.slice(0, sep);
+    const varsSuffix = rest.slice(sep + 1);
+    if (varsSuffix !== '{}') return false;
+    if (resolvedId && who === String(resolvedId)) return true;
+    if (resolvedName && who.toLowerCase() === resolvedName.toLowerCase()) return true;
+    return false;
+  }
+
+  function lookupUserId(userMap: Map<string, number> | undefined, name?: string): number | undefined {
+    if (!userMap || !name) return undefined;
+    return safeBridge(() => {
+      const direct = userMap.get(name);
+      if (direct) return direct;
+      const lower = name.toLowerCase();
+      for (const [k, v] of userMap.entries()) {
+        if (typeof k === 'string' && k.toLowerCase() === lower) return v;
+      }
+      return undefined;
+    });
+  }
+
+  function lookupUserName(idMap: Map<number, string> | undefined, id?: number): string | undefined {
+    if (!idMap || !id) return undefined;
+    return safeBridge(() => {
+      const val = idMap.get(id);
+      return typeof val === 'string' ? val.trim().toLowerCase() || undefined : undefined;
+    });
+  }
+
   function tryGetCachedMediaList(
     target: number | string,
     type: 'ANIME' | 'MANGA',
@@ -537,147 +989,123 @@ export const AniList = (() => {
     userName?: string
   ): MediaListResult | null {
     const win = pageWin();
-    const bridge = CoreHooks.getCacheBridge();
     const t = type.toUpperCase();
     const isId = typeof target === 'number' || /^\d+$/.test(String(target));
     const id = userId || (isId ? Number(target) : undefined);
-    const name = userName || (!isId ? String(target).trim().toLowerCase() : undefined);
+    const name = (userName || (!isId ? String(target) : '')).trim().toLowerCase() || undefined;
 
-    const userMap: Map<string, number> | undefined = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
-    const idMap: Map<number, string> | undefined = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
+    const bridge = safeBridge(() => CoreHooks.getCacheBridge()) ?? null;
+    const userMap: Map<string, number> | undefined = safeBridge(() =>
+      bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__
+    );
+    const idMap: Map<number, string> | undefined = safeBridge(() =>
+      bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__
+    );
 
-    const resolvedId = id || (name && userMap ? userMap.get(name) : undefined);
-    const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : undefined);
+    const resolvedId = id || lookupUserId(userMap, name);
+    const resolvedName = name || lookupUserName(idMap, resolvedId);
 
-    // 1. Check entityCache in AniList
     const entityKeys: string[] = [];
     if (resolvedId) entityKeys.push(`MediaListCollection:${t}:${resolvedId}`);
     if (resolvedName) entityKeys.push(`MediaListCollection:${t}:${resolvedName}`);
     for (const k of entityKeys) {
       const cached = entityCache.get(k);
-      if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection) {
+      if (
+        cached &&
+        Date.now() - cached.time < ENTITY_TTL &&
+        cached.data?.MediaListCollection &&
+        cached.data.MediaListCollection.hasNextChunk !== true
+      ) {
         logDebug('[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:', k);
         return formatMediaListResult(cached.data.MediaListCollection);
       }
     }
 
-    // 2. Check FastLoad GQL Store (Fetch responses intercepted by FastLoad)
-    const gqlStore: Map<string, { time: number; snap: any }> | undefined = bridge
-      ? bridge.getGqlStore()
-      : win.__ALFL_GQL_STORE__;
+    const gqlStore: Map<string, { time: number; snap: any }> | undefined = safeBridge(() =>
+      bridge ? bridge.getGqlStore() : win.__ALFL_GQL_STORE__
+    );
     if (gqlStore) {
+      const tryDecodeGqlEntry = (k: string, cached: any, viaScan: boolean): MediaListResult | null => {
+        if (!cached || Date.now() - cached.time >= 5 * 60_000 || !cached.snap?.buf) return null;
+        try {
+          const raw = new TextDecoder().decode(cached.snap.buf);
+          const json = JSON.parse(raw);
+          const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
+          if (mlc && Array.isArray(mlc.lists) && mlc.hasNextChunk !== true) {
+            logDebug(
+              viaScan
+                ? '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):'
+                : '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:',
+              k
+            );
+            return formatMediaListResult(mlc);
+          }
+        } catch (_) {}
+        return null;
+      };
+
       const gqlKeys: string[] = [];
-      if (resolvedId) {
-        gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
-      }
-      if (resolvedName) {
-        gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedName}:{}`);
-      }
+      if (resolvedId) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
+      if (resolvedName) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedName}:{}`);
 
       for (const k of gqlKeys) {
-        const cached = gqlStore.get(k);
-        if (cached && Date.now() - cached.time < 5 * 60_000 && cached.snap?.buf) {
-          try {
-            const raw = new TextDecoder().decode(cached.snap.buf);
-            const json = JSON.parse(raw);
-            const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-            if (mlc && Array.isArray(mlc.lists)) {
-              logDebug('[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:', k);
-              const result = formatMediaListResult(mlc);
-              if (resolvedId) {
-                entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
-                  time: Date.now(),
-                  data: { MediaListCollection: mlc },
-                  isSuperset: true,
-                  fields: new Set(KNOWN_LIST_FIELDS)
-                });
-              }
-              if (resolvedName) {
-                entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
-                  time: Date.now(),
-                  data: { MediaListCollection: mlc },
-                  isSuperset: true,
-                  fields: new Set(KNOWN_LIST_FIELDS)
-                });
-              }
-              return result;
-            }
-          } catch (_) {}
-        }
+        const cached = safeBridge(() => gqlStore.get(k));
+        const result = tryDecodeGqlEntry(k, cached, false);
+        if (result) return result;
       }
-      for (const [k, cached] of gqlStore.entries()) {
-        if (!k.startsWith(`gql:MediaListCollection:${t}:`)) continue;
-        const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-        const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-        if ((matchId || matchName) && cached && Date.now() - cached.time < 5 * 60_000 && cached.snap?.buf) {
-          try {
-            const raw = new TextDecoder().decode(cached.snap.buf);
-            const json = JSON.parse(raw);
-            const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-            if (mlc && Array.isArray(mlc.lists)) {
-              logDebug('[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):', k);
-              const result = formatMediaListResult(mlc);
-              if (resolvedId) {
-                entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
-                  time: Date.now(),
-                  data: { MediaListCollection: mlc },
-                  isSuperset: true,
-                  fields: new Set(KNOWN_LIST_FIELDS)
-                });
-              }
-              if (resolvedName) {
-                entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
-                  time: Date.now(),
-                  data: { MediaListCollection: mlc },
-                  isSuperset: true,
-                  fields: new Set(KNOWN_LIST_FIELDS)
-                });
-              }
-              return result;
-            }
-          } catch (_) {}
+
+      const gqlScanHit = safeBridge(() => {
+        for (const [k, cached] of gqlStore.entries()) {
+          if (!matchMediaListKey(k, 'gql', t, resolvedId, resolvedName)) continue;
+          const result = tryDecodeGqlEntry(k, cached, true);
+          if (result) return result;
         }
-      }
+        return null;
+      });
+      if (gqlScanHit) return gqlScanHit;
     }
 
-    // 3. Check FastLoad RPC Cache (Prefetched by Web Worker)
-    const rpcCache: Map<string, { time: number; msg: any }> | undefined = bridge
-      ? bridge.getRpcCache()
-      : win.__ALFL_RPC_CACHE__;
+    const rpcCache: Map<string, { time: number; msg: any }> | undefined = safeBridge(() =>
+      bridge ? bridge.getRpcCache() : win.__ALFL_RPC_CACHE__
+    );
     if (rpcCache) {
+      const tryParseRpcEntry = (k: string, cached: any, viaScan: boolean): MediaListResult | null => {
+        if (!cached || Date.now() - cached.time >= 5 * 60_000 || !cached.msg) return null;
+        try {
+          const payload = cached.msg.result ?? cached.msg;
+          const result = parseRpcMediaList(payload);
+          if (result && result.allEntries.length > 0) {
+            logDebug(
+              viaScan
+                ? '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):'
+                : '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:',
+              k
+            );
+            return result;
+          }
+        } catch (_) {}
+        return null;
+      };
+
       const rpcKeys: string[] = [];
-      if (resolvedId) {
-        rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
-      }
-      if (resolvedName) {
-        rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
-      }
+      if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
+      if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
 
       for (const k of rpcKeys) {
-        const cached = rpcCache.get(k);
-        if (cached && Date.now() - cached.time < 5 * 60_000 && cached.msg) {
-          const payload = cached.msg.result ?? cached.msg;
-          const result = parseRpcMediaList(payload);
-          if (result && result.allEntries.length > 0) {
-            logDebug('[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:', k);
-            return result;
-          }
-        }
+        const cached = safeBridge(() => rpcCache.get(k));
+        const result = tryParseRpcEntry(k, cached, false);
+        if (result) return result;
       }
 
-      for (const [k, cached] of rpcCache.entries()) {
-        if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
-        const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-        const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-        if ((matchId || matchName) && cached && Date.now() - cached.time < 5 * 60_000 && cached.msg) {
-          const payload = cached.msg.result ?? cached.msg;
-          const result = parseRpcMediaList(payload);
-          if (result && result.allEntries.length > 0) {
-            logDebug('[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):', k);
-            return result;
-          }
+      const rpcScanHit = safeBridge(() => {
+        for (const [k, cached] of rpcCache.entries()) {
+          if (!matchMediaListKey(k, 'rpc', t, resolvedId, resolvedName)) continue;
+          const result = tryParseRpcEntry(k, cached, true);
+          if (result) return result;
         }
-      }
+        return null;
+      });
+      if (rpcScanHit) return rpcScanHit;
     }
 
     return null;
@@ -690,7 +1118,8 @@ export const AniList = (() => {
   ): Promise<MediaListResult> {
     const isId = typeof target === 'number' || /^\d+$/.test(String(target));
     const userId = options?.userId || (isId ? Number(target) : undefined);
-    const userName = options?.userName || (!isId ? String(target).trim() : undefined);
+    const rawUserName = options?.userName || (!isId ? String(target) : '');
+    const userName = rawUserName.trim() || undefined;
 
     if (!options?.forceFresh) {
       const cached = tryGetCachedMediaList(target, type, userId, userName);
@@ -700,27 +1129,36 @@ export const AniList = (() => {
     }
 
     const win = pageWin();
-    const bridge = CoreHooks.getCacheBridge();
-    const rpcInflight: Map<string, { promise: Promise<any> }> | undefined = bridge
-      ? bridge.getRpcInflight()
-      : win.__ALFL_RPC_INFLIGHT__;
+    const bridge = safeBridge(() => CoreHooks.getCacheBridge()) ?? null;
+    const rpcInflight: Map<string, { promise: Promise<any> }> | undefined = safeBridge(() =>
+      bridge ? bridge.getRpcInflight() : win.__ALFL_RPC_INFLIGHT__
+    );
     if (rpcInflight && !options?.forceFresh) {
       const t = type.toUpperCase();
-      const userMap: Map<string, number> | undefined = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
-      const idMap: Map<number, string> | undefined = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
-      const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : undefined);
-      const resolvedName = userName ? userName.toLowerCase() : (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : undefined);
+      const userMap: Map<string, number> | undefined = safeBridge(() =>
+        bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__
+      );
+      const idMap: Map<number, string> | undefined = safeBridge(() =>
+        bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__
+      );
+      const normName = userName ? userName.toLowerCase() : undefined;
+      const resolvedId = userId || lookupUserId(userMap, normName);
+      const resolvedName = normName || lookupUserName(idMap, resolvedId);
 
       const rpcKeys: string[] = [];
       if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
       if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
 
       const checkInflight = async (k: string, flight: { promise: Promise<any> }) => {
+        if (!flight?.promise) return null;
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           logDebug('[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:', k);
           const msg = await Promise.race([
             flight.promise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error('timeout')), 5000);
+            })
           ]);
           const payload = msg?.result ?? msg;
           const parsed = parseRpcMediaList(payload);
@@ -728,26 +1166,34 @@ export const AniList = (() => {
             logDebug('[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:', k);
             return parsed;
           }
-        } catch (_) {}
+        } catch (_) {
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
         return null;
       };
 
       for (const k of rpcKeys) {
-        const flight = rpcInflight.get(k);
+        const flight = safeBridge(() => rpcInflight.get(k));
         if (flight) {
           const res = await checkInflight(k, flight);
           if (res) return res;
         }
       }
 
-      for (const [k, flight] of rpcInflight.entries()) {
-        if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
-        const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-        const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-        if (matchId || matchName) {
-          const res = await checkInflight(k, flight);
-          if (res) return res;
-        }
+      const matchingFlights =
+        safeBridge(() => {
+          const list: Array<[string, { promise: Promise<any> }]> = [];
+          for (const [k, flight] of rpcInflight.entries()) {
+            if (matchMediaListKey(k, 'rpc', t, resolvedId, resolvedName)) {
+              list.push([k, flight]);
+            }
+          }
+          return list;
+        }) || [];
+      for (const [k, flight] of matchingFlights) {
+        const res = await checkInflight(k, flight);
+        if (res) return res;
       }
     }
 
@@ -820,49 +1266,79 @@ export const AniList = (() => {
     }
     if (!hasAuth()) return null;
 
-    const d = await query<{ Viewer: { id: number; name: string; mediaListOptions: { scoreFormat: string } } | null }>(
-      'query { Viewer { id name mediaListOptions { scoreFormat } } }',
-      {}
-    ).catch((e) => {
-      if (e?.auth) throw e;
+    const myEpoch = viewerEpoch;
+    const VIEWER_QUERY = 'query { Viewer { id name mediaListOptions { scoreFormat } } }';
+    const fetchViewer = (fresh: boolean) =>
+      query<{ Viewer: { id: number; name: string; mediaListOptions?: { scoreFormat?: string } } | null }>(
+        VIEWER_QUERY,
+        {},
+        { forceFresh: fresh }
+      ).catch((e) => {
+        if (e?.auth) throw e;
+        return null;
+      });
+
+    const checkPostAwaitViewer = (
+      res: { Viewer: { id: number; name: string; mediaListOptions?: { scoreFormat?: string } } | null } | null
+    ): boolean => {
+      syncFromPage();
+      const mismatched = isViewerMismatchedWithPage(res?.Viewer);
+      if (viewerEpoch !== myEpoch || mismatched) {
+        if (viewerEpoch === myEpoch && mismatched) {
+          clearViewer();
+        }
+        return true;
+      }
+      return false;
+    };
+
+    let d = await fetchViewer(forceFresh);
+    if (checkPostAwaitViewer(d)) {
       return null;
-    });
+    }
+
+    if (d?.Viewer && !d.Viewer.mediaListOptions?.scoreFormat && !forceFresh) {
+      invalidateLocal('Viewer');
+      d = await fetchViewer(true);
+      if (checkPostAwaitViewer(d)) {
+        return null;
+      }
+    }
 
     if (d?.Viewer) {
-      store.set('al_user_id', d.Viewer.id);
-      store.set('al_username', d.Viewer.name);
-      store.set('al_score_format', d.Viewer.mediaListOptions.scoreFormat);
-      return { id: d.Viewer.id, name: d.Viewer.name, scoreFormat: d.Viewer.mediaListOptions.scoreFormat };
+      const scoreFormat = d.Viewer.mediaListOptions?.scoreFormat;
+      if (d.Viewer.id) store.set('al_user_id', d.Viewer.id);
+      if (d.Viewer.name) store.set('al_username', d.Viewer.name);
+      if (scoreFormat) {
+        store.set('al_score_format', scoreFormat);
+      }
+      return {
+        id: d.Viewer.id,
+        name: d.Viewer.name,
+        scoreFormat: scoreFormat || ''
+      };
     }
     return null;
   }
 
   const invalidate = (entityKeyPrefix?: string): void => {
-    if (!entityKeyPrefix) {
-      entityCache.clear();
-      inflightEntities.clear();
-    } else {
-      for (const k of entityCache.keys()) {
-        if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
-      }
-      for (const k of inflightEntities.keys()) {
-        if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
-      }
-    }
+    invalidateLocal(entityKeyPrefix);
 
-    const bridge = CoreHooks.getCacheBridge();
-    if (bridge) {
-      bridge.clear();
-    } else {
-      const win = pageWin();
-      win.__ALFL_CLEAR__?.();
-    }
+    safeBridge(() => {
+      const bridge = CoreHooks.getCacheBridge();
+      if (bridge) {
+        bridge.clear();
+      } else {
+        const win = pageWin();
+        win.__ALFL_CLEAR__?.();
+      }
+    });
   };
 
   const invalidateMediaList = (target?: number | string, type?: 'ANIME' | 'MANGA'): void => {
     if (!target) return invalidate('MediaListCollection');
     const t = type ? type.toUpperCase() : '';
-    const prefix = t ? `MediaListCollection:${t}:${String(target).toLowerCase()}` : `MediaListCollection:`;
+    const prefix = t ? `MediaListCollection:${t}:${String(target).trim().toLowerCase()}` : `MediaListCollection:`;
     invalidate(prefix);
   };
 

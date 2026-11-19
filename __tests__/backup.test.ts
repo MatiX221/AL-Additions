@@ -6,13 +6,14 @@ import {
   createBackup,
   createRawBackup,
   importBackup,
+  applyVersion1Settings,
   MAGIC_PLAIN,
   MAGIC_ENCRYPTED,
   encryptData,
   decryptData,
   FORMAT_VERSION
 } from '../src/settings/backup';
-import { getAccountSecretKeys } from '../src/core/accounts';
+import { getAccountSecretKeys, registerAccountProvider } from '../src/core/accounts';
 import { CoreHooks } from '../src/core/bus';
 import { Settings } from '../src/settings/settings';
 import { store } from '../src/utils/helpers';
@@ -174,16 +175,13 @@ describe('Settings Backup & Crypto Engine', () => {
 
     const rawJson = createRawBackup({ tagPercentage: 88 });
 
-    // Verify it is formatted / unminified JSON with indentation and newlines
     expect(rawJson).toContain('\n');
     expect(rawJson).toContain('  "version": 1');
     expect(rawJson).toContain('"tagPercentage": 88');
     expect(rawJson).toContain('"mal_token": "dev_raw_mal_token"');
     expect(rawJson).toContain('"mal_refresh_token": "dev_raw_refresh"');
-    // AniList session cache is never exported
     expect(rawJson).not.toContain('"al_username"');
 
-    // Parse verify
     const parsed = JSON.parse(rawJson);
     expect(parsed.version).toBe(1);
     expect(parsed.data.tagPercentage).toBe(88);
@@ -191,7 +189,6 @@ describe('Settings Backup & Crypto Engine', () => {
     expect(parsed.data.mal_refresh_token).toBe('dev_raw_refresh');
     expect(parsed.data.al_username).toBeUndefined();
 
-    // Verify importBackup can restore it directly without password
     Settings.set('tagPercentage', 10);
     store.del('mal_token');
     store.del('mal_refresh_token');
@@ -261,5 +258,126 @@ describe('Settings Backup & Crypto Engine', () => {
     );
 
     expect(Settings.get('manualOverridesEnabled')).toBe(false);
+  });
+});
+
+describe('Settings Backup: B1-22 Regression Guards', () => {
+  it('ignores Object.prototype keys in importBackup and applyVersion1Settings without throwing TypeError', async () => {
+    const withValid = await importBackup(
+      JSON.stringify({
+        version: 1,
+        encrypted: false,
+        exportedAt: Date.now(),
+        data: {
+          toString: 'evil',
+          constructor: { prototype: true },
+          valueOf: 42,
+          ala_setting_toString: 'bad',
+          ala_setting_constructor: true,
+          tagPercentage: 65
+        }
+      })
+    );
+    expect(withValid.applied).toBe(1);
+    expect(Settings.get('tagPercentage')).toBe(65);
+
+    const rawProtoPayload = '{"version":1,"encrypted":false,"exportedAt":1,"data":{"toString":"x","constructor":1,"__proto__":{"polluted":true}}}';
+    await expect(importBackup(rawProtoPayload)).rejects.toThrow('No recognized settings found in the backup file.');
+    expect(({} as any).polluted).toBeUndefined();
+  });
+
+  it('uses own-property checks on overrides and null-prototype data objects', async () => {
+    Settings.set('tagPercentage', 50);
+    const protoOverrides = Object.create({ tagPercentage: 99 });
+    const raw = JSON.parse(createRawBackup(protoOverrides));
+    expect(raw.data.tagPercentage).toBe(50);
+
+    const bytes = await createBackup(false, undefined, protoOverrides);
+    const nullProtoData = Object.assign(Object.create(null), {
+      syncManualOverrides: {
+        '16498': { malId: 16498, type: 'ANIME', title: 'Attack on Titan', updatedAt: 100 }
+      }
+    });
+    const res = applyVersion1Settings(nullProtoData);
+    expect(res.applied).toBe(2);
+    expect(Settings.get('manualOverridesEnabled')).toBe(true);
+
+    Settings.set('tagPercentage', 20);
+    await importBackup(bytes);
+    expect(Settings.get('tagPercentage')).toBe(50);
+  });
+
+  it('validates secretKeys generically and skips invalid values without incrementing secretsApplied', async () => {
+    const cleanupProvider = registerAccountProvider({
+      id: 'custom_test',
+      name: 'Custom Provider',
+      secretKeys: ['custom_token', 'custom_expires_at'],
+      isConnected: () => false,
+      connect: () => {},
+      disconnect: () => {}
+    });
+
+    try {
+      store.set('mal_token', 'existing_mal_token');
+      store.set('mal_expires_at', 999999);
+      store.set('custom_token', 'existing_custom_token');
+
+      const invalidJsonResult = await importBackup(
+        JSON.stringify({
+          version: 1,
+          encrypted: false,
+          exportedAt: Date.now(),
+          data: {
+            tagPercentage: 70,
+            mal_token: {},
+            mal_refresh_token: '',
+            mal_code_verifier: '   ',
+            mal_expires_at: 'bad',
+            custom_token: ['not', 'a', 'string'],
+            custom_expires_at: -5
+          }
+        })
+      );
+
+      expect(invalidJsonResult.applied).toBe(1);
+      expect(invalidJsonResult.secretsApplied).toBe(0);
+      expect(store.get('mal_token')).toBe('existing_mal_token');
+      expect(store.get('mal_expires_at')).toBe(999999);
+      expect(store.get('mal_refresh_token', null)).toBeNull();
+      expect(store.get('mal_code_verifier', null)).toBeNull();
+      expect(store.get('custom_token')).toBe('existing_custom_token');
+      expect(store.get('custom_expires_at', null)).toBeNull();
+
+      const nonFiniteResult = applyVersion1Settings({
+        tagPercentage: 71,
+        mal_token: true,
+        mal_refresh_token: 12345,
+        mal_expires_at: NaN,
+        custom_expires_at: Infinity,
+        custom_token: null
+      });
+      expect(nonFiniteResult.applied).toBe(1);
+      expect(nonFiniteResult.secretsApplied).toBe(0);
+      expect(store.get('mal_token')).toBe('existing_mal_token');
+      expect(store.get('mal_expires_at')).toBe(999999);
+
+      const validResult = applyVersion1Settings({
+        custom_token: 'new_custom_token',
+        custom_expires_at: 0,
+        mal_expires_at: 1700000000000
+      });
+      expect(validResult.secretsApplied).toBe(3);
+      expect(store.get('custom_token')).toBe('new_custom_token');
+      expect(store.get('custom_expires_at')).toBe(0);
+      expect(store.get('mal_expires_at')).toBe(1700000000000);
+    } finally {
+      cleanupProvider();
+      store.del('mal_token');
+      store.del('mal_refresh_token');
+      store.del('mal_code_verifier');
+      store.del('mal_expires_at');
+      store.del('custom_token');
+      store.del('custom_expires_at');
+    }
   });
 });

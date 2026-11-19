@@ -173,7 +173,6 @@ describe('AniSongs: GraphQL Theme Parsing & Video Resolution', () => {
       SPOTIFY: 'https://open.spotify.com/track/3khEEPRyBeOUabbmOPJzAG',
       YOUTUBE: 'https://www.youtube.com/watch?v=M2cckDmNLMI'
     });
-    // Prefers WEB video source over BD
     expect(entry?.url).toBe('https://v.animethemes.moe/ChainsawMan-OP1.webm');
   });
 
@@ -619,13 +618,11 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       expect(toggleBtn.textContent).toBe('Show all (8)');
       expect(toggleBtn.getAttribute('aria-expanded')).toBe('false');
 
-      // Expand
       toggleBtn.click();
       expect(extraWrap.classList.contains('is-open')).toBe(true);
       expect(toggleBtn.textContent).toBe('Show less');
       expect(toggleBtn.getAttribute('aria-expanded')).toBe('true');
 
-      // Start playing an item inside extraWrap, then simulate shrinking document height during collapse
       const hiddenHeader = extraWrap.querySelector('.daiya-anisong-header') as HTMLElement;
       hiddenHeader.click();
       const pausesBeforeCollapse = pauseSpy.mock.calls.length;
@@ -638,53 +635,47 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       });
       toggleBtn.getBoundingClientRect = () => ({ top: btnDocTop - scrollY } as DOMRect);
 
-      // 1. Mobile / taller-column collapse: total page height shrinks alongside button
       toggleBtn.click();
       expect(pauseSpy.mock.calls.length).toBe(pausesBeforeCollapse + 1);
       expect(extraWrap.classList.contains('is-open')).toBe(false);
       expect(toggleBtn.textContent).toBe('Show all (8)');
       expect(toggleBtn.getAttribute('aria-expanded')).toBe('false');
 
-      // Midway collapse: both content and document shrink by 400px -> scroll follows so button stays at 500px
       btnDocTop = 800;
       docHeight = 2600;
       vi.advanceTimersByTime(100);
       expect(toggleBtn.getBoundingClientRect().top).toBe(500);
       expect(scrollY).toBe(300);
 
-      // Finish collapse: total shrink 600px -> button remains anchored at 500px
       btnDocTop = 600;
       docHeight = 2400;
       vi.advanceTimersByTime(200);
       expect(toggleBtn.getBoundingClientRect().top).toBe(500);
       expect(scrollY).toBe(100);
 
-      // 2. PC side-by-side layout where sibling column keeps page height unchanged -> do not scroll
       btnDocTop = 1200;
       docHeight = 3000;
       scrollY = 700;
-      toggleBtn.click(); // expand
+      toggleBtn.click();
       scrollBySpy.mockClear();
-      toggleBtn.click(); // collapse
+      toggleBtn.click();
       btnDocTop = 600;
       docHeight = 3000;
       vi.advanceTimersByTime(300);
       expect(scrollBySpy).not.toHaveBeenCalled();
       expect(scrollY).toBe(700);
 
-      // 3. Partial shrink: collapsing column only reduces document height by 150px before matching sibling height
       btnDocTop = 1200;
       docHeight = 3000;
       scrollY = 700;
-      toggleBtn.click(); // expand
+      toggleBtn.click();
       scrollBySpy.mockClear();
-      toggleBtn.click(); // collapse
+      toggleBtn.click();
       btnDocTop = 600;
       docHeight = 2850;
       vi.advanceTimersByTime(300);
       expect(scrollY).toBe(550);
 
-      // 4. Reduced motion adjusts synchronously only by document height shrink
       reduced = true;
       let isOpen = false;
       let collapsedDocHeight = 3000;
@@ -698,20 +689,18 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       });
       toggleBtn.getBoundingClientRect = () => ({ top: (isOpen ? 1200 : 600) - scrollY } as DOMRect);
 
-      // Reduced motion with unchanged docHeight -> stays put
-      toggleBtn.click(); // expand (isOpen -> true, docHeight -> 3000)
+      toggleBtn.click();
       scrollY = 700;
       collapsedDocHeight = 3000;
       scrollBySpy.mockClear();
-      toggleBtn.click(); // collapse
+      toggleBtn.click();
       expect(scrollBySpy).not.toHaveBeenCalled();
       expect(scrollY).toBe(700);
 
-      // Reduced motion with shrinking docHeight -> adjusts synchronously
-      toggleBtn.click(); // expand
+      toggleBtn.click();
       scrollY = 700;
       collapsedDocHeight = 2400;
-      toggleBtn.click(); // collapse
+      toggleBtn.click();
       expect(scrollY).toBe(100);
     } finally {
       if (origScrollYDesc) Object.defineProperty(window, 'scrollY', origScrollYDesc);
@@ -761,7 +750,6 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       expect(singleWrap.classList.contains('is-open')).toBe(true);
       expect(singleWrap.querySelector('video')?.src).toBe('https://v.animethemes.moe/Single.webm');
 
-      // Closing removes .is-open immediately and removes wrapper after transition
       singleHeader.click();
       expect(singleWrap.classList.contains('is-open')).toBe(false);
       expect(singleCard.querySelectorAll('.daiya-anisong-collapsible')).toHaveLength(1);
@@ -798,7 +786,6 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       expect(rows[2].querySelector('.daiya-anisong-version-tag')?.textContent).toBe('v3');
       expect(rows[2].querySelector('.daiya-anisong-version-meta')?.textContent).toBe('(ep 4) — paper');
 
-      // Clicking v1 opens v1 collapsible right after v1 (pushing v2 & v3 below)
       rows[0].click();
       const wrapV1 = rows[0].nextElementSibling as HTMLElement;
       expect(wrapV1?.classList.contains('daiya-anisong-collapsible')).toBe(true);
@@ -806,7 +793,6 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       expect(wrapV1?.querySelector('video')?.src).toBe('https://v.animethemes.moe/NiaListon-ED1.webm');
       expect(rows[0].classList.contains('is-active')).toBe(true);
 
-      // Clicking v2 simultaneously starts closing v1 (!is-open, paused) and opens v2 (is-open)
       const pausesBeforeSwitch = pauseSpy.mock.calls.length;
       rows[1].click();
       expect(pauseSpy.mock.calls.length).toBe(pausesBeforeSwitch + 1);
@@ -818,18 +804,15 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       expect(rows[0].classList.contains('is-active')).toBe(false);
       expect(rows[1].classList.contains('is-active')).toBe(true);
 
-      // Rapidly clicking v1 before collapse finishes revives wrapV1 in place without duplicating collapsibles
       rows[0].click();
       expect(multiCard.querySelectorAll('.daiya-anisong-collapsible')).toHaveLength(2);
       expect(wrapV1.classList.contains('is-open')).toBe(true);
       expect(wrapV2.classList.contains('is-open')).toBe(false);
 
-      // Advance past transition: closing v2 collapsible is removed cleanly, only v1 remains
       vi.advanceTimersByTime(260);
       expect(multiCard.querySelectorAll('.daiya-anisong-collapsible')).toHaveLength(1);
       expect(Array.from(versionsList.children)).toEqual([rows[0], wrapV1, rows[1], rows[2]]);
 
-      // With reduced motion enabled, switching or closing removes previous wrapper synchronously
       reduced = true;
       rows[1].click();
       expect(multiCard.querySelectorAll('.daiya-anisong-collapsible')).toHaveLength(1);

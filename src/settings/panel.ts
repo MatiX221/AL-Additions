@@ -7,8 +7,11 @@ import { findExactText, icon } from '../utils/dom';
 import { debounce, esc } from '../utils/helpers';
 import { Core } from '../core/observer';
 import { createBackup, createRawBackup, downloadBackupFile, importBackup, readFileAsBytes } from './backup';
-import { promptPasswordModal } from './passwordModal';
+import { promptPasswordModal, closePasswordModal } from './passwordModal';
 import type { SettingRow, RegisteredFeature, ModuleHost, ModuleStatus } from '../types';
+
+const getRow = (key?: string): SettingRow | undefined =>
+  key && Object.prototype.hasOwnProperty.call(ROWS, key) ? ROWS[key] : undefined;
 
 const PINNED_FIRST = ['Sync', 'General'];
 const PINNED_LAST = ['Advanced'];
@@ -240,18 +243,18 @@ function backupRestoreHtml(): string {
 }
 
 function devModeCardHtml(): string {
-  const devRow = ROWS[DEV_MODE_DEF.key];
-  const generalRow = ROWS[DEV_MODE_DEF.generalDebug.key];
+  const devRow = getRow(DEV_MODE_DEF.key);
+  const generalRow = getRow(DEV_MODE_DEF.generalDebug.key);
   if (!devRow) return '';
 
   const isDevOn = !!Settings.get(DEV_MODE_DEF.key);
   const debugModules = features
-    .filter((f) => f.debug && ROWS[f.debug.key])
+    .filter((f) => f.debug && getRow(f.debug.key))
     .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
 
   const debugRowsHtml = [
     ...debugModules.map((f) => {
-      const row = ROWS[f.debug!.key];
+      const row = getRow(f.debug!.key)!;
       const modOn = !!Settings.get(f.toggle.key);
       return `<div class="ala-collapsible ${modOn ? 'is-open' : ''}" data-debug-for="${esc(f.toggle.key)}">
         <div class="ala-collapsible-inner">
@@ -348,15 +351,25 @@ export function closePanel(): void {
     | (HTMLElement & { _onKey?: (e: KeyboardEvent) => void; _onFocus?: () => void; _onCleanup?: () => void })
     | null;
   if (!b) return;
-  if (b._onKey) document.removeEventListener('keydown', b._onKey);
-  if (b._onFocus) window.removeEventListener('focus', b._onFocus);
-  b._onCleanup?.();
-  b.remove();
-  document.documentElement.style.overflow = prevOverflow || '';
-  prevOverflow = null;
+  const onKey = b._onKey;
+  const onFocus = b._onFocus;
+  const onCleanup = b._onCleanup;
+  b._onKey = undefined;
+  b._onFocus = undefined;
+  b._onCleanup = undefined;
+  if (onKey) document.removeEventListener('keydown', onKey);
+  if (onFocus) window.removeEventListener('focus', onFocus);
+  try {
+    onCleanup?.();
+  } finally {
+    b.remove();
+    document.documentElement.style.overflow = prevOverflow || '';
+    prevOverflow = null;
+  }
 }
 
 export function showPanel(host: ModuleHost = NOOP_HOST): void {
+  if (!document.body) return;
   if (document.getElementById('ala-settings-backdrop')) return;
   const backdrop = document.createElement('div') as HTMLDivElement & {
     _onKey?: (e: KeyboardEvent) => void;
@@ -399,6 +412,16 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     }
   }
 
+  const isFeatureStandalonePaused = (id: string): boolean =>
+    standaloneDetected.has(id)
+      ? !!standaloneDetected.get(id)
+      : host.getStatus(id).reason === 'standalone-paused';
+
+  const findFeatureMainToggle = (id: string): HTMLInputElement | null => {
+    const card = panel.querySelector<HTMLElement>(`.ala-feature[data-feature="${id}"]`);
+    return card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]') || null;
+  };
+
   const snapshotInitial = () => {
     const vals: Record<string, string> = {};
     const enabledMap: Record<string, boolean> = {};
@@ -406,19 +429,40 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       vals[r.key] = JSON.stringify(Settings.get(r.key));
     }
     for (const f of features) {
-      enabledMap[f.id] = !!Settings.get(f.toggle.key) && !standaloneDetected.get(f.id);
+      enabledMap[f.id] = !!Settings.get(f.toggle.key) && !isFeatureStandalonePaused(f.id);
     }
     return { vals, statuses: host.resolveStagedStates(enabledMap) };
   };
 
   let baseline = snapshotInitial();
 
+  const refreshBaselineStatuses = () => {
+    const enabledMap: Record<string, boolean> = {};
+    for (const f of features) {
+      let baseEnabled = false;
+      const raw = baseline.vals[f.toggle.key];
+      if (raw !== undefined) {
+        try {
+          baseEnabled = !!JSON.parse(raw);
+        } catch {
+          baseEnabled = !!Settings.get(f.toggle.key);
+        }
+      } else {
+        baseEnabled = !!Settings.get(f.toggle.key);
+      }
+      enabledMap[f.id] = baseEnabled && !isFeatureStandalonePaused(f.id);
+    }
+    baseline = {
+      vals: baseline.vals,
+      statuses: host.resolveStagedStates(enabledMap)
+    };
+  };
+
   const readStagedEnabled = (): Record<string, boolean> => {
     const staged: Record<string, boolean> = {};
     for (const f of features) {
-      const card = panel.querySelector<HTMLElement>(`.ala-feature[data-feature="${f.id}"]`);
-      const toggle = card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
-      if (standaloneDetected.get(f.id)) {
+      const toggle = findFeatureMainToggle(f.id);
+      if (isFeatureStandalonePaused(f.id)) {
         staged[f.id] = false;
       } else {
         staged[f.id] = toggle ? toggle.checked : !!Settings.get(f.toggle.key);
@@ -427,12 +471,28 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     return staged;
   };
 
+  const reconcileStandaloneLocks = () => {
+    for (const f of features) {
+      const mainToggle = findFeatureMainToggle(f.id);
+      if (!mainToggle) continue;
+      if (isFeatureStandalonePaused(f.id)) {
+        mainToggle.dataset.standaloneLocked = '1';
+        mainToggle.checked = false;
+        mainToggle.disabled = true;
+      } else if (mainToggle.dataset.standaloneLocked) {
+        delete mainToggle.dataset.standaloneLocked;
+        mainToggle.checked = !!Settings.get(f.toggle.key);
+        mainToggle.disabled = false;
+      }
+    }
+  };
+
   const computeSavePlan = () => {
     const changed: Array<{ key: string; value: any }> = [];
     const changedKeys = new Set<string>();
 
     controls().forEach((el) => {
-      const r = ROWS[el.dataset.key!];
+      const r = getRow(el.dataset.key);
       if (!r) return;
       if (el.dataset.standaloneLocked) return;
       const val = TYPES[r.type].normalize(TYPES[r.type].read(el), r);
@@ -505,18 +565,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
 
     const staged = stagedStatuses[f.id] || { active: !!mainToggle?.checked };
     const live = host.getStatus(f.id);
-    const isStandalonePaused = !!standaloneDetected.get(f.id) || live.reason === 'standalone-paused';
-
-    if (mainToggle) {
-      if (isStandalonePaused) {
-        mainToggle.dataset.standaloneLocked = '1';
-        mainToggle.checked = false;
-        mainToggle.disabled = true;
-      } else if (mainToggle.dataset.standaloneLocked) {
-        delete mainToggle.dataset.standaloneLocked;
-        mainToggle.checked = !!Settings.get(f.toggle.key);
-      }
-    }
+    const isStandalonePaused = isFeatureStandalonePaused(f.id);
 
     upsertNote(card, 'ala-standalone-note', isStandalonePaused ? standaloneNoteHtml(f) : null);
 
@@ -595,6 +644,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   };
 
   const syncAll = () => {
+    reconcileStandaloneLocks();
     const plan = computeSavePlan();
     const activeMap = new Map<string, boolean>();
     panel.querySelectorAll<HTMLElement>('.ala-feature').forEach((card) => {
@@ -629,23 +679,55 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   syncAll();
   initDropdownAnimations(panel);
 
+  const editorOverlays = new Set<HTMLElement>();
+  const editorStyleDisposers = new Set<() => void>();
+  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearReloadTimer = () => {
+    if (reloadTimer !== null) {
+      clearTimeout(reloadTimer);
+      reloadTimer = null;
+    }
+  };
+  const scheduleReload = (ms: number) => {
+    clearReloadTimer();
+    reloadTimer = setTimeout(() => {
+      reloadTimer = null;
+      if (panel.isConnected) location.reload();
+    }, ms);
+  };
+
   const unsubStatus = host.onStatusChange((id, status) => {
     if (!panel.isConnected) return;
+    const prev = !!standaloneDetected.get(id);
+    let next = prev;
     if (status.reason === 'standalone-paused') {
+      next = true;
       standaloneDetected.set(id, true);
     } else if (standaloneDetected.has(id)) {
+      next = false;
       standaloneDetected.set(id, false);
+    }
+    if (next !== prev) {
+      refreshBaselineStatuses();
     }
     syncAll();
   });
 
   for (const f of features) {
     if (!f.standalone) continue;
-    void host.probeStandalone(f.id).then((found) => {
-      if (!panel.isConnected) return;
-      standaloneDetected.set(f.id, !!found);
-      syncAll();
-    });
+    void host
+      .probeStandalone(f.id)
+      .then((found) => {
+        if (!panel.isConnected) return;
+        const prev = !!standaloneDetected.get(f.id);
+        const next = !!found;
+        standaloneDetected.set(f.id, next);
+        if (next !== prev) {
+          refreshBaselineStatuses();
+        }
+        syncAll();
+      })
+      .catch(() => {});
   }
 
   panel.addEventListener('change', (e) => {
@@ -655,34 +737,49 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
 
   panel.querySelectorAll<HTMLButtonElement>('.ala-btn--edit-json').forEach((btn) => {
     const key = btn.id.replace(/^ala-btn-edit-/, '');
-    const r = ROWS[key];
+    const r = getRow(key);
     if (!r?.editor) return;
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       const inputEl = panel.querySelector<HTMLInputElement>(`input[data-key="${key}"]`);
       if (!inputEl) return;
-      r.editor!({
-        value: TYPES.json.read(inputEl),
-        onApply: (nextValue: any) => {
-          TYPES.json.write(inputEl, nextValue);
-          if (
-            key === 'syncManualOverrides' &&
-            nextValue &&
-            typeof nextValue === 'object' &&
-            !Array.isArray(nextValue) &&
-            Object.keys(nextValue).length > 0
-          ) {
-            const card = inputEl.closest<HTMLElement>('.ala-feature');
-            const mainToggle = card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
-            if (mainToggle && !mainToggle.checked && !mainToggle.disabled) {
-              mainToggle.checked = true;
+      const beforeBodyChildren = new Set<Element>(Array.from(document.body.children));
+      const trackedAddStyle = (styleId: string, css: string) => {
+        const dispose = addStyle(styleId, css);
+        editorStyleDisposers.add(dispose);
+        return dispose;
+      };
+      try {
+        r.editor!({
+          value: TYPES.json.read(inputEl),
+          onApply: (nextValue: any) => {
+            if (!panel.isConnected) return;
+            TYPES.json.write(inputEl, nextValue);
+            if (
+              key === 'syncManualOverrides' &&
+              nextValue &&
+              typeof nextValue === 'object' &&
+              !Array.isArray(nextValue) &&
+              Object.keys(nextValue).length > 0
+            ) {
+              const card = inputEl.closest<HTMLElement>('.ala-feature');
+              const mainToggle = card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
+              if (mainToggle && !mainToggle.checked && !mainToggle.disabled) {
+                mainToggle.checked = true;
+              }
             }
+            const plan = syncAll();
+            setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
+          },
+          addStyle: trackedAddStyle
+        });
+      } finally {
+        for (const child of Array.from(document.body.children)) {
+          if (!beforeBodyChildren.has(child) && child instanceof HTMLElement && child !== backdrop) {
+            editorOverlays.add(child);
           }
-          const plan = syncAll();
-          setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
-        },
-        addStyle
-      });
+        }
+      }
     });
   });
 
@@ -693,7 +790,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     }
     if (plan.needsPageReload) {
       setStatus('Saved. Reloading…');
-      setTimeout(() => location.reload(), 350);
+      scheduleReload(350);
       return;
     }
     baseline = snapshotInitial();
@@ -706,7 +803,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
 
   panel.querySelector('.ala-reset')?.addEventListener('click', () => {
     controls().forEach((el) => {
-      const r = ROWS[el.dataset.key!];
+      const r = getRow(el.dataset.key);
       if (!r) return;
       if (el.dataset.standaloneLocked) return;
       TYPES[r.type].write(el, r.def);
@@ -756,9 +853,11 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   const getPanelOverrides = (): Record<string, any> => {
     const overrides: Record<string, any> = {};
     controls().forEach((el) => {
-      const r = ROWS[el.dataset.key!];
+      const r = getRow(el.dataset.key);
       if (!r) return;
-      overrides[r.key] = el.dataset.standaloneLocked ? Settings.get(r.key) : TYPES[r.type].read(el);
+      overrides[r.key] = el.dataset.standaloneLocked
+        ? Settings.get(r.key)
+        : TYPES[r.type].normalize(TYPES[r.type].read(el), r);
     });
     return overrides;
   };
@@ -772,13 +871,15 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       confirm: true,
       placeholder: 'Optional encryption password'
     });
-    if (pwd === null) return;
+    if (!panel.isConnected || pwd === null) return;
     try {
       setStatus('Generating backup…');
       const envelope = await createBackup(false, pwd, getPanelOverrides());
+      if (!panel.isConnected) return;
       downloadBackupFile(envelope);
       setStatus('Settings exported successfully.');
     } catch (e: any) {
+      if (!panel.isConnected) return;
       setStatus('Export failed: ' + (e.message || e), true);
     }
   });
@@ -789,7 +890,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       'Anyone with access to this file will have full access to your connected accounts.\n\n' +
       'Do you want to continue?'
     );
-    if (!confirmed) return;
+    if (!panel.isConnected || !confirmed) return;
 
     const pwd = await promptPasswordModal({
       title: 'Export Credentials (Encrypted)',
@@ -799,7 +900,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       confirm: true,
       placeholder: 'Choose an encryption password'
     });
-    if (pwd === null) return;
+    if (!panel.isConnected || pwd === null) return;
     if (!pwd.trim()) {
       setStatus('A password is required to export credentials.', true);
       return;
@@ -807,9 +908,11 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     try {
       setStatus('Generating backup…');
       const envelope = await createBackup(true, pwd, getPanelOverrides());
+      if (!panel.isConnected) return;
       downloadBackupFile(envelope);
       setStatus('Settings and credentials exported successfully.');
     } catch (e: any) {
+      if (!panel.isConnected) return;
       setStatus('Export failed: ' + (e.message || e), true);
     }
   });
@@ -837,7 +940,9 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     try {
       setStatus('Reading backup file…');
       const bytes = await readFileAsBytes(file);
+      if (!panel.isConnected) return;
       const result = await importBackup(bytes);
+      if (!panel.isConnected) return;
       if (result.cancelled) {
         setStatus('Import cancelled.');
         fileInput.value = '';
@@ -847,8 +952,9 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       if (result.applied > 0) parts.push(`${result.applied} settings`);
       if (result.secretsApplied > 0) parts.push(`${result.secretsApplied} account credentials`);
       setStatus(`Imported ${parts.join(' and ')}. Reloading…`);
-      setTimeout(() => location.reload(), 600);
+      scheduleReload(600);
     } catch (e: any) {
+      if (!panel.isConnected) return;
       setStatus('Import failed: ' + (e.message || e), true);
       fileInput.value = '';
     }
@@ -861,6 +967,30 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   window.addEventListener('focus', onFocus);
   backdrop._onCleanup = () => {
     unsubStatus();
+    clearReloadTimer();
+    try {
+      closePasswordModal();
+    } catch {}
+    for (const el of editorOverlays) {
+      try {
+        if (el.isConnected) {
+          el.querySelector<HTMLElement>('[aria-label="Close"]')?.click();
+        }
+        if (el.isConnected) {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        }
+        if (el.isConnected) {
+          el.remove();
+        }
+      } catch {}
+    }
+    editorOverlays.clear();
+    for (const dispose of editorStyleDisposers) {
+      try {
+        dispose();
+      } catch {}
+    }
+    editorStyleDisposers.clear();
   };
 
   prevOverflow = document.documentElement.style.overflow;
@@ -870,6 +1000,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
 }
 
 export function ensureLauncher(host: ModuleHost = NOOP_HOST): void {
+  if (!document.body) return;
   if (document.getElementById('ala-settings-mobile-launcher')) return;
   const b = document.createElement('button');
   b.id = 'ala-settings-mobile-launcher';
@@ -885,6 +1016,7 @@ export function ensureLauncher(host: ModuleHost = NOOP_HOST): void {
 }
 
 export function installSidebar(host: ModuleHost = NOOP_HOST): void {
+  if (!document.body) return;
   if (document.getElementById('ala-settings-nav-section')) return;
   if (!findExactText('Profile')) return;
   const dev = findExactText('Developer');

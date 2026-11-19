@@ -150,7 +150,6 @@ describe('Core Microkernel: Registration, Statuses & Boot Order', () => {
       settings.Settings.set(key, true);
     };
 
-    // Soft-cycle on `after` should still boot both deterministically alphabetically
     addMod('featBeta', 'feature', { after: ['featAlpha'] });
     addMod('featAlpha', 'feature', { after: ['featBeta'] });
     addMod('svcCore', 'service');
@@ -161,14 +160,11 @@ describe('Core Microkernel: Registration, Statuses & Boot Order', () => {
       order.push('shellUi');
     });
 
-    // Hard cycle on `dependsOn`
     addMod('cycle1', 'feature', { dependsOn: ['cycle2'] });
     addMod('cycle2', 'feature', { dependsOn: ['cycle1'] });
 
-    // Higher-layer dependency violation (`service` depending on `feature`)
     addMod('svcIllegal', 'service', { dependsOn: ['featAlpha'] });
 
-    // Depending on a host-mismatched module yields dep-unavailable
     registry.defineModule({
       id: 'malDep',
       key: 'malDepEnabled',
@@ -200,7 +196,6 @@ describe('Core Microkernel: Registration, Statuses & Boot Order', () => {
     expect(host.getStatus('svcIllegal').reason).toBe('layer-conflict');
     expect(host.getStatus('alOnMal').reason).toBe('dep-unavailable');
 
-    // Disable svcCore and reload -> svcChild tears down before svcCore cleanly
     settings.Settings.set('svcCoreEnabled', false);
     host.reload(['svcCore']);
     expect(tornDown.indexOf('svcChild')).toBeLessThan(tornDown.indexOf('svcCore'));
@@ -273,7 +268,6 @@ describe('Core Microkernel: Registration, Statuses & Boot Order', () => {
 
     expect(events).toContain('badMigrate:setup');
     expect(events).toContain('healthyShell');
-    // CleanupFn throws inside clean2 should not prevent clean1 or clean3 from running
     expect(events).toContain('clean3');
     expect(events).toContain('clean1');
   });
@@ -346,7 +340,6 @@ describe('Core Microkernel: Registration, Statuses & Boot Order', () => {
       settings.Settings.set('earlyReadyEnabled', true);
       registry.startModules(false);
 
-      // Disable & reload before DOMContentLoaded arrives
       settings.Settings.set('earlyReadyEnabled', false);
       registry.createModuleHost().reload(['earlyReadyMod']);
 
@@ -450,7 +443,6 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
 
     expect(document.getElementById('ctx-test-mount')).not.toBeNull();
 
-    // ctx.mount repairs removed DOM elements after body mutation batch
     vi.useFakeTimers();
     try {
       document.getElementById('ctx-test-mount')!.remove();
@@ -465,7 +457,6 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
       vi.useRealTimers();
     }
 
-    // Events broadcast & menu command update without duplicate GM_registerMenuCommand
     capturedCtx.events.emit('ping', 'hello');
     capturedCtx.menuCommand('Test Menu Cmd', () => log.push('cmd:v2'));
     expect(regSpy).toHaveBeenCalledTimes(1);
@@ -473,26 +464,21 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
     registeredCallback();
     expect(log).toEqual(['event:hello', 'cmd:v2']);
 
-    // Route change aborts old RouteContext signal
     expect(routeAborted).toBe(false);
     history.pushState({}, '', '/home');
     expect(routeAborted).toBe(true);
 
-    // Scoped clearSecrets only clears 'mal'
     capturedCtx.accounts.clearSecrets('mal');
     expect(helpers.store.get('mal_token', null)).toBeNull();
     expect(helpers.store.get('other_secret', null)).toBe('xyz');
 
-    // Omit provider clears all providers
     capturedCtx.accounts.clearSecrets();
     expect(helpers.store.get('other_secret', null)).toBeNull();
 
-    // ctx.http aborts in-flight requests on unload
     const abortFn = vi.fn();
     xhrSpy.mockImplementation(() => ({ abort: abortFn }) as any);
     const pendingReq = capturedCtx.http.text('https://example.com/slow');
 
-    // Unload cleans storage / mounts / aborts XHR
     settings.Settings.set('ctxSuiteEnabled', false);
     registry.createModuleHost().reload(['ctxSuite']);
 
@@ -582,7 +568,6 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
     expect(helpers.store.get('al_username', null)).toBeNull();
     expect(clearAuthSpy).toHaveBeenCalledTimes(1);
 
-    // CoreHooks host guard: on non-anilist hostname, fallback fetch wrapper must not install
     const origUnsafe = (globalThis as any).unsafeWindow;
     const malFetch = vi.fn();
     (globalThis as any).unsafeWindow = {
@@ -597,7 +582,6 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
       (globalThis as any).unsafeWindow = origUnsafe;
     }
 
-    // CoreHooks __alaCoreMirror resilience when page locks __alaCoreMirror
     const origMirrorDesc = Object.getOwnPropertyDescriptor(globalThis, '__alaCoreMirror');
     Object.defineProperty(globalThis, '__alaCoreMirror', {
       value: Object.freeze({ locked: true }),
@@ -615,7 +599,6 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
       }
     }
 
-    // MAL toast fallback renders core toast without throwing when uiSink is null
     mal.setMalUiSink(null);
     mal.toast('MAL synced without sink', false);
     expect(document.body.textContent).toContain('MAL synced without sink');
@@ -706,14 +689,12 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     const host = registry.createModuleHost();
     panel.showPanel(host);
 
-    // Host-mismatch stays editable and shows host note
     const malToggle = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="malEditEnabled"]')!;
     expect(malToggle.disabled).toBe(false);
     expect(
       document.querySelector('[data-feature="malEditMod"] .ala-host-note')?.textContent
     ).toContain('myanimelist.net');
 
-    // Non-destructive dependsOn lock + debug collapse + Save and reload transition
     const parentToggle = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="parentEnabled"]')!;
     const childToggle = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="childEnabled"]')!;
     const saveBtn = document.querySelector<HTMLButtonElement>('#ala-settings-panel .ala-save')!;
@@ -721,25 +702,22 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     expect(childToggle.checked).toBe(true);
     expect(saveBtn.textContent).toBe('Save');
 
-    // Turning off a hot-reloadable parent that causes an effective transition on a requiresReload dependent flips Save -> Save and reload!
     parentToggle.checked = false;
     parentToggle.dispatchEvent(new Event('change', { bubbles: true }));
 
     expect(childToggle.disabled).toBe(true);
-    expect(childToggle.checked).toBe(true); // preserved non-destructively!
+    expect(childToggle.checked).toBe(true);
     expect(document.querySelector('[data-feature="childReloadMod"] .ala-dep-note')?.textContent).toContain(
       'Parent Service'
     );
     expect(saveBtn.textContent).toBe('Save and reload');
 
-    // Re-checking parent unlocks child cleanly & restores Save without reload
     parentToggle.checked = true;
     parentToggle.dispatchEvent(new Event('change', { bubbles: true }));
     expect(childToggle.disabled).toBe(false);
     expect(childToggle.checked).toBe(true);
     expect(saveBtn.textContent).toBe('Save');
 
-    // Unified JSON sub-modal staging auto-checks manualOverridesEnabled on non-empty syncManualOverrides Apply
     const ovToggle = document.querySelector<HTMLInputElement>(
       '#ala-settings-panel input[data-key="manualOverridesEnabled"]'
     )!;
@@ -747,13 +725,11 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     document.querySelector<HTMLButtonElement>('#ala-btn-edit-syncManualOverrides')!.click();
     expect(ovToggle.checked).toBe(true);
 
-    // Net-diff Save calls host.reload without location.reload
     const reloadSpy = vi.spyOn(host, 'reload');
     saveBtn.click();
     expect(reloadSpy).toHaveBeenCalledWith(['manualOverrides']);
     expect(settings.Settings.get('manualOverridesEnabled')).toBe(true);
 
-    // Delayed async standalone probe transitions live status & renders .ala-standalone-note
     standaloneFound = true;
     await host.probeStandalone('childReloadMod');
     expect(host.getStatus('childReloadMod').reason).toBe('standalone-paused');
@@ -761,7 +737,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
       document.querySelector('[data-feature="childReloadMod"] .ala-standalone-note')?.textContent
     ).toContain('Standalone Child');
 
-    // DevMode live toggles Export Raw JSON row cleanly
     const rawRow = document.querySelector<HTMLElement>('#ala-row-export-raw')!;
     expect(rawRow.style.display).toBe('none');
     const devToggle = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="devModeEnabled"]')!;
@@ -771,7 +746,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
 
     panel.closePanel();
 
-    // Error badge/note rendering when a module fails to boot
     registry.defineModule({
       id: 'panelErrorMod',
       key: 'panelErrorEnabled',
@@ -812,25 +786,21 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     settings.Settings.set('manualOverridesEnabled', false);
     registry.startModules(false);
 
-    // Wait for ctx.waitForSelector immediate resolution in nyaa
     await Promise.resolve();
     await Promise.resolve();
 
     expect(document.getElementById('ala-find-on-nyaa')).not.toBeNull();
     expect(document.getElementById('ala-edit-mal-id')).toBeNull();
 
-    // Enabling manualOverrides attaches #ala-edit-mal-id live
     settings.Settings.set('manualOverridesEnabled', true);
     registry.createModuleHost().reload(['manualOverrides']);
     expect(document.getElementById('ala-edit-mal-id')).not.toBeNull();
 
-    // Ignoring via override + emitting change refreshes tooltip live
     const nyaaLink = document.getElementById('ala-find-on-nyaa') as HTMLAnchorElement;
     malOverrides.setOverride(16498, { malId: 0, type: 'ANIME', title: 'AoT' });
     bus.EventBus.emit('manualOverrides:changed', 16498);
     expect(nyaaLink.title).toBe('Marked as AniList-Only (searches Nyaa)');
 
-    // Disabling manualOverrides removes #ala-edit-mal-id cleanly
     settings.Settings.set('manualOverridesEnabled', false);
     registry.createModuleHost().reload(['manualOverrides']);
     expect(document.getElementById('ala-edit-mal-id')).toBeNull();
@@ -927,7 +897,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
       registry.startModules(false);
       expect(log).toEqual(['asyncDep:setup:1', 'asyncChild:setup:1']);
 
-      // Reload before stale attempt 1 rejects -> attempt 2 boots both; stale rejection must NOT tear down attempt 2.
       host.reload(['asyncDep']);
       expect(log).toContain('asyncChild:cleanup:1');
       expect(log).toContain('asyncDep:cleanup:1');
@@ -941,7 +910,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
       expect(host.getStatus('asyncChild')).toEqual({ active: true });
       expect(log).not.toContain('asyncChild:cleanup:2');
 
-      // Fresh async rejection on reload tears down both asyncDep and already-booted asyncChild.
       svcAttempt = 0;
       host.reload(['asyncDep']);
       rejectFirstSvc(new Error('async boom'));
@@ -958,7 +926,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
       errSpy.mockRestore();
     }
 
-    // Late setStandalonePaused(true) + probeStandalone(true) cascade to dependents too.
     registry.defineModule({
       id: 'stParent',
       key: 'stParentEnabled',
@@ -997,7 +964,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
       missingDeps: ['stParent']
     });
 
-    // Re-boot via reload and test async probeStandalone cascade
     host.reload(['stParent']);
     expect(host.getStatus('stParent')).toEqual({ active: true });
     expect(host.getStatus('stChild')).toEqual({ active: true });
@@ -1061,19 +1027,16 @@ describe('Core Microkernel: Settings Panel Integration', () => {
 
       const unsub = bus.CoreHooks.onGqlFetch((ev) => events.push(ev));
 
-      // 1. Cross-realm URL-like (not instanceof URL) + string init.body
       await window.fetch(new ForeignURL('https://anilist.co/graphql') as any, {
         method: 'POST',
         body: JSON.stringify({ query: 'query UrlTest { Viewer { id } }' })
       });
-      // 2. Foreign Request with custom constructor + .clone()
       await window.fetch(
         new ForeignRequest(
           'https://graphql.anilist.co',
           JSON.stringify({ query: 'query ReqTest { Viewer { id } }', variables: { ok: true } })
         ) as any
       );
-      // 3. bodyUsed Response must skip res.clone(), and bodyUsed Request must skip input.clone()
       const resUsed = await window.fetch(new ForeignURL('https://anilist.co/graphql?used-res') as any, {
         method: 'POST',
         body: JSON.stringify({ query: 'query BodyUsedTest { Viewer { id } }' })
@@ -1120,7 +1083,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
       setup(ctx) {
         emitterVersion++;
         ctx.events.emitRetained('manualOverrides:changed', emitterVersion * 100);
-        // Normal emit updates retained payload in place.
         ctx.events.emit('manualOverrides:changed', emitterVersion * 100 + 1);
       }
     });
@@ -1151,13 +1113,10 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     settings.Settings.set('retainedOtherEnabled', true);
     settings.Settings.set('retainedLateEnabled', true);
 
-    // Phase 1 (early preload) emits 100 -> 101 before feature modules boot.
     registry.startModules(true);
-    // Phase 2 (feature) subscribes later and immediately replays 101.
     registry.startModules(false);
     expect(received).toEqual([101]);
 
-    // Overwrite ownership from retainedOther -> reloading retainedEarly clears only its old generation, keeping 999.
     secondModuleUpdate();
     expect(received).toEqual([101, 999]);
     settings.Settings.set('retainedEarlyEnabled', false);
@@ -1169,7 +1128,6 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     expect(lateCheck).toEqual([999]);
     unsubCheck();
 
-    // Disabling the owner clears its own retained entry cleanly.
     settings.Settings.set('retainedOtherEnabled', false);
     host.reload(['retainedOther']);
 

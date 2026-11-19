@@ -176,7 +176,6 @@ function resolveAllStates(stagedEnabled?: Record<string, boolean>): ResolvedGrap
     candidates.set(rec.id, rec);
   }
 
-  // Iteratively prune hard dependency failures.
   let changed = true;
   while (changed) {
     changed = false;
@@ -227,7 +226,6 @@ function resolveAllStates(stagedEnabled?: Record<string, boolean>): ResolvedGrap
     }
   }
 
-  // Kahn's algorithm across hard dependsOn to catch cycles + transitive dependents.
   const hardIn = new Map<string, number>();
   const hardOut = new Map<string, string[]>();
   for (const id of candidates.keys()) {
@@ -356,6 +354,8 @@ function runCleanupsReverse(id: string, cleanups: CleanupFn[]): void {
 
 function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: AbortController): FeatureContext {
   let disposed = false;
+  let localClearingDepth = 0;
+  const noop: CleanupFn = () => {};
   const activeRequests = new Set<{ abort?: () => void; reject?: (e: Error) => void }>();
 
   const track = <T extends CleanupFn>(fn: T): T => {
@@ -369,8 +369,19 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     return fn;
   };
 
+  const whenAlive = (fn: () => CleanupFn): CleanupFn => {
+    if (disposed) return noop;
+    return track(fn());
+  };
+
   track(() => {
     disposed = true;
+    while (localClearingDepth > 0) {
+      localClearingDepth--;
+      try {
+        CoreHooks.setSessionClearing(false);
+      } catch {}
+    }
     ac.abort();
     for (const req of [...activeRequests]) {
       try {
@@ -385,13 +396,14 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
 
   const storagePrefix = `ala_mod_${rec.id}_`;
 
-  const addMount = (spec: MountSpec, pushCleanup: (fn: CleanupFn) => void): CleanupFn => {
+  const addMount = (spec: MountSpec, pushCleanup: (fn: CleanupFn) => void, signal?: AbortSignal): CleanupFn => {
+    if (disposed || signal?.aborted) return noop;
     let mountedEl: HTMLElement | null = null;
     let mountDisposed = false;
     let ownDisposer: CleanupFn | null = null;
 
     const tryMount = () => {
-      if (mountDisposed || disposed) return;
+      if (mountDisposed || disposed || signal?.aborted) return;
       if (spec.match && !spec.match()) {
         if (mountedEl) {
           mountedEl.remove();
@@ -419,13 +431,14 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       }
     };
 
-    const unsubReady = Core.ready(tryMount);
-    const unsubNav = Core.onNavigate(tryMount);
-    const unsubBody = Core.onBodyMutation(tryMount);
+    let unsubReady: CleanupFn = noop;
+    let unsubNav: CleanupFn = noop;
+    let unsubBody: CleanupFn = noop;
 
     const disposeMount = () => {
       if (mountDisposed) return;
       mountDisposed = true;
+      signal?.removeEventListener('abort', disposeMount);
       unsubReady();
       unsubNav();
       unsubBody();
@@ -434,6 +447,15 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       mountedEl?.remove();
       mountedEl = null;
     };
+
+    unsubReady = Core.ready(tryMount);
+    unsubNav = Core.onNavigate(tryMount);
+    unsubBody = Core.onBodyMutation(tryMount);
+    if (disposed || signal?.aborted) {
+      disposeMount();
+      return noop;
+    }
+    signal?.addEventListener('abort', disposeMount, { once: true });
     pushCleanup(disposeMount);
     return disposeMount;
   };
@@ -445,29 +467,31 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       listener: EventListenerOrEventListenerObject,
       options?: boolean | AddEventListenerOptions
     ): CleanupFn => {
-      if (signal.aborted) return () => {};
+      if (disposed || signal.aborted) return noop;
       target.addEventListener(type, listener, options);
       const cleanup = () => target.removeEventListener(type, listener, options);
       push(cleanup);
       return cleanup;
     },
     interval: (fn: () => void, ms: number): CleanupFn => {
-      if (signal.aborted) return () => {};
+      if (disposed || signal.aborted) return noop;
       const id = setInterval(fn, ms);
       const cleanup = () => clearInterval(id);
       push(cleanup);
       return cleanup;
     },
     timeout: (fn: () => void, ms: number): CleanupFn => {
-      if (signal.aborted) return () => {};
+      if (disposed || signal.aborted) return noop;
       const id = setTimeout(fn, ms);
       const cleanup = () => clearTimeout(id);
       push(cleanup);
       return cleanup;
     },
-    mount: (spec: MountSpec): CleanupFn => addMount(spec, push),
-    waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs = 8000): Promise<T | null> =>
-      Core.waitForSelector<T>(selector, timeoutMs, signal)
+    mount: (spec: MountSpec): CleanupFn => addMount(spec, push, signal),
+    waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs = 8000): Promise<T | null> => {
+      if (disposed || signal.aborted) return Promise.resolve(null);
+      return Core.waitForSelector<T>(selector, timeoutMs, signal);
+    }
   });
 
   const rootScoped = makeScopedHelpers(track, ac.signal);
@@ -478,94 +502,95 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       | ((url: URL) => boolean)
       | ((rc: RouteContext) => void | Promise<void> | CleanupFn),
     maybeHandler?: (rc: RouteContext) => void | Promise<void> | CleanupFn
-  ): CleanupFn => {
-    const matcher = typeof maybeHandler === 'function' ? (matchOrHandler as RegExp | ((url: URL) => boolean)) : null;
-    const handler = (maybeHandler ?? matchOrHandler) as (rc: RouteContext) => void | Promise<void> | CleanupFn;
+  ): CleanupFn =>
+    whenAlive(() => {
+      const matcher = typeof maybeHandler === 'function' ? (matchOrHandler as RegExp | ((url: URL) => boolean)) : null;
+      const handler = (maybeHandler ?? matchOrHandler) as (rc: RouteContext) => void | Promise<void> | CleanupFn;
 
-    let routeCleanups: CleanupFn[] = [];
-    let routeAc: AbortController | null = null;
-    let routeSubDisposed = false;
+      let routeCleanups: CleanupFn[] = [];
+      let routeAc: AbortController | null = null;
+      let routeSubDisposed = false;
 
-    const teardownRoute = () => {
-      routeAc?.abort();
-      routeAc = null;
-      runCleanupsReverse(rec.id, routeCleanups);
-    };
-
-    const evaluate = () => {
-      if (routeSubDisposed || disposed) return;
-      teardownRoute();
-
-      let url: URL;
-      try {
-        url = new URL(location.href);
-      } catch {
-        url = new URL('https://anilist.co/');
-      }
-
-      let matchArr: RegExpMatchArray | null = null;
-      if (matcher instanceof RegExp) {
-        matchArr = url.pathname.match(matcher);
-        if (!matchArr) return;
-      } else if (typeof matcher === 'function') {
-        if (!matcher(url)) return;
-      }
-
-      const localAc = new AbortController();
-      routeAc = localAc;
-      const localCleanups: CleanupFn[] = [];
-      routeCleanups = localCleanups;
-      const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal);
-
-      const rc: RouteContext = {
-        url,
-        pathname: url.pathname,
-        match: matchArr,
-        signal: localAc.signal,
-        onCleanup: (fn) => {
-          if (localAc.signal.aborted) {
-            try {
-              fn();
-            } catch {}
-          } else {
-            localCleanups.push(fn);
-          }
-        },
-        ...localScoped
+      const teardownRoute = () => {
+        routeAc?.abort();
+        routeAc = null;
+        runCleanupsReverse(rec.id, routeCleanups);
       };
 
-      try {
-        const res = handler(rc);
-        if (typeof res === 'function') {
-          rc.onCleanup(res);
-        } else if (res && typeof (res as Promise<any>).then === 'function') {
-          Promise.resolve(res).then(
-            (maybeCleanup) => {
-              if (typeof maybeCleanup === 'function') rc.onCleanup(maybeCleanup);
-            },
-            (err) => {
-              if (!localAc.signal.aborted) {
-                console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
-              }
-            }
-          );
+      const evaluate = () => {
+        if (routeSubDisposed || disposed) return;
+        teardownRoute();
+
+        let url: URL;
+        try {
+          url = new URL(location.href);
+        } catch {
+          url = new URL('https://anilist.co/');
         }
-      } catch (err) {
-        console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
-      }
-    };
 
-    evaluate();
-    const unsubNav = Core.onNavigate(evaluate);
+        try {
+          let matchArr: RegExpMatchArray | null = null;
+          if (matcher instanceof RegExp) {
+            matchArr = url.pathname.match(matcher);
+            if (!matchArr) return;
+          } else if (typeof matcher === 'function') {
+            if (!matcher(url)) return;
+          }
 
-    const disposeRouteWatcher = () => {
-      if (routeSubDisposed) return;
-      routeSubDisposed = true;
-      unsubNav();
-      teardownRoute();
-    };
-    return track(disposeRouteWatcher);
-  };
+          const localAc = new AbortController();
+          routeAc = localAc;
+          const localCleanups: CleanupFn[] = [];
+          routeCleanups = localCleanups;
+          const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal);
+
+          const rc: RouteContext = {
+            url,
+            pathname: url.pathname,
+            match: matchArr,
+            signal: localAc.signal,
+            onCleanup: (fn) => {
+              if (localAc.signal.aborted) {
+                try {
+                  fn();
+                } catch {}
+              } else {
+                localCleanups.push(fn);
+              }
+            },
+            ...localScoped
+          };
+
+          const res = handler(rc);
+          if (typeof res === 'function') {
+            rc.onCleanup(res);
+          } else if (res && typeof (res as Promise<any>).then === 'function') {
+            Promise.resolve(res).then(
+              (maybeCleanup) => {
+                if (typeof maybeCleanup === 'function') rc.onCleanup(maybeCleanup);
+              },
+              (err) => {
+                if (!localAc.signal.aborted) {
+                  console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+                }
+              }
+            );
+          }
+        } catch (err) {
+          console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+        }
+      };
+
+      evaluate();
+      const unsubNav = routeSubDisposed || disposed ? noop : Core.onNavigate(evaluate);
+
+      const disposeRouteWatcher = () => {
+        if (routeSubDisposed) return;
+        routeSubDisposed = true;
+        unsubNav();
+        teardownRoute();
+      };
+      return disposeRouteWatcher;
+    });
 
   const httpRequest = (url: string, opts: HttpRequestOptions = {}): Promise<any> => {
     if (disposed || ac.signal.aborted) {
@@ -584,16 +609,22 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
         (Object.prototype.hasOwnProperty.call(g, 'GM_xmlhttpRequest') && typeof g.GM_xmlhttpRequest === 'function'
           ? g.GM_xmlhttpRequest
           : GM_xmlhttpRequest) as typeof GM_xmlhttpRequest;
-      const handle = xhr({
-        method: 'GET',
-        timeout: 15000,
-        ...(opts as any),
-        url,
-        onload: (res: any) => settle(() => resolve(res)),
-        onerror: () => settle(() => reject(new Error('Network error'))),
-        ontimeout: () => settle(() => reject(new Error('Timeout'))),
-        onabort: () => settle(() => reject(new Error('Request aborted')))
-      });
+      let handle: any;
+      try {
+        handle = xhr({
+          method: 'GET',
+          timeout: 15000,
+          ...(opts as any),
+          url,
+          onload: (res: any) => settle(() => resolve(res)),
+          onerror: () => settle(() => reject(new Error('Network error'))),
+          ontimeout: () => settle(() => reject(new Error('Timeout'))),
+          onabort: () => settle(() => reject(new Error('Request aborted')))
+        });
+      } catch (err) {
+        settle(() => reject(err));
+        return;
+      }
       entry.abort = () => {
         try {
           handle?.abort?.();
@@ -603,18 +634,33 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
   };
 
   const trackedHooks: CoreHooksApi = {
-    setSessionClearing: (active) => CoreHooks.setSessionClearing(active),
+    setSessionClearing: (active) => {
+      if (disposed) return;
+      if (active) {
+        localClearingDepth++;
+        CoreHooks.setSessionClearing(true);
+      } else if (localClearingDepth > 0) {
+        localClearingDepth--;
+        CoreHooks.setSessionClearing(false);
+      }
+    },
     isSessionClearing: () => CoreHooks.isSessionClearing(),
-    clearAuth: () => CoreHooks.clearAuth(),
-    registerCacheBridge: (bridge) => track(CoreHooks.registerCacheBridge(bridge)),
+    clearAuth: () => {
+      if (!disposed) CoreHooks.clearAuth();
+    },
+    registerCacheBridge: (bridge) => whenAlive(() => CoreHooks.registerCacheBridge(bridge)),
     getCacheBridge: () => CoreHooks.getCacheBridge(),
-    markFetchOwner: (active) => CoreHooks.markFetchOwner(active),
+    markFetchOwner: (active) => {
+      if (!disposed) CoreHooks.markFetchOwner(active);
+    },
     hasGqlFetchSubscribers: () => CoreHooks.hasGqlFetchSubscribers(),
-    emitGqlFetch: (event) => CoreHooks.emitGqlFetch(event),
-    onGqlFetch: (cb) => track(CoreHooks.onGqlFetch(cb)),
-    blockRpc: (fn) => track(CoreHooks.blockRpc(fn)),
+    emitGqlFetch: (event) => {
+      if (!disposed) CoreHooks.emitGqlFetch(event);
+    },
+    onGqlFetch: (cb) => whenAlive(() => CoreHooks.onGqlFetch(cb)),
+    blockRpc: (fn) => whenAlive(() => CoreHooks.blockRpc(fn)),
     isRpcBlocked: (q, v) => CoreHooks.isRpcBlocked(q, v),
-    setPrefetchPaused: (paused) => track(CoreHooks.setPrefetchPaused(paused)),
+    setPrefetchPaused: (paused) => whenAlive(() => CoreHooks.setPrefetchPaused(paused)),
     isPrefetchSuppressed: () => CoreHooks.isPrefetchSuppressed()
   };
 
@@ -628,10 +674,19 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     set: (key, val) => Settings.set(key, val),
     storage: {
       get: <T>(k: string, d?: T) => store.get<T>(`${storagePrefix}${k}`, d),
-      set: <T>(k: string, v: T) => store.set(`${storagePrefix}${k}`, v),
-      del: (k: string) => store.del(`${storagePrefix}${k}`),
+      set: <T>(k: string, v: T) => {
+        if (!disposed) store.set(`${storagePrefix}${k}`, v);
+      },
+      del: (k: string) => {
+        if (!disposed) store.del(`${storagePrefix}${k}`);
+      },
       watch: (k, cb) =>
-        track(store.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => cb(k, oldV, newV, remote))),
+        whenAlive(() =>
+          store.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => {
+            if (disposed) return;
+            cb(k, oldV, newV, remote);
+          })
+        ),
       clear: () => {
         for (const k of store.list()) {
           if (k.startsWith(storagePrefix)) store.del(k);
@@ -639,12 +694,12 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       }
     },
     persistent: (key, prune) => persistent(key, prune),
-    ready: (cb) => track(Core.ready(cb)),
-    onNav: (cb) => track(Core.onNavigate(cb)),
-    onBodyMutation: (cb) => track(Core.onBodyMutation(cb)),
+    ready: (cb) => whenAlive(() => Core.ready(cb)),
+    onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
+    onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
     onRoute,
     mount: rootScoped.mount,
-    addStyle: (id, css) => track(addStyle(id, css)),
+    addStyle: (id, css) => whenAlive(() => addStyle(id, css)),
     listen: rootScoped.listen,
     interval: rootScoped.interval,
     timeout: rootScoped.timeout,
@@ -654,7 +709,7 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     },
     waitForSelector: rootScoped.waitForSelector,
     silently: (fn) => Core.silently(fn),
-    ownUi: (selector) => track(Core.registerOwnUi(selector)),
+    ownUi: (selector) => whenAlive(() => Core.registerOwnUi(selector)),
     onCleanup: (fn) => {
       track(fn);
     },
@@ -689,15 +744,17 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       success: toastSuccess,
       error: toastError
     },
-    menuCommand: (label, onClick) => track(registerMenuCommand(label, onClick)),
+    menuCommand: (label, onClick) => whenAlive(() => registerMenuCommand(label, onClick)),
     services: {
       provide: (localName, impl) =>
-        track(ServiceRegistry.provide(`${rec.id}:${String(localName)}` as keyof ServiceMap, impl as never)),
+        whenAlive(() => ServiceRegistry.provide(`${rec.id}:${String(localName)}` as keyof ServiceMap, impl as never)),
       get: (fullName) => ServiceRegistry.get(fullName),
-      onAvailable: (fullName, cb) => track(ServiceRegistry.onAvailable(fullName, cb))
+      onAvailable: (fullName, cb) => whenAlive(() => ServiceRegistry.onAvailable(fullName, cb))
     },
     events: {
-      emit: (event, ...args) => EventBus.emit(event, ...args),
+      emit: (event, ...args) => {
+        if (!disposed) EventBus.emit(event, ...args);
+      },
       emitRetained: (event, ...args) => {
         if (disposed) return;
         if (!retainedTracked) {
@@ -706,15 +763,18 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
         }
         EventBus.emitRetainedOwned(eventOwner, event, ...args);
       },
-      on: (event, cb) => track(EventBus.on(event, cb)),
-      onRetained: (event, cb) => track(EventBus.onRetained(event, cb))
+      on: (event, cb) => whenAlive(() => EventBus.on(event, cb)),
+      onRetained: (event, cb) => whenAlive(() => EventBus.onRetained(event, cb))
     },
     hooks: trackedHooks,
     debug: {
       enabled: () => isDebug(debugChannel),
-      log: (...args: any[]) => logDebug(`[${debugChannel.toUpperCase()}]`, ...args)
+      log: (...args: any[]) => {
+        if (isDebug(debugChannel)) console.debug(`[${debugChannel.toUpperCase()}]`, ...args);
+      }
     },
     setStandalonePaused: (paused: boolean) => {
+      if (disposed) return;
       const next = !!paused;
       rec.standalonePaused = next;
       if (next) {
@@ -740,7 +800,14 @@ function disposeRecord(rec: ModuleRecord, resetStandalone = true): void {
   if (resetStandalone) rec.standalonePaused = false;
 }
 
-function cascadeDispose(seedIds: string[], opts: { preserveStandaloneSeeds?: boolean } = {}): void {
+function getFailedDeps(rec: ModuleRecord): string[] {
+  return rec.dependsOn.filter((depId) => {
+    const dep = recordsById.get(depId);
+    return !dep || !!dep.runtimeError || dep.standalonePaused || !dep.booted;
+  });
+}
+
+function cascadeDispose(seedIds: string[], opts: { preserveStandaloneSeeds?: boolean } = {}): string[] {
   const seedSet = new Set(seedIds);
   const toStop = new Set<string>();
   for (const rec of records) {
@@ -758,9 +825,8 @@ function cascadeDispose(seedIds: string[], opts: { preserveStandaloneSeeds?: boo
       }
     }
   }
-  if (toStop.size === 0) return;
+  if (toStop.size === 0) return [];
 
-  // Tear down dependents before dependencies (reverse layer + topological order).
   const stopOrdered = [...toStop].sort((a, b) => {
     const ra = recordsById.get(a)!;
     const rb = recordsById.get(b)!;
@@ -790,6 +856,7 @@ function cascadeDispose(seedIds: string[], opts: { preserveStandaloneSeeds?: boo
     const resetStandalone = !(opts.preserveStandaloneSeeds && seedSet.has(id));
     disposeRecord(rec, resetStandalone);
   }
+  return finalStopOrder;
 }
 
 function bootRecord(rec: ModuleRecord): Promise<void> {
@@ -993,13 +1060,9 @@ export function startModules(early: boolean): void {
 
   for (const rec of graph.ordered) {
     if (rec.early !== early) continue;
-    // Re-check hard dependencies in case an earlier-booted dependency threw synchronously.
-    const depFailed = rec.dependsOn.some((depId) => {
-      const dep = recordsById.get(depId);
-      return !dep || !!dep.runtimeError || dep.standalonePaused || !dep.booted;
-    });
-    if (depFailed) {
-      emitStatusChange(rec.id, { active: false, reason: 'dep-unavailable' });
+    const failedDeps = getFailedDeps(rec);
+    if (failedDeps.length > 0) {
+      emitStatusChange(rec.id, { active: false, reason: 'dep-unavailable', missingDeps: failedDeps });
       continue;
     }
     void bootRecord(rec);
@@ -1009,9 +1072,21 @@ export function startModules(early: boolean): void {
 export function disposeFeature(id: string): void {
   const rec = recordsById.get(id);
   if (!rec) return;
-  disposeRecord(rec, true);
-  const graph = resolveAllStates();
-  syncAllLiveStatuses(graph.statuses);
+  const stopped = cascadeDispose([id]);
+  if (stopped.length === 0) return;
+  for (const stoppedId of stopped) {
+    if (stoppedId === id) {
+      emitStatusChange(stoppedId, { active: false, reason: 'disabled' });
+    } else {
+      const depRec = recordsById.get(stoppedId);
+      const missingDeps = depRec ? getFailedDeps(depRec) : [id];
+      emitStatusChange(stoppedId, {
+        active: false,
+        reason: 'dep-unavailable',
+        missingDeps: missingDeps.length ? missingDeps : [id]
+      });
+    }
+  }
 }
 
 export function reloadFeature(id: string): void {
@@ -1043,13 +1118,11 @@ export function createModuleHost(): ModuleHost {
       const graph = resolveAllStates();
       const nextActiveIds = new Set(graph.ordered.map((r) => r.id));
 
-      // Seed both explicitly targeted modules and any booted module no longer active (e.g. disabled via settings).
       const seedIds = records
         .filter((rec) => rec.booted && (targetSet.has(rec.id) || !nextActiveIds.has(rec.id)))
         .map((rec) => rec.id);
       cascadeDispose(seedIds);
 
-      // Reset error/standalone flags on explicitly targeted stopped modules so reload retries them cleanly.
       for (const id of targetSet) {
         const rec = recordsById.get(id);
         if (rec && !rec.booted) {
@@ -1063,12 +1136,9 @@ export function createModuleHost(): ModuleHost {
 
       for (const rec of freshGraph.ordered) {
         if (rec.booted) continue;
-        const depFailed = rec.dependsOn.some((depId) => {
-          const dep = recordsById.get(depId);
-          return !dep || !!dep.runtimeError || dep.standalonePaused || !dep.booted;
-        });
-        if (depFailed) {
-          emitStatusChange(rec.id, { active: false, reason: 'dep-unavailable' });
+        const failedDeps = getFailedDeps(rec);
+        if (failedDeps.length > 0) {
+          emitStatusChange(rec.id, { active: false, reason: 'dep-unavailable', missingDeps: failedDeps });
           continue;
         }
         void bootRecord(rec);

@@ -9,6 +9,55 @@ export function isManualOverridesEnabled(): boolean {
   return parseToggle(store.get(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, false));
 }
 
+function normalizeOverrideEntry(
+  key: string,
+  val: unknown,
+  defaultUpdatedAt: number
+): { id: number; entry: ManualOverride } | { error: string } {
+  const id = Number(key);
+  if (!key || String(id) !== key || !Number.isSafeInteger(id) || id <= 0) {
+    return {
+      error: `Invalid AniList media ID key "${key}". Keys must be positive integers.`
+    };
+  }
+  if (!val || typeof val !== 'object' || Array.isArray(val)) {
+    return { error: `Invalid entry for media ID ${id}: expected an object.` };
+  }
+  const o = val as any;
+  if (typeof o.malId !== 'number' || !Number.isSafeInteger(o.malId) || o.malId < 0) {
+    return {
+      error: `Invalid malId for media ID ${id}: must be a non-negative integer (0 for AniList-only).`
+    };
+  }
+
+  let typeStr: string;
+  if (o.type === undefined || o.type === null || o.type === '') {
+    typeStr = 'ANIME';
+  } else if (typeof o.type === 'string') {
+    typeStr = o.type.trim().toUpperCase();
+  } else {
+    return { error: `Invalid type for media ID ${id}: must be "ANIME" or "MANGA".` };
+  }
+  if (typeStr !== 'ANIME' && typeStr !== 'MANGA') {
+    return { error: `Invalid type for media ID ${id}: must be "ANIME" or "MANGA".` };
+  }
+
+  const entry: ManualOverride = {
+    malId: o.malId === 0 ? 0 : o.malId,
+    type: typeStr as SyncMediaType,
+    title: typeof o.title === 'string' && o.title.trim() ? o.title.trim() : `Media #${id}`,
+    updatedAt:
+      typeof o.updatedAt === 'number' && Number.isFinite(o.updatedAt) && o.updatedAt >= 0
+        ? o.updatedAt
+        : defaultUpdatedAt
+  };
+  if (typeof o.cover === 'string' && o.cover.trim()) {
+    entry.cover = o.cover.trim();
+  }
+
+  return { id, entry };
+}
+
 export function getManualOverrides(): ManualOverrideStore {
   let raw = store.get<any>(SETTING_PREFIX + OVERRIDES_SETTING_KEY, {});
   if (typeof raw === 'string') {
@@ -19,7 +68,14 @@ export function getManualOverrides(): ManualOverrideStore {
     }
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  return raw;
+  const result: ManualOverrideStore = {};
+  for (const [key, val] of Object.entries(raw)) {
+    const normalized = normalizeOverrideEntry(key, val, 0);
+    if ('entry' in normalized) {
+      result[String(normalized.id)] = normalized.entry;
+    }
+  }
+  return result;
 }
 
 export function saveManualOverrides(overrides: ManualOverrideStore): void {
@@ -27,25 +83,37 @@ export function saveManualOverrides(overrides: ManualOverrideStore): void {
 }
 
 export function getOverride(mediaId: number): ManualOverride | undefined {
-  if (!mediaId || !isManualOverridesEnabled()) return undefined;
-  return getManualOverrides()[String(mediaId)];
+  if (!Number.isSafeInteger(mediaId) || mediaId <= 0 || !isManualOverridesEnabled()) return undefined;
+  const all = getManualOverrides();
+  return Object.prototype.hasOwnProperty.call(all, String(mediaId)) ? all[String(mediaId)] : undefined;
 }
 
 export function setOverride(
   mediaId: number,
   data: Omit<ManualOverride, 'updatedAt'> & { updatedAt?: number }
 ): void {
-  if (!mediaId) return;
+  if (!Number.isSafeInteger(mediaId) || mediaId <= 0) return;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+  const now = Date.now();
+  const normalized = normalizeOverrideEntry(
+    String(mediaId),
+    {
+      ...data,
+      updatedAt:
+        typeof data.updatedAt === 'number' && Number.isFinite(data.updatedAt) && data.updatedAt > 0
+          ? data.updatedAt
+          : now
+    },
+    now
+  );
+  if (!('entry' in normalized)) return;
   const all = { ...getManualOverrides() };
-  all[String(mediaId)] = {
-    ...data,
-    updatedAt: data.updatedAt || Date.now()
-  };
+  all[String(normalized.id)] = normalized.entry;
   saveManualOverrides(all);
 }
 
 export function removeOverride(mediaId: number): void {
-  if (!mediaId) return;
+  if (!Number.isSafeInteger(mediaId) || mediaId <= 0) return;
   const all = { ...getManualOverrides() };
   delete all[String(mediaId)];
   saveManualOverrides(all);
@@ -87,41 +155,14 @@ export function validateOverrides(raw: unknown): {
     };
   }
 
+  const now = Date.now();
   const result: ManualOverrideStore = {};
   for (const [key, val] of Object.entries(data)) {
-    const id = Number(key);
-    if (!id || id <= 0 || !Number.isInteger(id)) {
-      return {
-        valid: false,
-        error: `Invalid AniList media ID key "${key}". Keys must be positive integers.`
-      };
+    const normalized = normalizeOverrideEntry(key, val, now);
+    if ('error' in normalized) {
+      return { valid: false, error: normalized.error };
     }
-    if (!val || typeof val !== 'object' || Array.isArray(val)) {
-      return { valid: false, error: `Invalid entry for media ID ${id}: expected an object.` };
-    }
-    const o = val as any;
-    if (typeof o.malId !== 'number' || o.malId < 0 || !Number.isInteger(o.malId)) {
-      return {
-        valid: false,
-        error: `Invalid malId for media ID ${id}: must be a non-negative integer (0 for AniList-only).`
-      };
-    }
-    const typeStr = String(o.type || 'ANIME').toUpperCase();
-    if (typeStr !== 'ANIME' && typeStr !== 'MANGA') {
-      return { valid: false, error: `Invalid type for media ID ${id}: must be "ANIME" or "MANGA".` };
-    }
-
-    const entry: ManualOverride = {
-      malId: o.malId,
-      type: typeStr as SyncMediaType,
-      title: typeof o.title === 'string' && o.title.trim() ? o.title.trim() : `Media #${id}`,
-      updatedAt: typeof o.updatedAt === 'number' && o.updatedAt > 0 ? o.updatedAt : Date.now()
-    };
-    if (typeof o.cover === 'string' && o.cover.trim()) {
-      entry.cover = o.cover.trim();
-    }
-
-    result[String(id)] = entry;
+    result[String(normalized.id)] = normalized.entry;
   }
 
   return { valid: true, overrides: result };
@@ -173,31 +214,28 @@ export async function refreshStaleOverrides(): Promise<void> {
 
       try {
         const res = await AniList.query(q, { ids: batch });
-        const list = res?.Page?.media || [];
+        const list = Array.isArray(res?.Page?.media) ? res.Page.media : [];
         const current = getManualOverrides();
         let changed = false;
 
         for (const m of list) {
+          if (!m || m.id == null) continue;
           const idStr = String(m.id);
-          if (current[idStr]) {
-            const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[idStr].title;
-            const cover = m.coverImage?.medium || current[idStr].cover;
+          if (Object.prototype.hasOwnProperty.call(current, idStr)) {
+            const existing = current[idStr];
+            const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || existing.title;
+            const cover = m.coverImage?.medium || existing.cover;
             const type = (m.type === 'MANGA' ? 'MANGA' : 'ANIME') as SyncMediaType;
-            if (
-              current[idStr].title !== t ||
-              current[idStr].cover !== cover ||
-              current[idStr].type !== type ||
-              !current[idStr].updatedAt
-            ) {
-              changed = true;
-            }
-            current[idStr] = {
-              ...current[idStr],
+            const nextEntry: ManualOverride = {
+              ...existing,
               title: t,
-              cover,
               type,
               updatedAt: Date.now()
             };
+            if (cover) nextEntry.cover = cover;
+            else delete nextEntry.cover;
+            current[idStr] = nextEntry;
+            changed = true;
           }
         }
 

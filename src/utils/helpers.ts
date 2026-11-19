@@ -174,10 +174,12 @@ export function registerDebugChannel(
   prefixPattern?: RegExp
 ): void {
   const existing = debugChannels.get(channel);
+  const escapedChannel = channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const defaultPattern = channel ? new RegExp(`^\\[${escapedChannel}(?=$|[\\]:\\s])`, 'i') : undefined;
   debugChannels.set(channel, {
     settingKey,
     def,
-    pattern: prefixPattern ?? existing?.pattern
+    pattern: prefixPattern ?? existing?.pattern ?? defaultPattern
   });
 }
 
@@ -205,9 +207,14 @@ export function isDebug(module?: DebugModule | string): boolean {
 export function logDebug(moduleOrTag: string, ...args: any[]): void {
   let mod: string | undefined;
   for (const [channel, entry] of debugChannels) {
-    if (entry.pattern && entry.pattern.test(moduleOrTag)) {
-      mod = channel;
-      break;
+    if (entry.pattern) {
+      if (entry.pattern.global || entry.pattern.sticky) {
+        entry.pattern.lastIndex = 0;
+      }
+      if (entry.pattern.test(moduleOrTag)) {
+        mod = channel;
+        break;
+      }
     }
   }
 

@@ -117,9 +117,22 @@ const MODAL_CSS = `
 const EYE_OPEN = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
 const EYE_OFF = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
 
+let activeCancel: (() => void) | null = null;
+
+export function closePasswordModal(): void {
+  activeCancel?.();
+}
+
 export function promptPasswordModal(options: PasswordModalOptions): Promise<string | null> {
   return new Promise((resolve) => {
-    addStyle('ala-pwd-modal-style', MODAL_CSS);
+    activeCancel?.();
+
+    if (!document.body) {
+      resolve(null);
+      return;
+    }
+
+    const disposeStyle = addStyle('ala-pwd-modal-style', MODAL_CSS);
 
     const existing = document.getElementById('ala-pwd-backdrop');
     if (existing) existing.remove();
@@ -187,18 +200,54 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
     const closeBtn = backdrop.querySelector('.ala-pwd-btn-close') as HTMLButtonElement;
 
     let isVisible = false;
+    let settled = false;
+    let focusTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        cancel();
+      } else if (e.key === 'Enter') {
+        const target = e.target;
+        if (target instanceof Element) {
+          if (backdrop.contains(target)) {
+            if (target.closest('button, a, [role="button"]')) return;
+          } else if (target !== document.body && target !== document.documentElement) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        submit();
+      }
+    };
 
     const cleanup = () => {
-      document.removeEventListener('keydown', onKeyDown);
+      if (settled) return;
+      settled = true;
+      if (focusTimer !== null) {
+        clearTimeout(focusTimer);
+        focusTimer = null;
+      }
+      document.removeEventListener('keydown', onKeyDown, true);
+      if (activeCancel === cancel) {
+        activeCancel = null;
+      }
       backdrop.remove();
+      disposeStyle();
     };
 
     const cancel = () => {
+      if (settled) return;
       cleanup();
       resolve(null);
     };
 
     const submit = () => {
+      if (settled) return;
       const val = input.value;
       if (!options.allowEmpty && !val.trim()) {
         errBox.textContent = 'Password cannot be empty.';
@@ -208,7 +257,7 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
       }
 
       if (options.confirm && confirmInput) {
-        if (val && val !== confirmInput.value) {
+        if (val !== confirmInput.value) {
           errBox.textContent = 'Passwords do not match.';
           errBox.style.display = 'block';
           confirmInput.focus();
@@ -219,6 +268,8 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
       cleanup();
       resolve(val);
     };
+
+    activeCancel = cancel;
 
     toggleBtn.addEventListener('click', () => {
       isVisible = !isVisible;
@@ -237,18 +288,12 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
       if (e.target === backdrop) cancel();
     });
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        cancel();
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        submit();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keydown', onKeyDown, true);
 
-    setTimeout(() => input.focus(), 50);
+    focusTimer = setTimeout(() => {
+      focusTimer = null;
+      input.focus();
+    }, 50);
   });
 }
 
