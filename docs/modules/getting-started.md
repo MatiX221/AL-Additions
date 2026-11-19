@@ -37,7 +37,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'feature',
   requiresReload: false,
-  def: false,
   title: 'Media ID Badge',
   help: 'Display the numeric AniList media ID in the sidebar on anime and manga pages.',
   debug: {

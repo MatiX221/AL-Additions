@@ -10,7 +10,6 @@ defineModule({
   section: 'External Links, Downloads & Mappings',
   layer: 'feature',
   requiresReload: false,
-  def: false,
   legacy: ['bannerEnabled', 'bannerDownloadEnabled', 'bannerDownloaderEnabled'],
   title: 'Anime/Manga Banner Downloader',
   help: 'Add a button for downloading the AniList banner image.',

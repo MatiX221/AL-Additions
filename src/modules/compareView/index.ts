@@ -94,7 +94,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'preload',
   requiresReload: true,
-  def: false,
   title: 'Compare View Improvements',
   help: 'Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.',
   debug: {

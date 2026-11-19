@@ -6,7 +6,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'intercept',
   requiresReload: true,
-  def: false,
   legacy: ['tagFilterEnabled', 'browseTagRankFilterEnabled'],
   title: 'Browse Tag Rank Filter',
   help: 'Automatically apply a minimum tag-rank percentage when you search with a tag or genre.',

@@ -10,7 +10,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'feature',
   requiresReload: false,
-  def: false,
   legacy: ['mediaInfoEnabled', 'mediaListEditorEnabled'],
   title: 'List Score & Progress Editor',
   help: 'Show your score and episode/chapter progress controls on anime and manga pages.',

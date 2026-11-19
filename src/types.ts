@@ -53,12 +53,6 @@ export interface SettingRow extends SettingOption {
   legacy: string[];
 }
 
-export interface ToggleMeta {
-  key: string;
-  def?: false;
-  legacy?: string[];
-}
-
 export interface ModuleDebugDef {
   key: string;
   title: string;
@@ -93,8 +87,10 @@ export interface FeatureMeta {
   standalone?: ModuleStandaloneDef;
 }
 
-export interface ModuleMeta extends ToggleMeta {
+export interface ModuleMeta {
   id: string;
+  key: string;
+  legacy?: string[];
   section?: string;
   title: string;
   help: string;

@@ -766,7 +766,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'feature',
   requiresReload: false,
-  def: false,
   legacy: ['aniSongsEnabled', 'animeThemeSongsEnabled', 'anisongsEnabled'],
   title: 'Anime Opening & Ending Songs',
   help: 'Show OP/ED theme songs on anime pages.',

@@ -9,7 +9,6 @@ defineModule({
   section: 'External Links, Downloads & Mappings',
   layer: 'feature',
   requiresReload: false,
-  def: false,
   legacy: ['keyframeEnabled'],
   title: 'Keyframe Staff List Links',
   help: 'Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List.',

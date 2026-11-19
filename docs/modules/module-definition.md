@@ -14,7 +14,6 @@ import { defineModule } from '../../core/registry';
 export interface ModuleMeta {
   id: string;
   key: string;
-  def?: false;
   legacy?: string[];
   section?: string;
   title: string;
@@ -45,9 +44,9 @@ export interface ModuleMeta {
   - Published services (`ctx.services.provide('quickEdit', fn)` publishes `'manualOverrides:quickEdit'`).
   - Default debug channel name (unless overridden by `debug.channel`).
 
-### `key` and `def: false` (required)
-- `key` is the setting name stored in Tampermonkey storage under `ala_setting_<key>`.
-- Every module's main toggle **must set `def: false`**. `Settings.register` throws at startup if any toggle defaults to `true`, ensuring all features are strictly opt-in for fresh installs.
+### `key` (required)
+- Setting name stored in Tampermonkey storage under `ala_setting_<key>`.
+- Every module's main toggle always defaults to `false` (strictly opt-in on fresh installs); `defineModule` enforces this automatically, so no `def` property exists on `ModuleMeta`.
 - `legacy`: Optional array of older unprefixed or renamed setting keys. During `Settings.migrate()`, the first found value across `legacy` (in GM storage or `ALAdditions:<name>` in `localStorage`) is automatically copied to `ala_setting_<key>`.
 
 ### `section`, `title`, and `help`
@@ -137,7 +136,7 @@ export interface SettingOption {
 
 ### Supported Types & Normalization
 
-1. **`'toggle'`**: `def` **must be `false`** for feature toggles (`child` option toggles normally default `false`, or `true` when sub-feature default makes sense). Normalizes boolean values and string `'false'` -> `false`.
+1. **`'toggle'`**: Stores a boolean (normalizes boolean values and string `'false'` -> `false`). Child options may default to `false` or `true`; a module's main toggle always defaults to `false`.
 2. **`'number'`**: Rounds to integer and clamps between `[min, max]`. Falls back to `def` on `null`/`NaN`.
 3. **`'select'`**: Validates stored value against `options` tuples `[value, label]`; falls back to `def` if unrecognized.
 4. **`'list'`**: Stores `string[]`; renders as comma-separated `<input type="text">` in Settings, trimming whitespace and dropping empty items automatically.
@@ -165,7 +164,7 @@ debug: {
 }
 ```
 
-- Automatically registers `ala_setting_<debug.key>` (mandatory `def: false`) and binds `ctx.debug` inside `setup(ctx)`.
+- Automatically registers `ala_setting_<debug.key>` (defaulting to `false`) and binds `ctx.debug` inside `setup(ctx)`.
 - In Settings, appears inside **Advanced → Developer Mode**, automatically wrapped in `[data-debug-for="<toggleKey>"]` so it collapses whenever either **Developer Mode** or your module is toggled off.
 - Turning **Developer Mode** off mutes all `ctx.debug.log(...)` output cleanly without wiping your individual module debug toggle preferences.
 

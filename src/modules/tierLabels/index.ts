@@ -40,7 +40,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'feature',
   requiresReload: true,
-  def: false,
   legacy: ['tierLabelsEnabled'],
   title: 'AniList Tier Labels',
   help: 'Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.',

@@ -32,7 +32,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'intercept',
   requiresReload: true,
-  def: false,
   title: 'AniList Fast Load',
   help: 'Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.',
   debug: {

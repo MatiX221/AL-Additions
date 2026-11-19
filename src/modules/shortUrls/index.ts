@@ -6,7 +6,6 @@ defineModule({
   section: 'AniList Enhancements',
   layer: 'preload',
   requiresReload: true,
-  def: false,
   legacy: ['linkShortenerEnabled', 'shortAniListUrlsEnabled', 'shortAniListUrls'],
   title: 'Short AniList URLs',
   help: 'Remove the title slug from AniList anime, manga, staff, and character URLs.',
