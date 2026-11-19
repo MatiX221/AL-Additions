@@ -13,9 +13,14 @@ import '../src/modules/compareView';
 import '../src/modules/sync';
 import '../src/settings/devMode';
 import legacyKeys from './fixtures/legacy-keys.json';
-import { Settings, TYPES, ROWS, PREFIX } from '../src/settings/settings';
-import { store } from '../src/utils/helpers';
+import { Settings, TYPES, ROWS, PREFIX, features } from '../src/settings/settings';
+import { store, isDebug } from '../src/utils/helpers';
+import { showPanel, closePanel } from '../src/settings/panel';
+import { createModuleHost } from '../src/core/registry';
 import type { SettingRow } from '../src/types';
+
+// Snapshot initial registered key set before test-only Settings.register calls mutate ROWS.
+const INITIAL_REGISTERED_KEYS = Object.keys(ROWS).sort();
 
 describe('Settings: Type Normalizers (TYPES)', () => {
   describe('number normalizer', () => {
@@ -253,8 +258,8 @@ describe('Settings: Legacy Migration (Settings.migrate)', () => {
   });
 });
 
-describe('Settings: Legacy Key Parity', () => {
-  it('preserves every legacy key, type, default, and fallback list in ROWS', () => {
+describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
+  it('preserves all 33 legacy keys with exact schema and adds only manualOverridesEnabled (34 total)', () => {
     expect(legacyKeys).toHaveLength(33);
     for (const expected of legacyKeys) {
       const actual = ROWS[expected.key];
@@ -263,5 +268,121 @@ describe('Settings: Legacy Key Parity', () => {
       expect(actual.def).toEqual(expected.def);
       expect(actual.legacy).toEqual(expected.legacy);
     }
+
+    const legacyKeySet = new Set(legacyKeys.map((k) => k.key));
+    const addedKeys = INITIAL_REGISTERED_KEYS.filter((k) => !legacyKeySet.has(k));
+    expect(addedKeys).toEqual(['manualOverridesEnabled']);
+    expect(INITIAL_REGISTERED_KEYS).toHaveLength(34);
+  });
+
+  it('rolls back atomically when any option key collides during Settings.register', () => {
+    const beforeFeatureCount = features.length;
+    expect(() =>
+      Settings.register({
+        id: 'atomicRollbackTest',
+        key: 'atomicUniqueToggleKey',
+        title: 'Atomic Test',
+        help: 'Atomic Test',
+        options: [
+          {
+            key: 'atomicUniqueOptKey',
+            type: 'toggle',
+            def: false,
+            title: 'Unique Option',
+            help: 'Should roll back'
+          },
+          {
+            key: 'tagPercentage',
+            type: 'number',
+            def: 10,
+            title: 'Colliding Option',
+            help: 'Collides'
+          }
+        ]
+      })
+    ).toThrow('Duplicate setting: tagPercentage');
+
+    expect(ROWS.atomicUniqueToggleKey).toBeUndefined();
+    expect(ROWS.atomicUniqueOptKey).toBeUndefined();
+    expect(features).toHaveLength(beforeFeatureCount);
+  });
+
+  it('enforces mandatory def: false on toggles in register and registerCoreSetting', () => {
+    expect(() =>
+      Settings.register({
+        id: 'badToggleDefault',
+        key: 'badToggleKey',
+        title: 'Bad',
+        help: 'Bad',
+        def: true as any
+      })
+    ).toThrow(/must default to false/);
+
+    expect(() =>
+      Settings.registerCoreSetting({
+        key: 'badCoreToggleKey',
+        type: 'toggle',
+        def: true,
+        title: 'Bad Core',
+        help: 'Bad'
+      })
+    ).toThrow(/must default to false/);
+  });
+
+  it('normalizes standardized json validators via TYPES.json.normalize', () => {
+    expect(TYPES.json.normalize('not valid json', ROWS.tierLabels)).toEqual(ROWS.tierLabels.def);
+    expect(TYPES.json.normalize('not valid json', ROWS.aniSongsProviders)).toEqual(ROWS.aniSongsProviders.def);
+    expect(TYPES.json.normalize('{"123":{"malId":-1}}', ROWS.syncManualOverrides)).toEqual(ROWS.syncManualOverrides.def);
+
+    const validOverrides = {
+      '101': { malId: 202, type: 'anime', title: ' Valid Title ', updatedAt: 123 }
+    };
+    const normalized = TYPES.json.normalize(validOverrides, ROWS.syncManualOverrides);
+    expect(normalized).toEqual({
+      '101': { malId: 202, type: 'ANIME', title: 'Valid Title', updatedAt: 123 }
+    });
+  });
+
+  it('renders auto-ordered sections, alphabetical modules, Developer Mode, and live collapsible [data-debug-for]', () => {
+    closePanel();
+    const host = createModuleHost();
+    showPanel(host);
+
+    const sections = Array.from(document.querySelectorAll('#ala-settings-panel [data-section]')).map(
+      (el) => (el as HTMLElement).dataset.section
+    );
+    expect(sections[0]).toBe('Sync');
+    expect(sections.slice(-3)).toEqual(['Advanced', 'backup', 'credits']);
+
+    const advCard = document.querySelector('#ala-settings-panel [data-section="Advanced"] [data-feature="devMode"]');
+    expect(advCard).not.toBeNull();
+    expect(advCard!.querySelector('input[data-key="debugGeneral"]')).not.toBeNull();
+
+    const fastLoadDebugWrap = advCard!.querySelector<HTMLElement>('[data-debug-for="fastLoadEnabled"]');
+    expect(fastLoadDebugWrap).not.toBeNull();
+    expect(fastLoadDebugWrap!.classList.contains('is-open')).toBe(false);
+
+    const flToggle = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="fastLoadEnabled"]')!;
+    flToggle.checked = true;
+    flToggle.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(fastLoadDebugWrap!.classList.contains('is-open')).toBe(true);
+
+    closePanel();
+  });
+
+  it('registers dynamic debug channels and mutes without wiping preferences when devModeEnabled is off', () => {
+    Settings.set('devModeEnabled', true);
+    Settings.set('debugGeneral', true);
+    Settings.set('debugFastLoad', true);
+
+    expect(isDebug('general')).toBe(true);
+    expect(isDebug('fastLoad')).toBe(true);
+    expect(isDebug('sync')).toBe(false);
+
+    Settings.set('devModeEnabled', false);
+    expect(isDebug('general')).toBe(false);
+    expect(isDebug('fastLoad')).toBe(false);
+    expect(Settings.get('debugGeneral')).toBe(true);
+    expect(Settings.get('debugFastLoad')).toBe(true);
   });
 });

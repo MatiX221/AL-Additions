@@ -16,6 +16,9 @@ import {
   clearPendingDeletes
 } from '../src/modules/sync/state';
 import { Settings } from '../src/settings/settings';
+import { runMigrations } from '../src/core/registry';
+import { clearAccountSecrets } from '../src/core/accounts';
+import { store } from '../src/utils/helpers';
 import type { AniListSyncEntry, SyncTarget, SyncCounters } from '../src/modules/sync/types';
 
 describe('Sync Engine: Score Conversion', () => {
@@ -306,5 +309,46 @@ describe('Sync Engine: Pending Deletions Queue', () => {
 
     removePendingDelete(42, 'ANIME');
     expect(getPendingDeletes()).toEqual([]);
+  });
+});
+
+describe('Sync Module: Raw Persistence Keys & Migrations', () => {
+  it('preserves persisted sync watermarks and caches across runMigrations()', () => {
+    store.set('sync_schema', 2);
+    store.set('last_sync_ANIME', 1000);
+    store.set('last_run_ANIME', 2000);
+    store.set('last_compare_MANGA', 3000);
+    store.set('sync_account', 'tester');
+    store.set('sync_retry_at', 4000);
+    store.set('sync_onboarded', true);
+    store.set('sync_idmap_ANIME', { 1: { m: 10, t: 99 } });
+    store.set('sync_settled_MANGA', { 2: { h: 'abc', t: 99 } });
+    addPendingDelete({ mediaId: 7, malId: 70, type: 'ANIME', title: 'Test', deletedAt: 5000 });
+
+    runMigrations();
+
+    expect(store.get('last_sync_ANIME', 0)).toBe(1000);
+    expect(store.get('last_run_ANIME', 0)).toBe(2000);
+    expect(store.get('last_compare_MANGA', 0)).toBe(3000);
+    expect(store.get('sync_account', null)).toBe('tester');
+    expect(store.get('sync_retry_at', 0)).toBe(4000);
+    expect(store.get('sync_onboarded', false)).toBe(true);
+    expect(store.get('sync_idmap_ANIME', {})).toEqual({ 1: { m: 10, t: 99 } });
+    expect(store.get('sync_settled_MANGA', {})).toEqual({ 2: { h: 'abc', t: 99 } });
+    expect(getPendingDeletes()).toHaveLength(1);
+  });
+
+  it('wipes MAL credentials cleanly via clearAccountSecrets("mal")', () => {
+    store.set('mal_token', 'tok');
+    store.set('mal_refresh_token', 'ref');
+    store.set('mal_expires_at', 999999);
+    store.set('mal_code_verifier', 'ver');
+
+    clearAccountSecrets('mal');
+
+    expect(store.get('mal_token', null)).toBeNull();
+    expect(store.get('mal_refresh_token', null)).toBeNull();
+    expect(store.get('mal_expires_at', null)).toBeNull();
+    expect(store.get('mal_code_verifier', null)).toBeNull();
   });
 });

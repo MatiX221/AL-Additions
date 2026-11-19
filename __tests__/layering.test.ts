@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 const SRC_ROOT = path.resolve(process.cwd(), 'src');
 
@@ -190,5 +190,58 @@ describe('Architecture: Acyclic Layering DAG', () => {
 
     expect(unexpected, `Unexpected layering violations:\n${unexpected.join('\n')}`).toEqual([]);
     expect(stale, `Stale entries in KNOWN_VIOLATIONS (remove them!):\n${stale.join('\n')}`).toEqual([]);
+  });
+});
+
+describe('Architecture: Zero Import-Time Side Effects', () => {
+  const MODULES_ROOT = path.join(SRC_ROOT, 'modules');
+  const moduleDirs = fs
+    .readdirSync(MODULES_ROOT, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && fs.existsSync(path.join(MODULES_ROOT, d.name, 'index.ts')))
+    .map((d) => d.name)
+    .sort();
+
+  it('imports every module entrypoint without GM_*, DOM, style, or listener side effects', async () => {
+    const gmFns = [
+      globalThis.GM_getValue,
+      globalThis.GM_setValue,
+      globalThis.GM_deleteValue,
+      globalThis.GM_listValues,
+      globalThis.GM_addValueChangeListener,
+      globalThis.GM_removeValueChangeListener,
+      globalThis.GM_xmlhttpRequest,
+      globalThis.GM_registerMenuCommand,
+      globalThis.GM_download
+    ];
+
+    for (const dir of moduleDirs) {
+      vi.resetModules();
+      // Pre-load core observer/registry so observer's global history/popstate install is exempt.
+      await import('../src/core/observer');
+      await import('../src/core/registry');
+
+      for (const fn of gmFns) {
+        if (fn?.mockClear) fn.mockClear();
+      }
+      const headBefore = document.head.innerHTML;
+      const bodyBefore = document.body.innerHTML;
+      const winSpy = vi.spyOn(window, 'addEventListener');
+      const docSpy = vi.spyOn(document, 'addEventListener');
+
+      try {
+        await import(`../src/modules/${dir}/index.ts`);
+
+        for (const fn of gmFns) {
+          expect(fn, `GM_* called while importing modules/${dir}`).not.toHaveBeenCalled();
+        }
+        expect(document.head.innerHTML, `head mutated while importing modules/${dir}`).toBe(headBefore);
+        expect(document.body.innerHTML, `body mutated while importing modules/${dir}`).toBe(bodyBefore);
+        expect(winSpy, `window.addEventListener called while importing modules/${dir}`).not.toHaveBeenCalled();
+        expect(docSpy, `document.addEventListener called while importing modules/${dir}`).not.toHaveBeenCalled();
+      } finally {
+        winSpy.mockRestore();
+        docSpy.mockRestore();
+      }
+    }
   });
 });

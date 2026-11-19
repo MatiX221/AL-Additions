@@ -176,10 +176,11 @@ export const CoreHooks: CoreHooksApi = (() => {
   }
 
   function installFallbackFetch(): void {
-    if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
-    if (location.hostname !== 'anilist.co') return;
-
     const win = resolvePageWindow() as any;
+    const host = win?.location?.hostname || location.hostname;
+    if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
+    if (host !== 'anilist.co') return;
+
     const currentFetch = typeof win.fetch === 'function' ? win.fetch : typeof fetch === 'function' ? fetch : null;
     if (!currentFetch) return;
 
@@ -188,7 +189,8 @@ export const CoreHooks: CoreHooksApi = (() => {
 
     wrappedFetch = async function (this: any, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
       const baseFetch = origFetch!;
-      if (fetchOwnerActive || gqlListeners.size === 0 || location.hostname !== 'anilist.co') {
+      const curHost = win?.location?.hostname || location.hostname;
+      if (fetchOwnerActive || gqlListeners.size === 0 || curHost !== 'anilist.co') {
         return baseFetch.apply(this, arguments as any);
       }
 

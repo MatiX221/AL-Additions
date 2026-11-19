@@ -89,7 +89,7 @@ export const TYPES: Record<
         if (check === false) return r.def;
         if (check && typeof check === 'object') {
           if (check.valid === false) return r.def;
-          if (check.tiers) return check.tiers;
+          return check.value ?? check.tiers ?? check.config ?? check.overrides ?? val;
         }
       }
       return val;

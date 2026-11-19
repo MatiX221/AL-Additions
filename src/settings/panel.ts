@@ -584,7 +584,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       });
     });
 
-    card.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('.ala-options [data-key], .ala-options .ala-btn--edit-json').forEach((el) => {
+    card.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.ala-options [data-key]').forEach((el) => {
       if (el.closest('.ala-child-option, [data-debug-for]')) return;
       el.disabled = !effectiveOn;
     });

@@ -331,7 +331,7 @@
 					if (check === false) return r.def;
 					if (check && typeof check === "object") {
 						if (check.valid === false) return r.def;
-						if (check.tiers) return check.tiers;
+						return check.value ?? check.tiers ?? check.config ?? check.overrides ?? val;
 					}
 				}
 				return val;
@@ -617,16 +617,18 @@
 			} catch {}
 		}
 		function installFallbackFetch() {
-			if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
-			if (location.hostname !== "anilist.co") return;
 			const win = resolvePageWindow();
+			const host = win?.location?.hostname || location.hostname;
+			if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
+			if (host !== "anilist.co") return;
 			const currentFetch = typeof win.fetch === "function" ? win.fetch : typeof fetch === "function" ? fetch : null;
 			if (!currentFetch) return;
 			origFetch = currentFetch;
 			fallbackTargetWin = win;
 			wrappedFetch = async function(input, init) {
 				const baseFetch = origFetch;
-				if (fetchOwnerActive || gqlListeners.size === 0 || location.hostname !== "anilist.co") return baseFetch.apply(this, arguments);
+				const curHost = win?.location?.hostname || location.hostname;
+				if (fetchOwnerActive || gqlListeners.size === 0 || curHost !== "anilist.co") return baseFetch.apply(this, arguments);
 				const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input && typeof input.url === "string" ? input.url : "";
 				if ((init?.method || (input && typeof input.method === "string" ? input.method : "GET")).toUpperCase() !== "POST" || !isAniListGraphqlUrl(rawUrl)) return baseFetch.apply(this, arguments);
 				let parsedBody = null;
@@ -12957,7 +12959,7 @@
 					el.disabled = !childOpen;
 				});
 			});
-			card.querySelectorAll(".ala-options [data-key], .ala-options .ala-btn--edit-json").forEach((el) => {
+			card.querySelectorAll(".ala-options [data-key]").forEach((el) => {
 				if (el.closest(".ala-child-option, [data-debug-for]")) return;
 				el.disabled = !effectiveOn;
 			});

@@ -13,6 +13,7 @@ import {
   FORMAT_VERSION
 } from '../src/settings/backup';
 import { getAccountSecretKeys } from '../src/core/accounts';
+import { CoreHooks } from '../src/core/bus';
 import { Settings } from '../src/settings/settings';
 import { store } from '../src/utils/helpers';
 
@@ -201,5 +202,64 @@ describe('Settings Backup & Crypto Engine', () => {
     expect(Settings.get('tagPercentage')).toBe(88);
     expect(store.get('mal_token', null)).toBe('dev_raw_mal_token');
     expect(store.get('mal_refresh_token', null)).toBe('dev_raw_refresh');
+  });
+
+  it('purges al_token_auth and resets CoreHooks.setSessionClearing even if backup import throws', async () => {
+    store.set('al_token_auth', 'Bearer secret_al_jwt');
+    expect(CoreHooks.isSessionClearing()).toBe(false);
+
+    await expect(
+      importBackup(
+        JSON.stringify({
+          version: 1,
+          encrypted: false,
+          exportedAt: Date.now(),
+          data: {
+            al_token_auth: 'Bearer evil',
+            al_username: 'SomeUser'
+          }
+        })
+      )
+    ).rejects.toThrow('No recognized settings found in the backup file.');
+
+    expect(store.get('al_token_auth', null)).toBeNull();
+    expect(CoreHooks.isSessionClearing()).toBe(false);
+  });
+
+  it('auto-enables manualOverridesEnabled when importing legacy backup with non-empty syncManualOverrides', async () => {
+    Settings.set('manualOverridesEnabled', false);
+
+    await importBackup(
+      JSON.stringify({
+        version: 1,
+        encrypted: false,
+        exportedAt: Date.now(),
+        data: {
+          syncManualOverrides: {
+            '16498': { malId: 16498, type: 'ANIME', title: 'Attack on Titan', updatedAt: 100 }
+          }
+        }
+      })
+    );
+
+    expect(Settings.get('manualOverridesEnabled')).toBe(true);
+  });
+
+  it('preserves explicit manualOverridesEnabled: false even with non-empty syncManualOverrides', async () => {
+    await importBackup(
+      JSON.stringify({
+        version: 1,
+        encrypted: false,
+        exportedAt: Date.now(),
+        data: {
+          manualOverridesEnabled: false,
+          syncManualOverrides: {
+            '16498': { malId: 16498, type: 'ANIME', title: 'Attack on Titan', updatedAt: 100 }
+          }
+        }
+      })
+    );
+
+    expect(Settings.get('manualOverridesEnabled')).toBe(false);
   });
 });
