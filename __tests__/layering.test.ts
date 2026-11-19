@@ -6,8 +6,6 @@ const SRC_ROOT = path.resolve(process.cwd(), 'src');
 
 const KNOWN_VIOLATIONS: string[] = [
   'modules/anisongs/anisongModal.ts -> core/styles.ts',
-  'modules/compareView/index.ts -> core/observer.ts',
-  'modules/compareView/index.ts -> core/styles.ts',
   'modules/nyaa/index.ts -> core/observer.ts',
   'modules/nyaa/index.ts -> core/styles.ts',
   'modules/nyaa/index.ts -> modules/sync/overridesModal.ts',

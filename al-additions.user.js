@@ -1882,6 +1882,16 @@
 			id: Number(m[2])
 		} : null;
 	}
+	function compareRoute(pathname = location.pathname) {
+		const m = pathname.match(/^\/user\/([^/]+)\/(animelist|mangalist)\/compare(?:\/|$)/i);
+		if (!m) return null;
+		const kind = m[2].toLowerCase().startsWith("manga") ? "manga" : "anime";
+		return {
+			userName: decodeRouteSegment(m[1]),
+			kind,
+			type: kind === "manga" ? "MANGA" : "ANIME"
+		};
+	}
 	function staffOrStudioRoute(pathname = location.pathname) {
 		const m = pathname.match(/^\/(staff|studio)\/(\d+)(?:\/|$)/);
 		return m ? {
@@ -3692,729 +3702,6 @@
 			});
 		}
 	});
-	var RateLimiter = class {
-		rate;
-		min;
-		max;
-		burst;
-		adaptive;
-		jitter;
-		persistKey;
-		tokens;
-		last;
-		until;
-		okStreak;
-		queue;
-		constructor({ rate, min = 1, max = rate, burst = 1, adaptive = false, jitter = false, persistKey = null }) {
-			this.min = min;
-			this.max = max;
-			this.burst = burst;
-			this.adaptive = adaptive;
-			this.jitter = jitter;
-			this.persistKey = persistKey;
-			this.rate = Math.min(max, Math.max(min, rate));
-			this.tokens = burst;
-			this.last = Date.now();
-			this.until = 0;
-			this.okStreak = 0;
-			this.queue = Promise.resolve();
-		}
-		get resumeAt() {
-			const stored = this.persistKey ? Number(store$1.get(this.persistKey, 0)) || 0 : 0;
-			const at = Math.max(this.until, stored);
-			return at > Date.now() ? at : 0;
-		}
-		setRate(n) {
-			this.rate = Math.min(this.max, Math.max(this.min, n));
-		}
-		acquire(check) {
-			const run = this.queue.then(() => this._take(check));
-			this.queue = run.catch(() => {});
-			return run;
-		}
-		async _take(check) {
-			for (;;) {
-				check?.();
-				const now = Date.now();
-				const resume = this.resumeAt;
-				if (resume) {
-					this.tokens = 0;
-					this.last = resume;
-					await sleep(Math.min(1e3, resume - now));
-					continue;
-				}
-				this.tokens = Math.min(this.burst, this.tokens + (now - this.last) / 6e4 * this.rate);
-				this.last = now;
-				if (this.tokens >= 1) {
-					this.tokens -= 1;
-					return;
-				}
-				await sleep(Math.max(15, (1 - this.tokens) / this.rate * 6e4));
-			}
-		}
-		success() {
-			if (this.adaptive && ++this.okStreak >= 25 && this.rate < this.max) {
-				this.setRate(this.rate + Math.max(1, Math.round(this.rate * .1)));
-				this.okStreak = 0;
-			}
-		}
-		limit(ms) {
-			this.okStreak = 0;
-			this.tokens = 0;
-			if (this.adaptive) this.setRate(Math.floor(this.rate / 2));
-			if (!(ms > 0)) return;
-			this.until = Math.max(this.until, Date.now() + ms * (this.jitter ? .9 + Math.random() * .3 : 1));
-			if (this.persistKey) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
-		}
-	};
-	var KNOWN_LIST_FIELDS = [
-		"mediaId",
-		"id",
-		"score",
-		"status",
-		"progress",
-		"progressVolumes",
-		"notes",
-		"startedAt",
-		"completedAt",
-		"repeat",
-		"priority",
-		"private",
-		"hiddenFromStatusLists",
-		"customLists",
-		"advancedScores",
-		"updatedAt",
-		"media",
-		"title",
-		"coverImage",
-		"format",
-		"episodes",
-		"volumes",
-		"chapters",
-		"averageScore",
-		"popularity",
-		"genres",
-		"tags",
-		"bannerImage"
-	];
-	var KNOWN_MEDIA_FIELDS = [
-		"id",
-		"idMal",
-		"type",
-		"title",
-		"format",
-		"episodes",
-		"chapters",
-		"status",
-		"mediaListEntry",
-		"season",
-		"seasonYear",
-		"nextAiringEpisode",
-		"synonyms",
-		"isAdult",
-		"genres",
-		"tags",
-		"bannerImage",
-		"coverImage",
-		"description"
-	];
-	function parseEntityMeta(query, vars) {
-		const clean = query.replace(/#[^\n\r]*/g, " ").replace(/\s+/g, " ");
-		if (/\bMediaListCollection\b/i.test(clean)) {
-			const type = (vars.type || "ANIME").toUpperCase();
-			const who = vars.userId || (vars.userName ? String(vars.userName).toLowerCase() : "me");
-			const chunkPart = vars.chunk != null ? `:${vars.chunk}` : "";
-			const isSuperset = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length > 12;
-			const requiredFields = new Set();
-			for (const f of KNOWN_LIST_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
-			return {
-				entityKey: `MediaListCollection:${type}:${who}${chunkPart}`,
-				isSuperset,
-				requiredFields
-			};
-		}
-		const mediaMatch = clean.match(/\bMedia\s*\(\s*id\s*:\s*\$([a-zA-Z0-9_]+)/i);
-		if (mediaMatch && vars[mediaMatch[1]]) {
-			const id = vars[mediaMatch[1]];
-			const fieldCount = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length;
-			const requiredFields = new Set();
-			for (const f of KNOWN_MEDIA_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
-			return {
-				entityKey: `Media:${id}`,
-				isSuperset: fieldCount > 10,
-				requiredFields
-			};
-		}
-		if (/\bViewer\b/i.test(clean)) return {
-			entityKey: "Viewer",
-			isSuperset: clean.includes("mediaListOptions"),
-			requiredFields: new Set(["id", "name"])
-		};
-		return null;
-	}
-	function isSubsetOf(subset, superset) {
-		for (const item of subset) if (!superset.has(item)) return false;
-		return true;
-	}
-	var AniList = (() => {
-		const limiter = new RateLimiter({
-			rate: 25,
-			max: 90,
-			burst: 1,
-			persistKey: "ala_anilist_api_resume_at"
-		});
-		const entityCache = new Map();
-		const inflightExact = new Map();
-		const inflightEntities = new Map();
-		const ENTITY_TTL = 18e4;
-		const pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		function getCsrfToken() {
-			const win = pageWin();
-			if (typeof win.al_token === "string" && win.al_token) return win.al_token;
-			try {
-				const meta = win.document?.querySelector("meta[name=\"csrf-token\"]");
-				if (meta?.content) return meta.content;
-			} catch (_) {}
-			try {
-				const scripts = win.document?.querySelectorAll("head script") || [];
-				for (const s of scripts) {
-					const m = s.textContent?.match(/window\.al_token\s*=\s*['"]([^'"]+)['"]/);
-					if (m && m[1]) return m[1];
-				}
-			} catch (_) {}
-			return null;
-		}
-		const clearViewer = () => {
-			CoreHooks.setSessionClearing(true);
-			try {
-				for (const k of ANILIST_SESSION_KEYS) store$1.del(k);
-				CoreHooks.clearAuth();
-			} finally {
-				CoreHooks.setSessionClearing(false);
-			}
-		};
-		function syncFromPage() {
-			const win = pageWin();
-			const doc = win.document || document;
-			if (isLoggedOutNav(doc)) {
-				clearViewer();
-				return;
-			}
-			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-			if (nuxtUser?.id) {
-				const nuxtId = Number(nuxtUser.id);
-				const storedId = Number(store$1.get("al_user_id", 0));
-				if (storedId && storedId !== nuxtId) clearViewer();
-				return;
-			}
-			const navName = navUserName(doc);
-			if (navName) {
-				const storedName = store$1.get("al_username", null);
-				if (storedName && storedName.toLowerCase() !== navName.toLowerCase()) clearViewer();
-			}
-		}
-		function isBrowserLoggedIn() {
-			const win = pageWin();
-			const doc = win.document || document;
-			syncFromPage();
-			if (isLoggedOutNav(doc)) return false;
-			if ((win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user)?.id) return true;
-			if (hasLoggedInNav(doc)) return true;
-			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
-		}
-		const header = (res, name) => {
-			try {
-				return res?.headers?.get?.(name) ?? null;
-			} catch (_) {
-				return null;
-			}
-		};
-		function resetDelay(res) {
-			const retry = Number(header(res, "Retry-After"));
-			if (retry > 0) return Math.min(retry * 1e3, 12e4);
-			const reset = Number(header(res, "X-RateLimit-Reset"));
-			if (reset > 0) return Math.min((reset > 0xe8d4a51000 ? reset : reset * 1e3) - Date.now(), 12e4);
-			return 0;
-		}
-		function handle(res) {
-			const advertised = Number(header(res, "X-RateLimit-Limit"));
-			if (advertised > 0) limiter.setRate(Math.floor(advertised * .85));
-			if (res?.status === 429) return limiter.limit(resetDelay(res) || 6e4);
-			const remaining = header(res, "X-RateLimit-Remaining");
-			if (remaining != null && Number(remaining) <= 1) limiter.limit(resetDelay(res));
-		}
-		async function executeNetworkRequest(q, variables, retries, forceFresh = false) {
-			const csrfToken = getCsrfToken();
-			const win = pageWin();
-			const fetchFn = (typeof win.fetch === "function" ? win.fetch : fetch).bind(win);
-			const backoff = () => sleep(1500 * (4 - retries));
-			const endpoint = `${win.location?.origin || "https://anilist.co"}/graphql`;
-			const headers = {
-				"Content-Type": "application/json",
-				Accept: "application/json",
-				...forceFresh ? { "Cache-Control": "no-cache" } : {}
-			};
-			if (csrfToken) headers["X-CSRF-TOKEN"] = csrfToken;
-			let res;
-			try {
-				await limiter.acquire();
-				res = await fetchFn(endpoint, {
-					method: "POST",
-					headers,
-					cache: forceFresh ? "no-store" : void 0,
-					credentials: "include",
-					body: JSON.stringify({
-						query: q,
-						variables
-					})
-				});
-			} catch (e) {
-				if (retries > 0) {
-					await backoff();
-					return executeNetworkRequest(q, variables, retries - 1, forceFresh);
-				}
-				throw new Error(`AniList network error: ${e?.message || e}`);
-			}
-			handle(res);
-			if (!res) throw new Error("AniList network error: empty response");
-			if ((res.status === 429 || res.status >= 500) && retries > 0) {
-				if (res.status >= 500) await backoff();
-				return executeNetworkRequest(q, variables, retries - 1, forceFresh);
-			}
-			let json = null;
-			try {
-				json = await res.json();
-			} catch (_) {}
-			const message = json?.errors?.length ? json.errors.map((e) => e.message).join("; ") : "";
-			if (res.status === 401 || /invalid token|unauthenticated|unauthorized/i.test(message)) {
-				clearViewer();
-				throw authError("AniList", "AniList session unauthenticated — please log in to AniList.");
-			}
-			if (message) throw new Error(message);
-			if (!res.ok || !json) throw new Error(`AniList API HTTP ${res.status}`);
-			return json.data;
-		}
-		async function query(q, variables = {}, optionsOrRetries) {
-			const opts = typeof optionsOrRetries === "number" ? { retries: optionsOrRetries } : optionsOrRetries || {};
-			const retries = opts.retries ?? 3;
-			if (/\bmutation\b/i.test(q)) {
-				invalidate();
-				return executeNetworkRequest(q, variables, retries);
-			}
-			const meta = parseEntityMeta(q, variables);
-			const now = Date.now();
-			const exactKey = `${q}\u0001${JSON.stringify(variables)}`;
-			if (!opts.forceFresh && meta) {
-				const cached = entityCache.get(meta.entityKey);
-				if (cached && now - cached.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, cached.fields)) {
-					logDebug("[ANILIST API] 🎯 Cache HIT via Subset matching:", meta.entityKey);
-					return cached.data;
-				}
-			}
-			if (meta && !opts.forceFresh) {
-				const flyingEntity = inflightEntities.get(meta.entityKey);
-				if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
-					logDebug("[ANILIST API] 🔗 Attached to in-flight Superset request:", meta.entityKey);
-					return flyingEntity.promise;
-				}
-			}
-			const flyingExact = inflightExact.get(exactKey);
-			if (flyingExact && !opts.forceFresh) return flyingExact;
-			const networkPromise = executeNetworkRequest(q, variables, retries, opts.forceFresh).then((data) => {
-				if (meta && data) entityCache.set(meta.entityKey, {
-					time: Date.now(),
-					data,
-					isSuperset: meta.isSuperset,
-					fields: meta.requiredFields
-				});
-				return data;
-			}).finally(() => {
-				inflightExact.delete(exactKey);
-				if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) inflightEntities.delete(meta.entityKey);
-			});
-			inflightExact.set(exactKey, networkPromise);
-			if (meta) {
-				const existing = inflightEntities.get(meta.entityKey);
-				if (!existing || !existing.isSuperset && meta.isSuperset) inflightEntities.set(meta.entityKey, {
-					promise: networkPromise,
-					isSuperset: meta.isSuperset,
-					fields: meta.requiredFields
-				});
-			}
-			return networkPromise;
-		}
-		function formatMediaListResult(mlc) {
-			const mergedCollection = {
-				user: mlc.user,
-				lists: mlc.lists || []
-			};
-			const seenEntryIds = new Set();
-			const allEntries = [];
-			for (const list of mergedCollection.lists) for (const entry of list.entries || []) if (!seenEntryIds.has(entry.id)) {
-				seenEntryIds.add(entry.id);
-				allEntries.push(entry);
-			}
-			return {
-				collection: mergedCollection,
-				lists: mergedCollection.lists,
-				allEntries,
-				user: mergedCollection.user
-			};
-		}
-		function parseRpcMediaList(payload) {
-			if (!payload || typeof payload !== "object") return null;
-			const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
-			if (mlc && Array.isArray(mlc.lists)) return formatMediaListResult(mlc);
-			const entities = payload.entities || payload;
-			const entriesMap = entities?.listEntry || entities?.mediaListEntry;
-			if (entriesMap && typeof entriesMap === "object") {
-				const mediaMap = entities.media || entities.listEntryMedia || {};
-				const allEntries = [];
-				for (const rawEntry of Object.values(entriesMap)) {
-					if (!rawEntry || typeof rawEntry !== "object") continue;
-					const mediaId = rawEntry.mediaId || (typeof rawEntry.media === "number" ? rawEntry.media : rawEntry.media?.id);
-					if (!mediaId) continue;
-					const mediaObj = typeof rawEntry.media === "object" && rawEntry.media !== null ? rawEntry.media : mediaMap[mediaId] || { id: mediaId };
-					allEntries.push({
-						...rawEntry,
-						mediaId,
-						media: mediaObj
-					});
-				}
-				if (allEntries.length === 0) return null;
-				const userObj = entities.user ? Object.values(entities.user)[0] : void 0;
-				const lists = [];
-				if (entities.listSection && typeof entities.listSection === "object") for (const sec of Object.values(entities.listSection)) {
-					if (!sec) continue;
-					lists.push({
-						name: sec.name || "",
-						isCustomList: !!sec.isCustomList,
-						status: sec.status,
-						entries: Array.isArray(sec.entries) ? sec.entries.map((id) => entriesMap[id]).filter(Boolean) : []
-					});
-				}
-				const user = userObj && userObj.id ? {
-					id: Number(userObj.id),
-					name: String(userObj.name || "")
-				} : void 0;
-				return {
-					collection: {
-						lists,
-						user
-					},
-					allEntries,
-					lists,
-					user
-				};
-			}
-			return null;
-		}
-		function tryGetCachedMediaList(target, type, userId, userName) {
-			const win = pageWin();
-			const bridge = CoreHooks.getCacheBridge();
-			const t = type.toUpperCase();
-			const isId = typeof target === "number" || /^\d+$/.test(String(target));
-			const id = userId || (isId ? Number(target) : void 0);
-			const name = userName || (!isId ? String(target).trim().toLowerCase() : void 0);
-			const userMap = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
-			const idMap = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
-			const resolvedId = id || (name && userMap ? userMap.get(name) : void 0);
-			const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0);
-			const entityKeys = [];
-			if (resolvedId) entityKeys.push(`MediaListCollection:${t}:${resolvedId}`);
-			if (resolvedName) entityKeys.push(`MediaListCollection:${t}:${resolvedName}`);
-			for (const k of entityKeys) {
-				const cached = entityCache.get(k);
-				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection) {
-					logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:", k);
-					return formatMediaListResult(cached.data.MediaListCollection);
-				}
-			}
-			const gqlStore = bridge ? bridge.getGqlStore() : win.__ALFL_GQL_STORE__;
-			if (gqlStore) {
-				const gqlKeys = [];
-				if (resolvedId) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
-				if (resolvedName) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedName}:{}`);
-				for (const k of gqlKeys) {
-					const cached = gqlStore.get(k);
-					if (cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
-						const raw = new TextDecoder().decode(cached.snap.buf);
-						const json = JSON.parse(raw);
-						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-						if (mlc && Array.isArray(mlc.lists)) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
-							const result = formatMediaListResult(mlc);
-							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							return result;
-						}
-					} catch (_) {}
-				}
-				for (const [k, cached] of gqlStore.entries()) {
-					if (!k.startsWith(`gql:MediaListCollection:${t}:`)) continue;
-					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
-						const raw = new TextDecoder().decode(cached.snap.buf);
-						const json = JSON.parse(raw);
-						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-						if (mlc && Array.isArray(mlc.lists)) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):", k);
-							const result = formatMediaListResult(mlc);
-							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
-								time: Date.now(),
-								data: { MediaListCollection: mlc },
-								isSuperset: true,
-								fields: new Set(KNOWN_LIST_FIELDS)
-							});
-							return result;
-						}
-					} catch (_) {}
-				}
-			}
-			const rpcCache = bridge ? bridge.getRpcCache() : win.__ALFL_RPC_CACHE__;
-			if (rpcCache) {
-				const rpcKeys = [];
-				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
-				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
-				for (const k of rpcKeys) {
-					const cached = rpcCache.get(k);
-					if (cached && Date.now() - cached.time < 3e5 && cached.msg) {
-						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
-						if (result && result.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:", k);
-							return result;
-						}
-					}
-				}
-				for (const [k, cached] of rpcCache.entries()) {
-					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
-					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.msg) {
-						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
-						if (result && result.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):", k);
-							return result;
-						}
-					}
-				}
-			}
-			return null;
-		}
-		async function getMediaList(target, type = "ANIME", options) {
-			const isId = typeof target === "number" || /^\d+$/.test(String(target));
-			const userId = options?.userId || (isId ? Number(target) : void 0);
-			const userName = options?.userName || (!isId ? String(target).trim() : void 0);
-			if (!options?.forceFresh) {
-				const cached = tryGetCachedMediaList(target, type, userId, userName);
-				if (cached) return cached;
-			}
-			const win = pageWin();
-			const bridge = CoreHooks.getCacheBridge();
-			const rpcInflight = bridge ? bridge.getRpcInflight() : win.__ALFL_RPC_INFLIGHT__;
-			if (rpcInflight && !options?.forceFresh) {
-				const t = type.toUpperCase();
-				const userMap = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
-				const idMap = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
-				const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : void 0);
-				const resolvedName = userName ? userName.toLowerCase() : resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0;
-				const rpcKeys = [];
-				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
-				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
-				const checkInflight = async (k, flight) => {
-					try {
-						logDebug("[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
-						const msg = await Promise.race([flight.promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5e3))]);
-						const parsed = parseRpcMediaList(msg?.result ?? msg);
-						if (parsed && parsed.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
-							return parsed;
-						}
-					} catch (_) {}
-					return null;
-				};
-				for (const k of rpcKeys) {
-					const flight = rpcInflight.get(k);
-					if (flight) {
-						const res = await checkInflight(k, flight);
-						if (res) return res;
-					}
-				}
-				for (const [k, flight] of rpcInflight.entries()) {
-					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
-					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
-					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
-					if (matchId || matchName) {
-						const res = await checkInflight(k, flight);
-						if (res) return res;
-					}
-				}
-			}
-			const mlc = (await query(`query ($userId: Int, $userName: String, $type: MediaType) {
-      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
-        user { id name }
-        lists {
-          name
-          isCustomList
-          status
-          entries {
-            id
-            mediaId
-            status
-            score
-            progress
-            progressVolumes
-            repeat
-            priority
-            notes
-            customLists
-            startedAt { year month day }
-            completedAt { year month day }
-            media {
-              id
-              idMal
-              format
-              episodes
-              chapters
-              status
-              title { userPreferred english romaji native }
-            }
-          }
-        }
-      }
-    }`, {
-				userId: userId || void 0,
-				userName: userId ? void 0 : userName || void 0,
-				type
-			}, { forceFresh: options?.forceFresh }))?.MediaListCollection;
-			if (!mlc || !Array.isArray(mlc.lists)) throw new Error("Unexpected MediaListCollection response shape");
-			return formatMediaListResult(mlc);
-		}
-		async function viewer(forceFresh = false) {
-			const doc = pageWin().document || document;
-			syncFromPage();
-			if (isLoggedOutNav(doc)) return null;
-			if (!forceFresh) {
-				const name = store$1.get("al_username", null);
-				const fmt = store$1.get("al_score_format", null);
-				const id = Number(store$1.get("al_user_id", 0));
-				if (name && fmt && id) return {
-					id,
-					name,
-					scoreFormat: fmt
-				};
-			}
-			if (!hasAuth()) return null;
-			const d = await query("query { Viewer { id name mediaListOptions { scoreFormat } } }", {}).catch((e) => {
-				if (e?.auth) throw e;
-				return null;
-			});
-			if (d?.Viewer) {
-				store$1.set("al_user_id", d.Viewer.id);
-				store$1.set("al_username", d.Viewer.name);
-				store$1.set("al_score_format", d.Viewer.mediaListOptions.scoreFormat);
-				return {
-					id: d.Viewer.id,
-					name: d.Viewer.name,
-					scoreFormat: d.Viewer.mediaListOptions.scoreFormat
-				};
-			}
-			return null;
-		}
-		const invalidate = (entityKeyPrefix) => {
-			if (!entityKeyPrefix) {
-				entityCache.clear();
-				inflightEntities.clear();
-			} else {
-				for (const k of entityCache.keys()) if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
-				for (const k of inflightEntities.keys()) if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
-			}
-			const bridge = CoreHooks.getCacheBridge();
-			if (bridge) bridge.clear();
-			else pageWin().__ALFL_CLEAR__?.();
-		};
-		const invalidateMediaList = (target, type) => {
-			if (!target) return invalidate("MediaListCollection");
-			const t = type ? type.toUpperCase() : "";
-			const prefix = t ? `MediaListCollection:${t}:${String(target).toLowerCase()}` : `MediaListCollection:`;
-			invalidate(prefix);
-		};
-		const hasAuth = () => isBrowserLoggedIn();
-		const resumeAt = () => limiter.resumeAt;
-		return {
-			query,
-			getMediaList,
-			viewer,
-			clearViewer,
-			invalidate,
-			invalidateMediaList,
-			hasAuth,
-			resumeAt,
-			session: {
-				hasAuth,
-				clear: clearViewer,
-				syncFromPage
-			}
-		};
-	})();
-	var MediaData = (() => {
-		async function get(id, type, opts) {
-			try {
-				return (await AniList.query(`query($id:Int,$type:MediaType){ Media(id:$id,type:$type){
-          id idMal format title { userPreferred english romaji native }
-          episodes chapters status season seasonYear nextAiringEpisode { episode }
-          mediaListEntry { score progress status completedAt { year month day } }
-        } }`, {
-					id: Number(id),
-					type
-				}))?.Media || null;
-			} catch (e) {
-				if (opts?.throwAuth && e?.auth) throw e;
-				logDebug("[MEDIA DATA] fetch failed:", e?.message || e);
-				return null;
-			}
-		}
-		async function save(id, _type, c) {
-			const entry = (await AniList.query(`mutation($mediaId:Int!,$score:Float,$progress:Int,$status:MediaListStatus,$completedAt:FuzzyDateInput){
-        SaveMediaListEntry(mediaId:$mediaId,score:$score,progress:$progress,status:$status,completedAt:$completedAt){
-          score progress status completedAt { year month day }
-        } }`, {
-				mediaId: Number(id),
-				score: c.score,
-				progress: c.progress,
-				status: c.status,
-				completedAt: c.completedAt
-			}))?.SaveMediaListEntry || null;
-			AniList.invalidate(`Media:${id}`);
-			AniList.invalidateMediaList();
-			return entry;
-		}
-		return {
-			get,
-			save
-		};
-	})();
-	var anilistApiClient = {
-		...AniList,
-		media: MediaData
-	};
 	var STATUSES = [
 		"Completed",
 		"Planning",
@@ -4476,15 +3763,17 @@
 			sensitivity: "base"
 		});
 	}
-	defineFeature({
+	defineModule({
 		id: "compareView",
 		key: "compareViewEnabled",
 		section: "AniList Enhancements",
+		layer: "preload",
+		requiresReload: true,
 		def: false,
 		title: "Compare View Improvements",
-		help: "Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown."
-	}, () => {
-		addStyle("ala-compare-style", `
+		help: "Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.",
+		setup(ctx) {
+			ctx.addStyle("ala-compare-style", `
       .content.container.ala-compare-page-container {
         padding-left: 18px !important;
         padding-right: 18px !important;
@@ -4763,320 +4052,308 @@
         }
       }
     `);
-		const isComparePage = () => /\/(animelist|mangalist)\/compare/i.test(location.pathname);
-		let activeSortCol = "otherScore";
-		let activeSortDir = "desc";
-		const activeStatuses = new Set(STATUSES);
-		let lastProcessedCount = -1;
-		let currentRoute = "";
-		let isLoadingAll = false;
-		let isCompareLoaded = false;
-		let loadFailed = false;
-		let isMutatingDOM = false;
-		let loadAbortState = null;
-		let resizeCleanup = null;
-		let indicatorTimer = null;
-		function getCompareVue() {
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const scrollerEl = win.document?.querySelector?.(".scroller") || document.querySelector(".scroller");
-			if (scrollerEl && scrollerEl.__vue__?.$parent) return scrollerEl.__vue__.$parent;
-			const compareEl = win.document?.querySelector?.(".compare") || document.querySelector(".compare");
-			if (compareEl && compareEl.__vue__) return compareEl.__vue__;
-			return null;
-		}
-		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-		const setRpcBlock = (fn) => {
-			pageWin.__ALFL_RPC_BLOCK__ = fn;
-		};
-		const compareBlocker = (q, vars) => isComparePage() && (/\bcompareWithAuthList\b/i.test(q || "") || Boolean(vars?.compareWithAuthList));
-		const installBlocker = () => {
-			setRpcBlock(compareBlocker);
-		};
-		function disableNativeScrollers(listContainer) {
-			(listContainer?.parentElement || listContainer || document).querySelectorAll(".scroller").forEach((el) => {
-				try {
-					const v = el.__vue__;
-					if (v) {
-						if (typeof v.check === "function") {
-							window.removeEventListener("scroll", v.check);
-							window.removeEventListener("resize", v.check);
-							v._scrollContainer?.removeEventListener?.("scroll", v.check);
-							v._scrollContainer?.removeEventListener?.("resize", v.check);
+			ctx.ownUi("#ala-compare-sidebar");
+			const isComparePage = () => /\/(animelist|mangalist)\/compare/i.test(location.pathname);
+			let activeSortCol = "otherScore";
+			let activeSortDir = "desc";
+			const activeStatuses = new Set(STATUSES);
+			let lastProcessedCount = -1;
+			let currentRoute = "";
+			let isLoadingAll = false;
+			let isCompareLoaded = false;
+			let loadFailed = false;
+			let isMutatingDOM = false;
+			let disposed = false;
+			let loadAbortState = null;
+			let resizeCleanup = null;
+			let indicatorTimer = null;
+			let prefetchRelease = null;
+			function getCompareVue() {
+				const scrollerEl = document.querySelector(".scroller");
+				if (scrollerEl && scrollerEl.__vue__?.$parent) return scrollerEl.__vue__.$parent;
+				const compareEl = document.querySelector(".compare");
+				if (compareEl && compareEl.__vue__) return compareEl.__vue__;
+				return null;
+			}
+			const compareBlocker = (q, vars) => !loadFailed && isComparePage() && (/\bcompareWithAuthList\b/i.test(q || "") || Boolean(vars?.compareWithAuthList));
+			ctx.hooks.blockRpc(compareBlocker);
+			function disableNativeScrollers(listContainer) {
+				(listContainer?.parentElement || listContainer || document).querySelectorAll(".scroller").forEach((el) => {
+					try {
+						const v = el.__vue__;
+						if (v) {
+							if (typeof v.check === "function") {
+								window.removeEventListener("scroll", v.check);
+								window.removeEventListener("resize", v.check);
+								v._scrollContainer?.removeEventListener?.("scroll", v.check);
+								v._scrollContainer?.removeEventListener?.("resize", v.check);
+							}
+							v.execute = () => {};
+							v.handler = () => {};
+							if (v.$parent) {
+								v.$parent.complete = true;
+								v.$parent.loading = false;
+							}
+							v.$destroy?.();
 						}
-						v.execute = () => {};
-						v.handler = () => {};
-						if (v.$parent) {
-							v.$parent.complete = true;
-							v.$parent.loading = false;
-						}
-						v.$destroy?.();
+					} catch {}
+					el.remove();
+				});
+			}
+			async function resolveCompareUsers() {
+				const route = compareRoute();
+				const type = route?.type || (location.pathname.toLowerCase().includes("mangalist") ? "MANGA" : "ANIME");
+				const bridge = ctx.hooks.getCacheBridge();
+				const userMap = bridge?.getUserMap();
+				const idMap = bridge?.getIdMap();
+				let otherName = route?.userName;
+				let otherId;
+				if (!otherName) {
+					const queryUser = new URLSearchParams(location.search).get("user");
+					if (queryUser) otherName = queryUser;
+				}
+				const vue = getCompareVue();
+				if (vue) {
+					if (!otherName) otherName = vue.user?.name || vue.userName || void 0;
+					if (!otherId) otherId = Number(vue.user?.id || vue.userId) || void 0;
+				}
+				if (otherName && !otherId && userMap) otherId = userMap.get(otherName.toLowerCase());
+				if (otherName && otherId) {
+					if (userMap) userMap.set(otherName.toLowerCase(), otherId);
+					if (idMap) idMap.set(otherId, otherName);
+				}
+				ctx.api.session.syncFromPage?.();
+				let viewerId = Number(store$1.get("al_user_id", 0)) || void 0;
+				let viewerName = store$1.get("al_username", null) || void 0;
+				if (!viewerId || !viewerName) {
+					const viewer = await ctx.api.viewer();
+					if (viewer) {
+						viewerId = viewer.id;
+						viewerName = viewer.name;
 					}
-				} catch {}
-				el.remove();
-			});
-		}
-		async function resolveCompareUsers() {
-			const type = location.pathname.toLowerCase().includes("mangalist") ? "MANGA" : "ANIME";
-			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-			const userMap = win.__ALFL_USER_MAP__;
-			let otherName;
-			let otherId;
-			const urlMatch = location.pathname.match(/\/user\/([^/]+)\/(animelist|mangalist)\/compare/i);
-			if (urlMatch) try {
-				otherName = decodeURIComponent(urlMatch[1]);
-			} catch {
-				otherName = urlMatch[1];
+				}
+				if (!viewerId && viewerName && userMap) viewerId = userMap.get(viewerName.toLowerCase());
+				return {
+					viewerId,
+					viewerName,
+					otherId,
+					otherName,
+					type
+				};
 			}
-			if (!otherName) {
-				const queryUser = new URLSearchParams(location.search).get("user");
-				if (queryUser) otherName = queryUser;
+			function updateHeaderHoverColor() {
+				const testEl = document.createElement("div");
+				testEl.style.color = "rgb(var(--color-blue))";
+				document.body.appendChild(testEl);
+				const computedColor = getComputedStyle(testEl).color;
+				testEl.remove();
+				const m = computedColor.match(/\d+/g);
+				let isLight = false;
+				if (m && m.length >= 3) {
+					const r = parseInt(m[0], 10);
+					const g = parseInt(m[1], 10);
+					const b = parseInt(m[2], 10);
+					isLight = (r * 299 + g * 587 + b * 114) / 1e3 > 155;
+				}
+				const hoverBg = isLight ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.18)";
+				document.documentElement.style.setProperty("--ala-header-hover-bg", hoverBg);
 			}
-			const vue = getCompareVue();
-			if (vue) {
-				if (!otherName) otherName = vue.user?.name || vue.userName || void 0;
-				if (!otherId) otherId = Number(vue.user?.id || vue.userId) || void 0;
+			function cleanHeaderText(raw) {
+				return raw.replace(/[▲▼]/g, "").trim();
 			}
-			if (otherName && !otherId && userMap) otherId = userMap.get(otherName.toLowerCase());
-			if (otherName && otherId) {
-				if (userMap) userMap.set(otherName.toLowerCase(), otherId);
-				if (win.__ALFL_ID_MAP__) win.__ALFL_ID_MAP__.set(otherId, otherName);
+			function renderHeaderContent(el, baseText, isActive, activeDir) {
+				const clean = cleanHeaderText(baseText);
+				let wrap = el.querySelector(".ala-header-wrap");
+				if (!wrap) {
+					wrap = document.createElement("div");
+					wrap.className = "ala-header-wrap";
+					el.innerHTML = "";
+					el.appendChild(wrap);
+				}
+				let label = wrap.querySelector(".ala-header-label");
+				if (!label) {
+					label = document.createElement("span");
+					label.className = "ala-header-label";
+					wrap.appendChild(label);
+				}
+				label.textContent = clean;
+				let arrow = wrap.querySelector(".ala-sort-arrow");
+				if (isActive) {
+					if (!arrow) {
+						arrow = document.createElement("span");
+						arrow.className = "ala-sort-arrow";
+						wrap.appendChild(arrow);
+					}
+					arrow.textContent = activeDir === "asc" ? "▲" : "▼";
+				} else arrow?.remove();
 			}
-			let viewerId = Number(store$1.get("al_user_id", 0)) || void 0;
-			let viewerName = store$1.get("al_username", null) || void 0;
-			if (!viewerId || !viewerName) {
-				const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-				if (nuxtUser) {
-					if (!viewerId && nuxtUser.id) viewerId = Number(nuxtUser.id);
-					if (!viewerName && nuxtUser.name) viewerName = String(nuxtUser.name);
+			function updateSortArrows(titleEl, yourScoreEl, otherScoreEl, activeCol, activeDir) {
+				updateHeaderHoverColor();
+				const items = [
+					[titleEl, "title"],
+					[yourScoreEl, "yourScore"],
+					[otherScoreEl, "otherScore"]
+				];
+				for (const [el, col] of items) {
+					if (!el) continue;
+					el.classList.add("ala-sortable-header");
+					if (!el._alaBaseText) el._alaBaseText = cleanHeaderText(el.textContent || "");
+					const baseText = el._alaBaseText;
+					renderHeaderContent(el, baseText, col === activeCol, activeDir);
 				}
 			}
-			if (!viewerId || !viewerName) {
-				const viewer = await AniList.viewer();
-				if (viewer) {
-					viewerId = viewer.id;
-					viewerName = viewer.name;
+			function applyFilter(listContainer, entries) {
+				let visibleCount = 0;
+				for (const el of entries) {
+					const d = getEntryData(el);
+					const show = activeStatuses.has(d.yourStatus) && activeStatuses.has(d.otherStatus);
+					el.classList.toggle("ala-hidden", !show);
+					el.style.display = "";
+					if (show) visibleCount++;
 				}
+				let emptyEl = listContainer.querySelector(".ala-compare-empty");
+				if (visibleCount === 0 && entries.length > 0) {
+					if (!emptyEl) {
+						emptyEl = document.createElement("div");
+						emptyEl.className = "ala-compare-empty";
+						emptyEl.textContent = "No entries match the selected status filters.";
+						listContainer.appendChild(emptyEl);
+					}
+					emptyEl.style.display = "";
+				} else if (emptyEl) emptyEl.style.display = "none";
 			}
-			if (!viewerId && viewerName && userMap) viewerId = userMap.get(viewerName.toLowerCase());
-			return {
-				viewerId,
-				viewerName,
-				otherId,
-				otherName,
-				type
-			};
-		}
-		function updateHeaderHoverColor() {
-			const testEl = document.createElement("div");
-			testEl.style.color = "rgb(var(--color-blue))";
-			document.body.appendChild(testEl);
-			const computedColor = getComputedStyle(testEl).color;
-			testEl.remove();
-			const m = computedColor.match(/\d+/g);
-			let isLight = false;
-			if (m && m.length >= 3) {
-				const r = parseInt(m[0], 10);
-				const g = parseInt(m[1], 10);
-				const b = parseInt(m[2], 10);
-				isLight = (r * 299 + g * 587 + b * 114) / 1e3 > 155;
+			function applySort(listContainer, entries, col, dir) {
+				if (entries.length > 0) listContainer.querySelector(".no-results")?.remove();
+				entries.sort((a, b) => {
+					return compareEntries(getEntryData(a), getEntryData(b), col, dir);
+				});
+				const frag = document.createDocumentFragment();
+				for (const el of entries) frag.appendChild(el);
+				isMutatingDOM = true;
+				listContainer.appendChild(frag);
+				const emptyEl = listContainer.querySelector(".ala-compare-empty");
+				if (emptyEl) listContainer.appendChild(emptyEl);
+				isMutatingDOM = false;
 			}
-			const hoverBg = isLight ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.18)";
-			document.documentElement.style.setProperty("--ala-header-hover-bg", hoverBg);
-		}
-		function cleanHeaderText(raw) {
-			return raw.replace(/[▲▼]/g, "").trim();
-		}
-		function renderHeaderContent(el, baseText, isActive, activeDir) {
-			const clean = cleanHeaderText(baseText);
-			let wrap = el.querySelector(".ala-header-wrap");
-			if (!wrap) {
-				wrap = document.createElement("div");
-				wrap.className = "ala-header-wrap";
-				el.innerHTML = "";
-				el.appendChild(wrap);
-			}
-			let label = wrap.querySelector(".ala-header-label");
-			if (!label) {
-				label = document.createElement("span");
-				label.className = "ala-header-label";
-				wrap.appendChild(label);
-			}
-			label.textContent = clean;
-			let arrow = wrap.querySelector(".ala-sort-arrow");
-			if (isActive) {
-				if (!arrow) {
-					arrow = document.createElement("span");
-					arrow.className = "ala-sort-arrow";
-					wrap.appendChild(arrow);
+			function updateStatusCounts(sidebar, entries) {
+				const counts = {
+					Completed: 0,
+					Planning: 0,
+					Current: 0,
+					Paused: 0,
+					Dropped: 0
+				};
+				for (const el of entries) {
+					const d = getEntryData(el);
+					const counted = new Set([d.yourStatus, d.otherStatus]);
+					for (const s of counted) if (s in counts) counts[s]++;
 				}
-				arrow.textContent = activeDir === "asc" ? "▲" : "▼";
-			} else arrow?.remove();
-		}
-		function updateSortArrows(titleEl, yourScoreEl, otherScoreEl, activeCol, activeDir) {
-			updateHeaderHoverColor();
-			const items = [
-				[titleEl, "title"],
-				[yourScoreEl, "yourScore"],
-				[otherScoreEl, "otherScore"]
-			];
-			for (const [el, col] of items) {
-				if (!el) continue;
-				el.classList.add("ala-sortable-header");
-				if (!el._alaBaseText) el._alaBaseText = cleanHeaderText(el.textContent || "");
-				const baseText = el._alaBaseText;
-				renderHeaderContent(el, baseText, col === activeCol, activeDir);
+				sidebar.querySelectorAll(".ala-compare-count").forEach((span) => {
+					const status = span.dataset.status;
+					if (status && status in counts) span.textContent = String(counts[status]);
+				});
+				const badge = sidebar.querySelector(".ala-compare-active-badge");
+				if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
 			}
-		}
-		function applyFilter(listContainer, entries) {
-			let visibleCount = 0;
-			for (const el of entries) {
-				const d = getEntryData(el);
-				const show = activeStatuses.has(d.yourStatus) && activeStatuses.has(d.otherStatus);
-				el.classList.toggle("ala-hidden", !show);
-				el.style.display = "";
-				if (show) visibleCount++;
-			}
-			let emptyEl = listContainer.querySelector(".ala-compare-empty");
-			if (visibleCount === 0 && entries.length > 0) {
-				if (!emptyEl) {
-					emptyEl = document.createElement("div");
-					emptyEl.className = "ala-compare-empty";
-					emptyEl.textContent = "No entries match the selected status filters.";
-					listContainer.appendChild(emptyEl);
+			function setLoadIndicator(sidebar, text) {
+				if (indicatorTimer) {
+					clearTimeout(indicatorTimer);
+					indicatorTimer = null;
 				}
-				emptyEl.style.display = "";
-			} else if (emptyEl) emptyEl.style.display = "none";
-		}
-		function applySort(listContainer, entries, col, dir) {
-			if (entries.length > 0) listContainer.querySelector(".no-results")?.remove();
-			entries.sort((a, b) => {
-				return compareEntries(getEntryData(a), getEntryData(b), col, dir);
-			});
-			const frag = document.createDocumentFragment();
-			for (const el of entries) frag.appendChild(el);
-			isMutatingDOM = true;
-			listContainer.appendChild(frag);
-			const emptyEl = listContainer.querySelector(".ala-compare-empty");
-			if (emptyEl) listContainer.appendChild(emptyEl);
-			isMutatingDOM = false;
-		}
-		function updateStatusCounts(sidebar, entries) {
-			const counts = {
-				Completed: 0,
-				Planning: 0,
-				Current: 0,
-				Paused: 0,
-				Dropped: 0
-			};
-			for (const el of entries) {
-				const d = getEntryData(el);
-				const counted = new Set([d.yourStatus, d.otherStatus]);
-				for (const s of counted) if (s in counts) counts[s]++;
-			}
-			sidebar.querySelectorAll(".ala-compare-count").forEach((span) => {
-				const status = span.dataset.status;
-				if (status && status in counts) span.textContent = String(counts[status]);
-			});
-			const badge = sidebar.querySelector(".ala-compare-active-badge");
-			if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
-		}
-		function setLoadIndicator(sidebar, text) {
-			if (indicatorTimer) {
-				clearTimeout(indicatorTimer);
-				indicatorTimer = null;
-			}
-			let indicator = sidebar.querySelector("#ala-compare-load-indicator");
-			if (!text) {
-				indicator?.remove();
-				return;
-			}
-			if (!indicator) {
-				indicator = document.createElement("div");
-				indicator.id = "ala-compare-load-indicator";
-				indicator.className = "ala-compare-load-indicator";
-				indicator.innerHTML = `
+				let indicator = sidebar.querySelector("#ala-compare-load-indicator");
+				if (!text) {
+					indicator?.remove();
+					return;
+				}
+				if (!indicator) {
+					indicator = document.createElement("div");
+					indicator.id = "ala-compare-load-indicator";
+					indicator.className = "ala-compare-load-indicator";
+					indicator.innerHTML = `
           <span class="ala-compare-spinner"></span>
           <span class="ala-compare-load-text"></span>
         `;
-				(sidebar.querySelector(".ala-compare-content") || sidebar.querySelector(".ala-compare-card"))?.appendChild(indicator);
-			}
-			indicator.style.display = "flex";
-			const textEl = indicator.querySelector(".ala-compare-load-text");
-			if (textEl) textEl.textContent = text;
-		}
-		function getActiveCompareContainer(fallback) {
-			return document.getElementById("ala-compare-table") || fallback || document.querySelector(".ala-compare-main .compare") || null;
-		}
-		function triggerFilterUpdate(sidebar, fallback) {
-			const badge = sidebar.querySelector(".ala-compare-active-badge");
-			if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
-			const target = getActiveCompareContainer(fallback);
-			if (!target) return;
-			applyFilter(target, Array.from(target.querySelectorAll(".entry:not(.header)")));
-		}
-		function triggerSort(col, fallback) {
-			if (activeSortCol === col) activeSortDir = activeSortDir === "asc" ? "desc" : "asc";
-			else {
-				activeSortCol = col;
-				activeSortDir = col === "title" ? "asc" : "desc";
-			}
-			const target = getActiveCompareContainer(fallback);
-			if (!target) return;
-			const currentHeader = target.querySelector(".entry.header");
-			if (currentHeader) {
-				const titleH = currentHeader.querySelector(".title");
-				const scores = currentHeader.querySelectorAll(".score");
-				updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
-			}
-			applySort(target, Array.from(target.querySelectorAll(".entry:not(.header)")), activeSortCol, activeSortDir);
-		}
-		async function loadAllEntriesViaMediaList(compareRoot, sidebar) {
-			if (isLoadingAll || isCompareLoaded || loadFailed) return;
-			isLoadingAll = true;
-			const abortState = { abort: false };
-			loadAbortState = abortState;
-			indicatorTimer = setTimeout(() => {
-				if (!abortState.abort && isComparePage()) setLoadIndicator(sidebar, "Loading full compare list...");
-			}, 250);
-			try {
-				const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers();
-				if (abortState.abort || !isComparePage()) return;
-				const viewerTarget = viewerId || viewerName;
-				const otherTarget = otherId || otherName;
-				if (!viewerTarget || !otherTarget) {
-					logDebug("[COMPARE] Missing viewer or other user for getMediaList, keeping fallback");
-					loadFailed = true;
-					return;
+					(sidebar.querySelector(".ala-compare-content") || sidebar.querySelector(".ala-compare-card"))?.appendChild(indicator);
 				}
-				const [myListRes, otherListRes] = await Promise.all([AniList.getMediaList(viewerTarget, type, {
-					userId: viewerId,
-					userName: viewerId ? void 0 : viewerName
-				}), AniList.getMediaList(otherTarget, type, {
-					userId: otherId,
-					userName: otherId ? void 0 : otherName
-				})]);
-				if (abortState.abort || !isComparePage()) return;
-				const myMap = new Map();
-				for (const entry of myListRes.allEntries) myMap.set(entry.mediaId, entry);
-				const safeOtherName = esc(otherListRes.user?.name || otherName || "User");
-				const scopeAttr = Array.from(compareRoot.attributes).map((a) => a.name).find((n) => /^data-v-[a-f0-9]+$/i.test(n));
-				const seenMediaIds = new Set();
-				const matchedNodes = [];
-				for (const otherEntry of otherListRes.allEntries) {
-					const mediaId = otherEntry.mediaId;
-					if (seenMediaIds.has(mediaId)) continue;
-					const myEntry = myMap.get(mediaId);
-					if (!myEntry) continue;
-					seenMediaIds.add(mediaId);
-					const title = otherEntry.media?.title?.userPreferred || otherEntry.media?.title?.romaji || otherEntry.media?.title?.english || myEntry.media?.title?.userPreferred || "Unknown";
-					const yourScore = myEntry.score || 0;
-					const otherScore = otherEntry.score || 0;
-					const yourStatus = normalizeStatus(myEntry.status);
-					const otherStatus = normalizeStatus(otherEntry.status);
-					const row = document.createElement("div");
-					row.className = "entry";
-					if (scopeAttr) row.setAttribute(scopeAttr, "");
-					row.innerHTML = `
+				indicator.style.display = "flex";
+				const textEl = indicator.querySelector(".ala-compare-load-text");
+				if (textEl) textEl.textContent = text;
+			}
+			function getActiveCompareContainer(fallback) {
+				return document.getElementById("ala-compare-table") || fallback || document.querySelector(".ala-compare-main .compare") || null;
+			}
+			function triggerFilterUpdate(sidebar, fallback) {
+				const badge = sidebar.querySelector(".ala-compare-active-badge");
+				if (badge) badge.textContent = `${activeStatuses.size}/${STATUSES.length}`;
+				const target = getActiveCompareContainer(fallback);
+				if (!target) return;
+				applyFilter(target, Array.from(target.querySelectorAll(".entry:not(.header)")));
+			}
+			function triggerSort(col, fallback) {
+				if (activeSortCol === col) activeSortDir = activeSortDir === "asc" ? "desc" : "asc";
+				else {
+					activeSortCol = col;
+					activeSortDir = col === "title" ? "asc" : "desc";
+				}
+				const target = getActiveCompareContainer(fallback);
+				if (!target) return;
+				const currentHeader = target.querySelector(".entry.header");
+				if (currentHeader) {
+					const titleH = currentHeader.querySelector(".title");
+					const scores = currentHeader.querySelectorAll(".score");
+					updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
+				}
+				applySort(target, Array.from(target.querySelectorAll(".entry:not(.header)")), activeSortCol, activeSortDir);
+			}
+			async function loadAllEntriesViaMediaList(compareRoot, sidebar) {
+				if (isLoadingAll || isCompareLoaded || loadFailed) return;
+				isLoadingAll = true;
+				const abortState = { abort: false };
+				loadAbortState = abortState;
+				prefetchRelease?.();
+				prefetchRelease = ctx.hooks.setPrefetchPaused(true);
+				indicatorTimer = setTimeout(() => {
+					if (!abortState.abort && isComparePage()) setLoadIndicator(sidebar, "Loading full compare list...");
+				}, 250);
+				try {
+					const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers();
+					if (abortState.abort || !isComparePage()) return;
+					const viewerTarget = viewerId || viewerName;
+					const otherTarget = otherId || otherName;
+					if (!viewerTarget || !otherTarget) {
+						ctx.debug.log("Missing viewer or other user for getMediaList, keeping fallback");
+						loadFailed = true;
+						return;
+					}
+					const [myListRes, otherListRes] = await Promise.all([ctx.api.getMediaList(viewerTarget, type, {
+						userId: viewerId,
+						userName: viewerId ? void 0 : viewerName
+					}), ctx.api.getMediaList(otherTarget, type, {
+						userId: otherId,
+						userName: otherId ? void 0 : otherName
+					})]);
+					if (abortState.abort || !isComparePage()) return;
+					const myMap = new Map();
+					for (const entry of myListRes.allEntries) myMap.set(entry.mediaId, entry);
+					const safeOtherName = esc(otherListRes.user?.name || otherName || "User");
+					const scopeAttr = Array.from(compareRoot.attributes).map((a) => a.name).find((n) => /^data-v-[a-f0-9]+$/i.test(n));
+					const seenMediaIds = new Set();
+					const matchedNodes = [];
+					for (const otherEntry of otherListRes.allEntries) {
+						const mediaId = otherEntry.mediaId;
+						if (seenMediaIds.has(mediaId)) continue;
+						const myEntry = myMap.get(mediaId);
+						if (!myEntry) continue;
+						seenMediaIds.add(mediaId);
+						const title = otherEntry.media?.title?.userPreferred || otherEntry.media?.title?.romaji || otherEntry.media?.title?.english || myEntry.media?.title?.userPreferred || "Unknown";
+						const yourScore = myEntry.score || 0;
+						const otherScore = otherEntry.score || 0;
+						const yourStatus = normalizeStatus(myEntry.status);
+						const otherStatus = normalizeStatus(otherEntry.status);
+						const row = document.createElement("div");
+						row.className = "entry";
+						if (scopeAttr) row.setAttribute(scopeAttr, "");
+						row.innerHTML = `
             <div class="title"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
               <a href="/${type.toLowerCase()}/${mediaId}/" class=""${scopeAttr ? ` ${scopeAttr}=""` : ""}></a>
             </div>
@@ -5085,35 +4362,35 @@
             <div class="status" label="Your Status"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${yourStatus}</span></div>
             <div class="status" label="${safeOtherName}'s Status"${scopeAttr ? ` ${scopeAttr}=""` : ""}><span>${otherStatus}</span></div>
           `;
-					const link = row.querySelector(".title a");
-					if (link) link.textContent = title;
-					row._alaCompareData = {
-						el: row,
-						title,
-						yourScore,
-						otherScore,
-						yourStatus,
-						otherStatus
-					};
-					matchedNodes.push(row);
-				}
-				logDebug("[COMPARE] Matched entries via MediaListCollection:", matchedNodes.length);
-				const main = compareRoot.parentElement || document.querySelector(".ala-compare-main");
-				if (!main) return;
-				let customTable = main.querySelector("#ala-compare-table");
-				if (!customTable) {
-					customTable = document.createElement("div");
-					customTable.id = "ala-compare-table";
-					customTable.className = "compare";
-					if (scopeAttr) customTable.setAttribute(scopeAttr, "");
-					main.appendChild(customTable);
-				}
-				let customHeader = customTable.querySelector(".entry.header");
-				if (!customHeader) {
-					customHeader = document.createElement("div");
-					customHeader.className = "entry header";
-					if (scopeAttr) customHeader.setAttribute(scopeAttr, "");
-					customHeader.innerHTML = `
+						const link = row.querySelector(".title a");
+						if (link) link.textContent = title;
+						row._alaCompareData = {
+							el: row,
+							title,
+							yourScore,
+							otherScore,
+							yourStatus,
+							otherStatus
+						};
+						matchedNodes.push(row);
+					}
+					ctx.debug.log("Matched entries via MediaListCollection:", matchedNodes.length);
+					const main = compareRoot.parentElement || document.querySelector(".ala-compare-main");
+					if (!main) return;
+					let customTable = main.querySelector("#ala-compare-table");
+					if (!customTable) {
+						customTable = document.createElement("div");
+						customTable.id = "ala-compare-table";
+						customTable.className = "compare";
+						if (scopeAttr) customTable.setAttribute(scopeAttr, "");
+						main.appendChild(customTable);
+					}
+					let customHeader = customTable.querySelector(".entry.header");
+					if (!customHeader) {
+						customHeader = document.createElement("div");
+						customHeader.className = "entry header";
+						if (scopeAttr) customHeader.setAttribute(scopeAttr, "");
+						customHeader.innerHTML = `
             <div class="title ala-sortable-header"${scopeAttr ? ` ${scopeAttr}=""` : ""}>
               <div class="ala-header-wrap"><span class="ala-header-label">Title</span></div>
             </div>
@@ -5130,147 +4407,151 @@
               <span class="ala-header-label">${safeOtherName}'s Status</span>
             </div>
           `;
-					customTable.appendChild(customHeader);
+						customTable.appendChild(customHeader);
+						const titleH = customHeader.querySelector(".title");
+						const scores = customHeader.querySelectorAll(".score");
+						titleH?.addEventListener("click", () => triggerSort("title", compareRoot));
+						scores[0]?.addEventListener("click", () => triggerSort("yourScore", compareRoot));
+						scores[1]?.addEventListener("click", () => triggerSort("otherScore", compareRoot));
+					}
 					const titleH = customHeader.querySelector(".title");
 					const scores = customHeader.querySelectorAll(".score");
-					titleH?.addEventListener("click", () => triggerSort("title", compareRoot));
-					scores[0]?.addEventListener("click", () => triggerSort("yourScore", compareRoot));
-					scores[1]?.addEventListener("click", () => triggerSort("otherScore", compareRoot));
-				}
-				const titleH = customHeader.querySelector(".title");
-				const scores = customHeader.querySelectorAll(".score");
-				updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
-				matchedNodes.sort((a, b) => {
-					return compareEntries(getEntryData(a), getEntryData(b), activeSortCol, activeSortDir);
-				});
-				isMutatingDOM = true;
-				customTable.querySelectorAll(".entry:not(.header)").forEach((el) => el.remove());
-				const frag = document.createDocumentFragment();
-				for (const el of matchedNodes) frag.appendChild(el);
-				customTable.appendChild(frag);
-				if (matchedNodes.length === 0) {
-					let empty = customTable.querySelector(".no-results");
-					if (!empty) {
-						empty = document.createElement("div");
-						empty.className = "no-results";
-						empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
-						customTable.appendChild(empty);
+					updateSortArrows(titleH, scores[0] || null, scores[1] || null, activeSortCol, activeSortDir);
+					matchedNodes.sort((a, b) => {
+						return compareEntries(getEntryData(a), getEntryData(b), activeSortCol, activeSortDir);
+					});
+					isMutatingDOM = true;
+					customTable.querySelectorAll(".entry:not(.header)").forEach((el) => el.remove());
+					const frag = document.createDocumentFragment();
+					for (const el of matchedNodes) frag.appendChild(el);
+					customTable.appendChild(frag);
+					if (matchedNodes.length === 0) {
+						let empty = customTable.querySelector(".no-results");
+						if (!empty) {
+							empty = document.createElement("div");
+							empty.className = "no-results";
+							empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
+							customTable.appendChild(empty);
+						}
+						customHeader.style.display = "none";
+					} else {
+						customTable.querySelector(".no-results")?.remove();
+						customHeader.style.display = "";
 					}
-					customHeader.style.display = "none";
-				} else {
-					customTable.querySelector(".no-results")?.remove();
-					customHeader.style.display = "";
+					const emptyEl = customTable.querySelector(".ala-compare-empty");
+					if (emptyEl) customTable.appendChild(emptyEl);
+					isMutatingDOM = false;
+					compareRoot.style.display = "none";
+					disableNativeScrollers(compareRoot);
+					lastProcessedCount = matchedNodes.length;
+					isCompareLoaded = true;
+					updateStatusCounts(sidebar, matchedNodes);
+					applyFilter(customTable, matchedNodes);
+				} catch (err) {
+					loadFailed = true;
+					console.error("[AL-Additions] CompareView getMediaList error:", err);
+				} finally {
+					isLoadingAll = false;
+					loadAbortState = null;
+					if (prefetchRelease) {
+						prefetchRelease();
+						prefetchRelease = null;
+					}
+					setLoadIndicator(sidebar, null);
 				}
-				const emptyEl = customTable.querySelector(".ala-compare-empty");
-				if (emptyEl) customTable.appendChild(emptyEl);
-				isMutatingDOM = false;
-				compareRoot.style.display = "none";
-				disableNativeScrollers(compareRoot);
-				lastProcessedCount = matchedNodes.length;
-				isCompareLoaded = true;
-				installBlocker();
-				updateStatusCounts(sidebar, matchedNodes);
-				applyFilter(customTable, matchedNodes);
-			} catch (err) {
-				loadFailed = true;
-				setRpcBlock();
-				console.error("[AL-Additions] CompareView getMediaList error:", err);
-			} finally {
+			}
+			function cleanup() {
+				if (prefetchRelease) {
+					prefetchRelease();
+					prefetchRelease = null;
+				}
+				if (indicatorTimer) {
+					clearTimeout(indicatorTimer);
+					indicatorTimer = null;
+				}
+				if (loadAbortState) {
+					loadAbortState.abort = true;
+					loadAbortState = null;
+				}
 				isLoadingAll = false;
-				loadAbortState = null;
-				setLoadIndicator(sidebar, null);
-			}
-		}
-		function cleanup() {
-			if (!isComparePage()) setRpcBlock();
-			else installBlocker();
-			if (indicatorTimer) {
-				clearTimeout(indicatorTimer);
-				indicatorTimer = null;
-			}
-			if (loadAbortState) {
-				loadAbortState.abort = true;
-				loadAbortState = null;
-			}
-			isLoadingAll = false;
-			isCompareLoaded = false;
-			loadFailed = false;
-			isMutatingDOM = false;
-			if (resizeCleanup) {
-				resizeCleanup();
-				resizeCleanup = null;
-			}
-			const customTable = document.getElementById("ala-compare-table");
-			if (customTable) customTable.remove();
-			const wrap = document.getElementById("ala-compare-wrap");
-			if (wrap) {
-				const main = wrap.querySelector(".ala-compare-main");
-				const compareRoot = main?.querySelector(".compare:not(#ala-compare-table)") || main?.firstElementChild;
-				if (compareRoot && wrap.parentElement) {
-					if (compareRoot.style) compareRoot.style.display = "";
-					wrap.parentElement.insertBefore(compareRoot, wrap);
+				isCompareLoaded = false;
+				loadFailed = false;
+				isMutatingDOM = false;
+				if (resizeCleanup) {
+					resizeCleanup();
+					resizeCleanup = null;
 				}
-				wrap.remove();
-			} else {
-				const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
-				if (compareRoot) {
-					delete compareRoot.dataset.alaCompareInit;
-					compareRoot.style.display = "";
+				const customTable = document.getElementById("ala-compare-table");
+				if (customTable) customTable.remove();
+				const wrap = document.getElementById("ala-compare-wrap");
+				if (wrap) {
+					const main = wrap.querySelector(".ala-compare-main");
+					const compareRoot = main?.querySelector(".compare:not(#ala-compare-table)") || main?.firstElementChild;
+					if (compareRoot && wrap.parentElement) {
+						if (compareRoot.style) compareRoot.style.display = "";
+						wrap.parentElement.insertBefore(compareRoot, wrap);
+					}
+					wrap.remove();
+				} else {
+					const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
+					if (compareRoot) {
+						delete compareRoot.dataset.alaCompareInit;
+						compareRoot.style.display = "";
+					}
 				}
-			}
-			document.querySelectorAll(".ala-compare-page-container").forEach((el) => {
-				el.classList.remove("ala-compare-page-container");
-			});
-			document.querySelectorAll(".compare .entry.ala-hidden").forEach((el) => {
-				el.classList.remove("ala-hidden");
-			});
-			const header = document.querySelector(".compare:not(#ala-compare-table) .entry.header, .entry.header");
-			if (header) {
-				delete header._alaHeaderBound;
-				delete header.dataset.alaCompareInit;
-				header.querySelectorAll(".ala-sortable-header").forEach((el) => {
-					el.classList.remove("ala-sortable-header");
-					const baseText = el._alaBaseText;
-					if (baseText) el.textContent = cleanHeaderText(baseText);
-					delete el._alaBaseText;
+				document.querySelectorAll(".ala-compare-page-container").forEach((el) => {
+					el.classList.remove("ala-compare-page-container");
 				});
-				header.querySelectorAll(".status").forEach((el) => {
-					const label = el.querySelector(".ala-header-label");
-					if (label) el.textContent = label.textContent || "";
+				document.querySelectorAll(".compare .entry.ala-hidden").forEach((el) => {
+					el.classList.remove("ala-hidden");
 				});
+				const header = document.querySelector(".compare:not(#ala-compare-table) .entry.header, .entry.header");
+				if (header) {
+					delete header._alaHeaderBound;
+					delete header.dataset.alaCompareInit;
+					header.querySelectorAll(".ala-sortable-header").forEach((el) => {
+						el.classList.remove("ala-sortable-header");
+						const baseText = el._alaBaseText;
+						if (baseText) el.textContent = cleanHeaderText(baseText);
+						delete el._alaBaseText;
+					});
+					header.querySelectorAll(".status").forEach((el) => {
+						const label = el.querySelector(".ala-header-label");
+						if (label) el.textContent = label.textContent || "";
+					});
+				}
+				lastProcessedCount = -1;
 			}
-			lastProcessedCount = -1;
-		}
-		function setupCompareView(compareRoot, header, entries) {
-			if (header) header.querySelectorAll(".status").forEach((statusEl) => {
-				if (!statusEl.querySelector(".ala-header-label")) statusEl.innerHTML = `<span class="ala-header-label">${statusEl.textContent?.trim() || ""}</span>`;
-			});
-			const headerCells = header ? Array.from(header.children) : [];
-			const titleHeader = headerCells.length >= 3 ? header.querySelector(".title") || headerCells.find((el) => /title/i.test(el.textContent || "")) || headerCells[0] : null;
-			const yourScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => /your score/i.test(el.textContent || "")) || header.querySelector(".score:first-of-type") || headerCells[1] : null;
-			const otherScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => el !== yourScoreHeader && /score/i.test(el.textContent || "")) || header.querySelectorAll(".score")[1] || headerCells[2] : null;
-			const container = compareRoot.closest(".content.container") || compareRoot.parentElement;
-			if (container) container.classList.add("ala-compare-page-container");
-			let wrap = document.getElementById("ala-compare-wrap");
-			let sidebar = document.getElementById("ala-compare-sidebar");
-			if (!wrap || !wrap.contains(compareRoot)) {
-				wrap?.remove();
-				wrap = document.createElement("div");
-				wrap.id = "ala-compare-wrap";
-				wrap.className = "ala-compare-wrap";
-				sidebar = document.createElement("aside");
-				sidebar.id = "ala-compare-sidebar";
-				sidebar.className = "ala-compare-sidebar";
-				const main = document.createElement("div");
-				main.className = "ala-compare-main";
-				compareRoot.parentElement?.insertBefore(wrap, compareRoot);
-				wrap.appendChild(sidebar);
-				wrap.appendChild(main);
-				main.appendChild(compareRoot);
-			}
-			if (sidebar && !sidebar.querySelector(".ala-compare-card")) {
-				const isMobileScreen = window.innerWidth <= 850;
-				sidebar.innerHTML = `
+			function setupCompareView(compareRoot, header, entries) {
+				if (header) header.querySelectorAll(".status").forEach((statusEl) => {
+					if (!statusEl.querySelector(".ala-header-label")) statusEl.innerHTML = `<span class="ala-header-label">${statusEl.textContent?.trim() || ""}</span>`;
+				});
+				const headerCells = header ? Array.from(header.children) : [];
+				const titleHeader = headerCells.length >= 3 ? header.querySelector(".title") || headerCells.find((el) => /title/i.test(el.textContent || "")) || headerCells[0] : null;
+				const yourScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => /your score/i.test(el.textContent || "")) || header.querySelector(".score:first-of-type") || headerCells[1] : null;
+				const otherScoreHeader = headerCells.length >= 3 ? headerCells.find((el) => el !== yourScoreHeader && /score/i.test(el.textContent || "")) || header.querySelectorAll(".score")[1] || headerCells[2] : null;
+				const container = compareRoot.closest(".content.container") || compareRoot.parentElement;
+				if (container) container.classList.add("ala-compare-page-container");
+				let wrap = document.getElementById("ala-compare-wrap");
+				let sidebar = document.getElementById("ala-compare-sidebar");
+				if (!wrap || !wrap.contains(compareRoot)) {
+					wrap?.remove();
+					wrap = document.createElement("div");
+					wrap.id = "ala-compare-wrap";
+					wrap.className = "ala-compare-wrap";
+					sidebar = document.createElement("aside");
+					sidebar.id = "ala-compare-sidebar";
+					sidebar.className = "ala-compare-sidebar";
+					const main = document.createElement("div");
+					main.className = "ala-compare-main";
+					compareRoot.parentElement?.insertBefore(wrap, compareRoot);
+					wrap.appendChild(sidebar);
+					wrap.appendChild(main);
+					main.appendChild(compareRoot);
+				}
+				if (sidebar && !sidebar.querySelector(".ala-compare-card")) {
+					const isMobileScreen = window.innerWidth <= 850;
+					sidebar.innerHTML = `
           <details class="ala-compare-card" ${isMobileScreen ? "" : "open"}>
             <summary class="ala-compare-card-title">
               <span>Status Filter</span>
@@ -5294,118 +4575,127 @@
             </div>
           </details>
         `;
-				const details = sidebar.querySelector(".ala-compare-card");
-				sidebar.querySelector(".ala-compare-card-title")?.addEventListener("click", (e) => {
-					if (window.innerWidth > 850) {
-						e.preventDefault();
-						if (details) details.open = true;
-					}
-				});
-				if (resizeCleanup) resizeCleanup();
-				let isDesktop = window.innerWidth > 850;
-				const syncDetailsOpen = () => {
-					if (!details) return;
-					const nowDesktop = window.innerWidth > 850;
-					if (nowDesktop !== isDesktop) {
-						details.open = nowDesktop;
-						isDesktop = nowDesktop;
-					}
-				};
-				window.addEventListener("resize", syncDetailsOpen);
-				resizeCleanup = () => {
-					window.removeEventListener("resize", syncDetailsOpen);
-				};
-				sidebar.querySelectorAll(".ala-compare-cb").forEach((cb) => {
-					cb.addEventListener("change", () => {
-						const st = cb.dataset.status;
-						if (cb.checked) activeStatuses.add(st);
-						else activeStatuses.delete(st);
+					const details = sidebar.querySelector(".ala-compare-card");
+					sidebar.querySelector(".ala-compare-card-title")?.addEventListener("click", (e) => {
+						if (window.innerWidth > 850) {
+							e.preventDefault();
+							if (details) details.open = true;
+						}
+					});
+					if (resizeCleanup) resizeCleanup();
+					let isDesktop = window.innerWidth > 850;
+					const syncDetailsOpen = () => {
+						if (!details) return;
+						const nowDesktop = window.innerWidth > 850;
+						if (nowDesktop !== isDesktop) {
+							details.open = nowDesktop;
+							isDesktop = nowDesktop;
+						}
+					};
+					resizeCleanup = ctx.listen(window, "resize", syncDetailsOpen);
+					sidebar.querySelectorAll(".ala-compare-cb").forEach((cb) => {
+						cb.addEventListener("change", () => {
+							const st = cb.dataset.status;
+							if (cb.checked) activeStatuses.add(st);
+							else activeStatuses.delete(st);
+							triggerFilterUpdate(sidebar, compareRoot);
+						});
+					});
+					sidebar.querySelector("#ala-compare-all")?.addEventListener("click", () => {
+						for (const s of STATUSES) activeStatuses.add(s);
+						sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = true);
 						triggerFilterUpdate(sidebar, compareRoot);
 					});
-				});
-				sidebar.querySelector("#ala-compare-all")?.addEventListener("click", () => {
-					for (const s of STATUSES) activeStatuses.add(s);
-					sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = true);
-					triggerFilterUpdate(sidebar, compareRoot);
-				});
-				sidebar.querySelector("#ala-compare-none")?.addEventListener("click", () => {
-					activeStatuses.clear();
-					sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = false);
-					triggerFilterUpdate(sidebar, compareRoot);
-				});
-			}
-			if (sidebar && entries.length > 0) updateStatusCounts(sidebar, entries);
-			if (header && titleHeader && yourScoreHeader && otherScoreHeader && !header._alaHeaderBound) {
-				header._alaHeaderBound = true;
-				const attachSortClick = (el, col) => {
-					if (!el) return;
-					el.addEventListener("click", () => {
-						triggerSort(col, compareRoot);
+					sidebar.querySelector("#ala-compare-none")?.addEventListener("click", () => {
+						activeStatuses.clear();
+						sidebar?.querySelectorAll(".ala-compare-cb").forEach((cb) => cb.checked = false);
+						triggerFilterUpdate(sidebar, compareRoot);
 					});
-				};
-				attachSortClick(titleHeader, "title");
-				attachSortClick(yourScoreHeader, "yourScore");
-				attachSortClick(otherScoreHeader, "otherScore");
-			}
-			if (header && titleHeader) {
-				header.dataset.alaCompareInit = "true";
-				updateSortArrows(titleHeader, yourScoreHeader, otherScoreHeader, activeSortCol, activeSortDir);
-			}
-			compareRoot.dataset.alaCompareInit = "true";
-			entries.forEach((el) => {
-				el.querySelectorAll(".score").forEach((scoreEl) => {
-					const text = scoreEl.textContent?.trim();
-					if (!text || text === "") scoreEl.textContent = "0";
-				});
-			});
-			disableNativeScrollers(compareRoot);
-			if (entries.length > 0) {
-				applyFilter(compareRoot, entries);
-				applySort(compareRoot, entries, activeSortCol, activeSortDir);
-			}
-			installBlocker();
-			if (!isLoadingAll && !isCompareLoaded && !loadFailed && sidebar) loadAllEntriesViaMediaList(compareRoot, sidebar);
-		}
-		const checkView = debounce(() => {
-			if (isMutatingDOM) return;
-			const path = location.pathname;
-			if (!isComparePage()) {
-				if (currentRoute) {
-					cleanup();
-					currentRoute = "";
 				}
-				return;
+				if (sidebar && entries.length > 0) updateStatusCounts(sidebar, entries);
+				if (header && titleHeader && yourScoreHeader && otherScoreHeader && !header._alaHeaderBound) {
+					header._alaHeaderBound = true;
+					const attachSortClick = (el, col) => {
+						if (!el) return;
+						el.addEventListener("click", () => {
+							triggerSort(col, compareRoot);
+						});
+					};
+					attachSortClick(titleHeader, "title");
+					attachSortClick(yourScoreHeader, "yourScore");
+					attachSortClick(otherScoreHeader, "otherScore");
+				}
+				if (header && titleHeader) {
+					header.dataset.alaCompareInit = "true";
+					updateSortArrows(titleHeader, yourScoreHeader, otherScoreHeader, activeSortCol, activeSortDir);
+				}
+				compareRoot.dataset.alaCompareInit = "true";
+				entries.forEach((el) => {
+					el.querySelectorAll(".score").forEach((scoreEl) => {
+						const text = scoreEl.textContent?.trim();
+						if (!text || text === "") scoreEl.textContent = "0";
+					});
+				});
+				disableNativeScrollers(compareRoot);
+				if (entries.length > 0) {
+					applyFilter(compareRoot, entries);
+					applySort(compareRoot, entries, activeSortCol, activeSortDir);
+				}
+				if (!isLoadingAll && !isCompareLoaded && !loadFailed && sidebar) loadAllEntriesViaMediaList(compareRoot, sidebar);
 			}
-			if (path !== currentRoute) {
-				currentRoute = path;
-				activeSortCol = "otherScore";
-				activeSortDir = "desc";
-				for (const s of STATUSES) activeStatuses.add(s);
-				cleanup();
-				installBlocker();
-			}
-			if (isCompareLoaded) return;
-			const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
-			if (!compareRoot) return;
-			const header = compareRoot.querySelector(".entry.header");
-			const entries = Array.from(compareRoot.querySelectorAll(".entry:not(.header)"));
-			if (!compareRoot.dataset.alaCompareInit || !isCompareLoaded && entries.length !== lastProcessedCount) {
-				lastProcessedCount = entries.length;
-				setupCompareView(compareRoot, header, entries);
-			}
-		}, 60);
-		installBlocker();
-		Core.ready(checkView);
-		Core.onNavigate(() => {
-			installBlocker();
-			checkView();
-		});
-		Core.onBodyMutation(() => {
-			if (isComparePage() && !isMutatingDOM) {
-				installBlocker();
+			const checkView = debounce(() => {
+				if (disposed || isMutatingDOM) return;
+				const path = location.pathname;
+				if (!isComparePage()) {
+					if (currentRoute) {
+						cleanup();
+						currentRoute = "";
+					}
+					return;
+				}
+				if (path !== currentRoute) {
+					currentRoute = path;
+					activeSortCol = "otherScore";
+					activeSortDir = "desc";
+					for (const s of STATUSES) activeStatuses.add(s);
+					cleanup();
+				}
+				if (isCompareLoaded) return;
+				const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
+				if (!compareRoot) return;
+				const header = compareRoot.querySelector(".entry.header");
+				const entries = Array.from(compareRoot.querySelectorAll(".entry:not(.header)"));
+				if (!compareRoot.dataset.alaCompareInit || !isCompareLoaded && entries.length !== lastProcessedCount) {
+					lastProcessedCount = entries.length;
+					setupCompareView(compareRoot, header, entries);
+				}
+			}, 60);
+			ctx.onRoute(() => isComparePage(), (rc) => {
+				if (disposed) return;
+				if (rc.url.pathname !== currentRoute) {
+					currentRoute = rc.url.pathname;
+					activeSortCol = "otherScore";
+					activeSortDir = "desc";
+					for (const s of STATUSES) activeStatuses.add(s);
+					cleanup();
+				}
 				checkView();
-			}
-		});
+				return () => {
+					currentRoute = "";
+					cleanup();
+				};
+			});
+			ctx.ready(checkView);
+			ctx.onNav(checkView);
+			ctx.onBodyMutation(() => {
+				if (!disposed && isComparePage() && !isMutatingDOM) checkView();
+			});
+			ctx.onCleanup(() => {
+				disposed = true;
+				currentRoute = "";
+				cleanup();
+			});
+		}
 	});
 	defineModule({
 		id: "devMode",
@@ -7838,6 +7128,729 @@
 			});
 		}
 	});
+	var RateLimiter = class {
+		rate;
+		min;
+		max;
+		burst;
+		adaptive;
+		jitter;
+		persistKey;
+		tokens;
+		last;
+		until;
+		okStreak;
+		queue;
+		constructor({ rate, min = 1, max = rate, burst = 1, adaptive = false, jitter = false, persistKey = null }) {
+			this.min = min;
+			this.max = max;
+			this.burst = burst;
+			this.adaptive = adaptive;
+			this.jitter = jitter;
+			this.persistKey = persistKey;
+			this.rate = Math.min(max, Math.max(min, rate));
+			this.tokens = burst;
+			this.last = Date.now();
+			this.until = 0;
+			this.okStreak = 0;
+			this.queue = Promise.resolve();
+		}
+		get resumeAt() {
+			const stored = this.persistKey ? Number(store$1.get(this.persistKey, 0)) || 0 : 0;
+			const at = Math.max(this.until, stored);
+			return at > Date.now() ? at : 0;
+		}
+		setRate(n) {
+			this.rate = Math.min(this.max, Math.max(this.min, n));
+		}
+		acquire(check) {
+			const run = this.queue.then(() => this._take(check));
+			this.queue = run.catch(() => {});
+			return run;
+		}
+		async _take(check) {
+			for (;;) {
+				check?.();
+				const now = Date.now();
+				const resume = this.resumeAt;
+				if (resume) {
+					this.tokens = 0;
+					this.last = resume;
+					await sleep(Math.min(1e3, resume - now));
+					continue;
+				}
+				this.tokens = Math.min(this.burst, this.tokens + (now - this.last) / 6e4 * this.rate);
+				this.last = now;
+				if (this.tokens >= 1) {
+					this.tokens -= 1;
+					return;
+				}
+				await sleep(Math.max(15, (1 - this.tokens) / this.rate * 6e4));
+			}
+		}
+		success() {
+			if (this.adaptive && ++this.okStreak >= 25 && this.rate < this.max) {
+				this.setRate(this.rate + Math.max(1, Math.round(this.rate * .1)));
+				this.okStreak = 0;
+			}
+		}
+		limit(ms) {
+			this.okStreak = 0;
+			this.tokens = 0;
+			if (this.adaptive) this.setRate(Math.floor(this.rate / 2));
+			if (!(ms > 0)) return;
+			this.until = Math.max(this.until, Date.now() + ms * (this.jitter ? .9 + Math.random() * .3 : 1));
+			if (this.persistKey) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
+		}
+	};
+	var KNOWN_LIST_FIELDS = [
+		"mediaId",
+		"id",
+		"score",
+		"status",
+		"progress",
+		"progressVolumes",
+		"notes",
+		"startedAt",
+		"completedAt",
+		"repeat",
+		"priority",
+		"private",
+		"hiddenFromStatusLists",
+		"customLists",
+		"advancedScores",
+		"updatedAt",
+		"media",
+		"title",
+		"coverImage",
+		"format",
+		"episodes",
+		"volumes",
+		"chapters",
+		"averageScore",
+		"popularity",
+		"genres",
+		"tags",
+		"bannerImage"
+	];
+	var KNOWN_MEDIA_FIELDS = [
+		"id",
+		"idMal",
+		"type",
+		"title",
+		"format",
+		"episodes",
+		"chapters",
+		"status",
+		"mediaListEntry",
+		"season",
+		"seasonYear",
+		"nextAiringEpisode",
+		"synonyms",
+		"isAdult",
+		"genres",
+		"tags",
+		"bannerImage",
+		"coverImage",
+		"description"
+	];
+	function parseEntityMeta(query, vars) {
+		const clean = query.replace(/#[^\n\r]*/g, " ").replace(/\s+/g, " ");
+		if (/\bMediaListCollection\b/i.test(clean)) {
+			const type = (vars.type || "ANIME").toUpperCase();
+			const who = vars.userId || (vars.userName ? String(vars.userName).toLowerCase() : "me");
+			const chunkPart = vars.chunk != null ? `:${vars.chunk}` : "";
+			const isSuperset = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length > 12;
+			const requiredFields = new Set();
+			for (const f of KNOWN_LIST_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
+			return {
+				entityKey: `MediaListCollection:${type}:${who}${chunkPart}`,
+				isSuperset,
+				requiredFields
+			};
+		}
+		const mediaMatch = clean.match(/\bMedia\s*\(\s*id\s*:\s*\$([a-zA-Z0-9_]+)/i);
+		if (mediaMatch && vars[mediaMatch[1]]) {
+			const id = vars[mediaMatch[1]];
+			const fieldCount = (clean.match(/[{,]\s*([a-zA-Z0-9_]+)/g) || []).length;
+			const requiredFields = new Set();
+			for (const f of KNOWN_MEDIA_FIELDS) if (new RegExp(`\\b${f}\\b`).test(clean)) requiredFields.add(f);
+			return {
+				entityKey: `Media:${id}`,
+				isSuperset: fieldCount > 10,
+				requiredFields
+			};
+		}
+		if (/\bViewer\b/i.test(clean)) return {
+			entityKey: "Viewer",
+			isSuperset: clean.includes("mediaListOptions"),
+			requiredFields: new Set(["id", "name"])
+		};
+		return null;
+	}
+	function isSubsetOf(subset, superset) {
+		for (const item of subset) if (!superset.has(item)) return false;
+		return true;
+	}
+	var AniList = (() => {
+		const limiter = new RateLimiter({
+			rate: 25,
+			max: 90,
+			burst: 1,
+			persistKey: "ala_anilist_api_resume_at"
+		});
+		const entityCache = new Map();
+		const inflightExact = new Map();
+		const inflightEntities = new Map();
+		const ENTITY_TTL = 18e4;
+		const pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+		function getCsrfToken() {
+			const win = pageWin();
+			if (typeof win.al_token === "string" && win.al_token) return win.al_token;
+			try {
+				const meta = win.document?.querySelector("meta[name=\"csrf-token\"]");
+				if (meta?.content) return meta.content;
+			} catch (_) {}
+			try {
+				const scripts = win.document?.querySelectorAll("head script") || [];
+				for (const s of scripts) {
+					const m = s.textContent?.match(/window\.al_token\s*=\s*['"]([^'"]+)['"]/);
+					if (m && m[1]) return m[1];
+				}
+			} catch (_) {}
+			return null;
+		}
+		const clearViewer = () => {
+			CoreHooks.setSessionClearing(true);
+			try {
+				for (const k of ANILIST_SESSION_KEYS) store$1.del(k);
+				CoreHooks.clearAuth();
+			} finally {
+				CoreHooks.setSessionClearing(false);
+			}
+		};
+		function syncFromPage() {
+			const win = pageWin();
+			const doc = win.document || document;
+			if (isLoggedOutNav(doc)) {
+				clearViewer();
+				return;
+			}
+			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+			if (nuxtUser?.id) {
+				const nuxtId = Number(nuxtUser.id);
+				const storedId = Number(store$1.get("al_user_id", 0));
+				if (storedId && storedId !== nuxtId) clearViewer();
+				return;
+			}
+			const navName = navUserName(doc);
+			if (navName) {
+				const storedName = store$1.get("al_username", null);
+				if (storedName && storedName.toLowerCase() !== navName.toLowerCase()) clearViewer();
+			}
+		}
+		function isBrowserLoggedIn() {
+			const win = pageWin();
+			const doc = win.document || document;
+			syncFromPage();
+			if (isLoggedOutNav(doc)) return false;
+			if ((win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user)?.id) return true;
+			if (hasLoggedInNav(doc)) return true;
+			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
+		}
+		const header = (res, name) => {
+			try {
+				return res?.headers?.get?.(name) ?? null;
+			} catch (_) {
+				return null;
+			}
+		};
+		function resetDelay(res) {
+			const retry = Number(header(res, "Retry-After"));
+			if (retry > 0) return Math.min(retry * 1e3, 12e4);
+			const reset = Number(header(res, "X-RateLimit-Reset"));
+			if (reset > 0) return Math.min((reset > 0xe8d4a51000 ? reset : reset * 1e3) - Date.now(), 12e4);
+			return 0;
+		}
+		function handle(res) {
+			const advertised = Number(header(res, "X-RateLimit-Limit"));
+			if (advertised > 0) limiter.setRate(Math.floor(advertised * .85));
+			if (res?.status === 429) return limiter.limit(resetDelay(res) || 6e4);
+			const remaining = header(res, "X-RateLimit-Remaining");
+			if (remaining != null && Number(remaining) <= 1) limiter.limit(resetDelay(res));
+		}
+		async function executeNetworkRequest(q, variables, retries, forceFresh = false) {
+			const csrfToken = getCsrfToken();
+			const win = pageWin();
+			const fetchFn = (typeof win.fetch === "function" ? win.fetch : fetch).bind(win);
+			const backoff = () => sleep(1500 * (4 - retries));
+			const endpoint = `${win.location?.origin || "https://anilist.co"}/graphql`;
+			const headers = {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+				...forceFresh ? { "Cache-Control": "no-cache" } : {}
+			};
+			if (csrfToken) headers["X-CSRF-TOKEN"] = csrfToken;
+			let res;
+			try {
+				await limiter.acquire();
+				res = await fetchFn(endpoint, {
+					method: "POST",
+					headers,
+					cache: forceFresh ? "no-store" : void 0,
+					credentials: "include",
+					body: JSON.stringify({
+						query: q,
+						variables
+					})
+				});
+			} catch (e) {
+				if (retries > 0) {
+					await backoff();
+					return executeNetworkRequest(q, variables, retries - 1, forceFresh);
+				}
+				throw new Error(`AniList network error: ${e?.message || e}`);
+			}
+			handle(res);
+			if (!res) throw new Error("AniList network error: empty response");
+			if ((res.status === 429 || res.status >= 500) && retries > 0) {
+				if (res.status >= 500) await backoff();
+				return executeNetworkRequest(q, variables, retries - 1, forceFresh);
+			}
+			let json = null;
+			try {
+				json = await res.json();
+			} catch (_) {}
+			const message = json?.errors?.length ? json.errors.map((e) => e.message).join("; ") : "";
+			if (res.status === 401 || /invalid token|unauthenticated|unauthorized/i.test(message)) {
+				clearViewer();
+				throw authError("AniList", "AniList session unauthenticated — please log in to AniList.");
+			}
+			if (message) throw new Error(message);
+			if (!res.ok || !json) throw new Error(`AniList API HTTP ${res.status}`);
+			return json.data;
+		}
+		async function query(q, variables = {}, optionsOrRetries) {
+			const opts = typeof optionsOrRetries === "number" ? { retries: optionsOrRetries } : optionsOrRetries || {};
+			const retries = opts.retries ?? 3;
+			if (/\bmutation\b/i.test(q)) {
+				invalidate();
+				return executeNetworkRequest(q, variables, retries);
+			}
+			const meta = parseEntityMeta(q, variables);
+			const now = Date.now();
+			const exactKey = `${q}\u0001${JSON.stringify(variables)}`;
+			if (!opts.forceFresh && meta) {
+				const cached = entityCache.get(meta.entityKey);
+				if (cached && now - cached.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, cached.fields)) {
+					logDebug("[ANILIST API] 🎯 Cache HIT via Subset matching:", meta.entityKey);
+					return cached.data;
+				}
+			}
+			if (meta && !opts.forceFresh) {
+				const flyingEntity = inflightEntities.get(meta.entityKey);
+				if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
+					logDebug("[ANILIST API] 🔗 Attached to in-flight Superset request:", meta.entityKey);
+					return flyingEntity.promise;
+				}
+			}
+			const flyingExact = inflightExact.get(exactKey);
+			if (flyingExact && !opts.forceFresh) return flyingExact;
+			const networkPromise = executeNetworkRequest(q, variables, retries, opts.forceFresh).then((data) => {
+				if (meta && data) entityCache.set(meta.entityKey, {
+					time: Date.now(),
+					data,
+					isSuperset: meta.isSuperset,
+					fields: meta.requiredFields
+				});
+				return data;
+			}).finally(() => {
+				inflightExact.delete(exactKey);
+				if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) inflightEntities.delete(meta.entityKey);
+			});
+			inflightExact.set(exactKey, networkPromise);
+			if (meta) {
+				const existing = inflightEntities.get(meta.entityKey);
+				if (!existing || !existing.isSuperset && meta.isSuperset) inflightEntities.set(meta.entityKey, {
+					promise: networkPromise,
+					isSuperset: meta.isSuperset,
+					fields: meta.requiredFields
+				});
+			}
+			return networkPromise;
+		}
+		function formatMediaListResult(mlc) {
+			const mergedCollection = {
+				user: mlc.user,
+				lists: mlc.lists || []
+			};
+			const seenEntryIds = new Set();
+			const allEntries = [];
+			for (const list of mergedCollection.lists) for (const entry of list.entries || []) if (!seenEntryIds.has(entry.id)) {
+				seenEntryIds.add(entry.id);
+				allEntries.push(entry);
+			}
+			return {
+				collection: mergedCollection,
+				lists: mergedCollection.lists,
+				allEntries,
+				user: mergedCollection.user
+			};
+		}
+		function parseRpcMediaList(payload) {
+			if (!payload || typeof payload !== "object") return null;
+			const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
+			if (mlc && Array.isArray(mlc.lists)) return formatMediaListResult(mlc);
+			const entities = payload.entities || payload;
+			const entriesMap = entities?.listEntry || entities?.mediaListEntry;
+			if (entriesMap && typeof entriesMap === "object") {
+				const mediaMap = entities.media || entities.listEntryMedia || {};
+				const allEntries = [];
+				for (const rawEntry of Object.values(entriesMap)) {
+					if (!rawEntry || typeof rawEntry !== "object") continue;
+					const mediaId = rawEntry.mediaId || (typeof rawEntry.media === "number" ? rawEntry.media : rawEntry.media?.id);
+					if (!mediaId) continue;
+					const mediaObj = typeof rawEntry.media === "object" && rawEntry.media !== null ? rawEntry.media : mediaMap[mediaId] || { id: mediaId };
+					allEntries.push({
+						...rawEntry,
+						mediaId,
+						media: mediaObj
+					});
+				}
+				if (allEntries.length === 0) return null;
+				const userObj = entities.user ? Object.values(entities.user)[0] : void 0;
+				const lists = [];
+				if (entities.listSection && typeof entities.listSection === "object") for (const sec of Object.values(entities.listSection)) {
+					if (!sec) continue;
+					lists.push({
+						name: sec.name || "",
+						isCustomList: !!sec.isCustomList,
+						status: sec.status,
+						entries: Array.isArray(sec.entries) ? sec.entries.map((id) => entriesMap[id]).filter(Boolean) : []
+					});
+				}
+				const user = userObj && userObj.id ? {
+					id: Number(userObj.id),
+					name: String(userObj.name || "")
+				} : void 0;
+				return {
+					collection: {
+						lists,
+						user
+					},
+					allEntries,
+					lists,
+					user
+				};
+			}
+			return null;
+		}
+		function tryGetCachedMediaList(target, type, userId, userName) {
+			const win = pageWin();
+			const bridge = CoreHooks.getCacheBridge();
+			const t = type.toUpperCase();
+			const isId = typeof target === "number" || /^\d+$/.test(String(target));
+			const id = userId || (isId ? Number(target) : void 0);
+			const name = userName || (!isId ? String(target).trim().toLowerCase() : void 0);
+			const userMap = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
+			const idMap = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
+			const resolvedId = id || (name && userMap ? userMap.get(name) : void 0);
+			const resolvedName = name || (resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0);
+			const entityKeys = [];
+			if (resolvedId) entityKeys.push(`MediaListCollection:${t}:${resolvedId}`);
+			if (resolvedName) entityKeys.push(`MediaListCollection:${t}:${resolvedName}`);
+			for (const k of entityKeys) {
+				const cached = entityCache.get(k);
+				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection) {
+					logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:", k);
+					return formatMediaListResult(cached.data.MediaListCollection);
+				}
+			}
+			const gqlStore = bridge ? bridge.getGqlStore() : win.__ALFL_GQL_STORE__;
+			if (gqlStore) {
+				const gqlKeys = [];
+				if (resolvedId) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedId}:{}`);
+				if (resolvedName) gqlKeys.push(`gql:MediaListCollection:${t}:${resolvedName}:{}`);
+				for (const k of gqlKeys) {
+					const cached = gqlStore.get(k);
+					if (cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
+						const raw = new TextDecoder().decode(cached.snap.buf);
+						const json = JSON.parse(raw);
+						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
+						if (mlc && Array.isArray(mlc.lists)) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
+							const result = formatMediaListResult(mlc);
+							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							return result;
+						}
+					} catch (_) {}
+				}
+				for (const [k, cached] of gqlStore.entries()) {
+					if (!k.startsWith(`gql:MediaListCollection:${t}:`)) continue;
+					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
+					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
+					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.snap?.buf) try {
+						const raw = new TextDecoder().decode(cached.snap.buf);
+						const json = JSON.parse(raw);
+						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
+						if (mlc && Array.isArray(mlc.lists)) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):", k);
+							const result = formatMediaListResult(mlc);
+							if (resolvedId) entityCache.set(`MediaListCollection:${t}:${resolvedId}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							if (resolvedName) entityCache.set(`MediaListCollection:${t}:${resolvedName}`, {
+								time: Date.now(),
+								data: { MediaListCollection: mlc },
+								isSuperset: true,
+								fields: new Set(KNOWN_LIST_FIELDS)
+							});
+							return result;
+						}
+					} catch (_) {}
+				}
+			}
+			const rpcCache = bridge ? bridge.getRpcCache() : win.__ALFL_RPC_CACHE__;
+			if (rpcCache) {
+				const rpcKeys = [];
+				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
+				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
+				for (const k of rpcKeys) {
+					const cached = rpcCache.get(k);
+					if (cached && Date.now() - cached.time < 3e5 && cached.msg) {
+						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
+						if (result && result.allEntries.length > 0) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:", k);
+							return result;
+						}
+					}
+				}
+				for (const [k, cached] of rpcCache.entries()) {
+					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
+					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
+					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
+					if ((matchId || matchName) && cached && Date.now() - cached.time < 3e5 && cached.msg) {
+						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
+						if (result && result.allEntries.length > 0) {
+							logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):", k);
+							return result;
+						}
+					}
+				}
+			}
+			return null;
+		}
+		async function getMediaList(target, type = "ANIME", options) {
+			const isId = typeof target === "number" || /^\d+$/.test(String(target));
+			const userId = options?.userId || (isId ? Number(target) : void 0);
+			const userName = options?.userName || (!isId ? String(target).trim() : void 0);
+			if (!options?.forceFresh) {
+				const cached = tryGetCachedMediaList(target, type, userId, userName);
+				if (cached) return cached;
+			}
+			const win = pageWin();
+			const bridge = CoreHooks.getCacheBridge();
+			const rpcInflight = bridge ? bridge.getRpcInflight() : win.__ALFL_RPC_INFLIGHT__;
+			if (rpcInflight && !options?.forceFresh) {
+				const t = type.toUpperCase();
+				const userMap = bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__;
+				const idMap = bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__;
+				const resolvedId = userId || (userName && userMap ? userMap.get(userName.toLowerCase()) : void 0);
+				const resolvedName = userName ? userName.toLowerCase() : resolvedId && idMap ? idMap.get(resolvedId)?.toLowerCase() : void 0;
+				const rpcKeys = [];
+				if (resolvedId) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedId}:{}`);
+				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
+				const checkInflight = async (k, flight) => {
+					try {
+						logDebug("[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
+						const msg = await Promise.race([flight.promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5e3))]);
+						const parsed = parseRpcMediaList(msg?.result ?? msg);
+						if (parsed && parsed.allEntries.length > 0) {
+							logDebug("[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
+							return parsed;
+						}
+					} catch (_) {}
+					return null;
+				};
+				for (const k of rpcKeys) {
+					const flight = rpcInflight.get(k);
+					if (flight) {
+						const res = await checkInflight(k, flight);
+						if (res) return res;
+					}
+				}
+				for (const [k, flight] of rpcInflight.entries()) {
+					if (!k.startsWith(`rpc:MediaListCollection:${t}:`)) continue;
+					const matchId = resolvedId && k.includes(`:${resolvedId}:`);
+					const matchName = resolvedName && k.toLowerCase().includes(`:${resolvedName.toLowerCase()}:`);
+					if (matchId || matchName) {
+						const res = await checkInflight(k, flight);
+						if (res) return res;
+					}
+				}
+			}
+			const mlc = (await query(`query ($userId: Int, $userName: String, $type: MediaType) {
+      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
+        user { id name }
+        lists {
+          name
+          isCustomList
+          status
+          entries {
+            id
+            mediaId
+            status
+            score
+            progress
+            progressVolumes
+            repeat
+            priority
+            notes
+            customLists
+            startedAt { year month day }
+            completedAt { year month day }
+            media {
+              id
+              idMal
+              format
+              episodes
+              chapters
+              status
+              title { userPreferred english romaji native }
+            }
+          }
+        }
+      }
+    }`, {
+				userId: userId || void 0,
+				userName: userId ? void 0 : userName || void 0,
+				type
+			}, { forceFresh: options?.forceFresh }))?.MediaListCollection;
+			if (!mlc || !Array.isArray(mlc.lists)) throw new Error("Unexpected MediaListCollection response shape");
+			return formatMediaListResult(mlc);
+		}
+		async function viewer(forceFresh = false) {
+			const doc = pageWin().document || document;
+			syncFromPage();
+			if (isLoggedOutNav(doc)) return null;
+			if (!forceFresh) {
+				const name = store$1.get("al_username", null);
+				const fmt = store$1.get("al_score_format", null);
+				const id = Number(store$1.get("al_user_id", 0));
+				if (name && fmt && id) return {
+					id,
+					name,
+					scoreFormat: fmt
+				};
+			}
+			if (!hasAuth()) return null;
+			const d = await query("query { Viewer { id name mediaListOptions { scoreFormat } } }", {}).catch((e) => {
+				if (e?.auth) throw e;
+				return null;
+			});
+			if (d?.Viewer) {
+				store$1.set("al_user_id", d.Viewer.id);
+				store$1.set("al_username", d.Viewer.name);
+				store$1.set("al_score_format", d.Viewer.mediaListOptions.scoreFormat);
+				return {
+					id: d.Viewer.id,
+					name: d.Viewer.name,
+					scoreFormat: d.Viewer.mediaListOptions.scoreFormat
+				};
+			}
+			return null;
+		}
+		const invalidate = (entityKeyPrefix) => {
+			if (!entityKeyPrefix) {
+				entityCache.clear();
+				inflightEntities.clear();
+			} else {
+				for (const k of entityCache.keys()) if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
+				for (const k of inflightEntities.keys()) if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
+			}
+			const bridge = CoreHooks.getCacheBridge();
+			if (bridge) bridge.clear();
+			else pageWin().__ALFL_CLEAR__?.();
+		};
+		const invalidateMediaList = (target, type) => {
+			if (!target) return invalidate("MediaListCollection");
+			const t = type ? type.toUpperCase() : "";
+			const prefix = t ? `MediaListCollection:${t}:${String(target).toLowerCase()}` : `MediaListCollection:`;
+			invalidate(prefix);
+		};
+		const hasAuth = () => isBrowserLoggedIn();
+		const resumeAt = () => limiter.resumeAt;
+		return {
+			query,
+			getMediaList,
+			viewer,
+			clearViewer,
+			invalidate,
+			invalidateMediaList,
+			hasAuth,
+			resumeAt,
+			session: {
+				hasAuth,
+				clear: clearViewer,
+				syncFromPage
+			}
+		};
+	})();
+	var MediaData = (() => {
+		async function get(id, type, opts) {
+			try {
+				return (await AniList.query(`query($id:Int,$type:MediaType){ Media(id:$id,type:$type){
+          id idMal format title { userPreferred english romaji native }
+          episodes chapters status season seasonYear nextAiringEpisode { episode }
+          mediaListEntry { score progress status completedAt { year month day } }
+        } }`, {
+					id: Number(id),
+					type
+				}))?.Media || null;
+			} catch (e) {
+				if (opts?.throwAuth && e?.auth) throw e;
+				logDebug("[MEDIA DATA] fetch failed:", e?.message || e);
+				return null;
+			}
+		}
+		async function save(id, _type, c) {
+			const entry = (await AniList.query(`mutation($mediaId:Int!,$score:Float,$progress:Int,$status:MediaListStatus,$completedAt:FuzzyDateInput){
+        SaveMediaListEntry(mediaId:$mediaId,score:$score,progress:$progress,status:$status,completedAt:$completedAt){
+          score progress status completedAt { year month day }
+        } }`, {
+				mediaId: Number(id),
+				score: c.score,
+				progress: c.progress,
+				status: c.status,
+				completedAt: c.completedAt
+			}))?.SaveMediaListEntry || null;
+			AniList.invalidate(`Media:${id}`);
+			AniList.invalidateMediaList();
+			return entry;
+		}
+		return {
+			get,
+			save
+		};
+	})();
+	var anilistApiClient = {
+		...AniList,
+		media: MediaData
+	};
 	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
 	var MANUAL_OVERRIDES_ENABLED_KEY = "manualOverridesEnabled";
 	function isManualOverridesEnabled() {

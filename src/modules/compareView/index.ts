@@ -1,9 +1,7 @@
-import { defineFeature } from '../../core/registry';
-import { Core } from '../../core/observer';
-import { addStyle } from '../../core/styles';
-import { debounce, logDebug, store, esc } from '../../utils/helpers';
-import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
-import { AniList, type MediaListEntryItem } from '../../api/anilist';
+import { defineModule } from '../../core/registry';
+import { debounce, store, esc } from '../../utils/helpers';
+import { compareRoute } from '../../utils/anilistDom';
+import type { MediaListEntryItem } from '../../api/anilist';
 
 export interface EntryData {
   el: HTMLElement;
@@ -90,16 +88,16 @@ export function compareEntries(
   return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
 }
 
-defineFeature(
-  {
-    id: 'compareView',
-    key: 'compareViewEnabled',
-    section: 'AniList Enhancements',
-    def: false,
-    title: 'Compare View Improvements',
-    help: 'Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.'
-  },
-  () => {
+defineModule({
+  id: 'compareView',
+  key: 'compareViewEnabled',
+  section: 'AniList Enhancements',
+  layer: 'preload',
+  requiresReload: true,
+  def: false,
+  title: 'Compare View Improvements',
+  help: 'Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.',
+  setup(ctx) {
     const CSS_ID = 'ala-compare-style';
     const CSS = `
       .content.container.ala-compare-page-container {
@@ -381,7 +379,9 @@ defineFeature(
       }
     `;
 
-    addStyle(CSS_ID, CSS);
+    ctx.addStyle(CSS_ID, CSS);
+    // Keep #ala-compare-table outside ownUi so downstream modules like tierLabels see compare table mutations.
+    ctx.ownUi('#ala-compare-sidebar');
 
     const isComparePage = (): boolean => /\/(animelist|mangalist)\/compare/i.test(location.pathname);
 
@@ -394,34 +394,30 @@ defineFeature(
     let isCompareLoaded = false;
     let loadFailed = false;
     let isMutatingDOM = false;
+    let disposed = false;
     let loadAbortState: { abort: boolean } | null = null;
     let resizeCleanup: (() => void) | null = null;
     let indicatorTimer: ReturnType<typeof setTimeout> | null = null;
+    let prefetchRelease: (() => void) | null = null;
 
     function getCompareVue(): any {
-      const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-      const scrollerEl = win.document?.querySelector?.('.scroller') || document.querySelector('.scroller');
+      const scrollerEl = document.querySelector('.scroller');
       if (scrollerEl && (scrollerEl as any).__vue__?.$parent) {
         return (scrollerEl as any).__vue__.$parent;
       }
-      const compareEl = win.document?.querySelector?.('.compare') || document.querySelector('.compare');
+      const compareEl = document.querySelector('.compare');
       if (compareEl && (compareEl as any).__vue__) {
         return (compareEl as any).__vue__;
       }
       return null;
     }
 
-    const pageWin = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-    const setRpcBlock = (fn?: (query: string, vars: any) => boolean): void => {
-      pageWin.__ALFL_RPC_BLOCK__ = fn;
-    };
-
     const compareBlocker = (q?: string, vars?: any): boolean =>
-      isComparePage() && (/\bcompareWithAuthList\b/i.test(q || '') || Boolean(vars?.compareWithAuthList));
+      !loadFailed &&
+      isComparePage() &&
+      (/\bcompareWithAuthList\b/i.test(q || '') || Boolean(vars?.compareWithAuthList));
 
-    const installBlocker = () => {
-      setRpcBlock(compareBlocker);
-    };
+    ctx.hooks.blockRpc(compareBlocker);
 
     function disableNativeScrollers(listContainer?: HTMLElement): void {
       const root = listContainer?.parentElement || listContainer || document;
@@ -455,21 +451,14 @@ defineFeature(
       otherName?: string;
       type: 'ANIME' | 'MANGA';
     }> {
-      const type: 'ANIME' | 'MANGA' = location.pathname.toLowerCase().includes('mangalist') ? 'MANGA' : 'ANIME';
-      const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
-      const userMap: Map<string, number> | undefined = win.__ALFL_USER_MAP__;
+      const route = compareRoute();
+      const type: 'ANIME' | 'MANGA' = route?.type || (location.pathname.toLowerCase().includes('mangalist') ? 'MANGA' : 'ANIME');
+      const bridge = ctx.hooks.getCacheBridge();
+      const userMap = bridge?.getUserMap();
+      const idMap = bridge?.getIdMap();
 
-      let otherName: string | undefined;
+      let otherName: string | undefined = route?.userName;
       let otherId: number | undefined;
-
-      const urlMatch = location.pathname.match(/\/user\/([^/]+)\/(animelist|mangalist)\/compare/i);
-      if (urlMatch) {
-        try {
-          otherName = decodeURIComponent(urlMatch[1]);
-        } catch {
-          otherName = urlMatch[1];
-        }
-      }
 
       if (!otherName) {
         const queryUser = new URLSearchParams(location.search).get('user');
@@ -488,22 +477,15 @@ defineFeature(
 
       if (otherName && otherId) {
         if (userMap) userMap.set(otherName.toLowerCase(), otherId);
-        if (win.__ALFL_ID_MAP__) win.__ALFL_ID_MAP__.set(otherId, otherName);
+        if (idMap) idMap.set(otherId, otherName);
       }
 
+      ctx.api.session.syncFromPage?.();
       let viewerId = Number(store.get('al_user_id', 0)) || undefined;
       let viewerName = store.get<string | null>('al_username', null) || undefined;
 
       if (!viewerId || !viewerName) {
-        const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-        if (nuxtUser) {
-          if (!viewerId && nuxtUser.id) viewerId = Number(nuxtUser.id);
-          if (!viewerName && nuxtUser.name) viewerName = String(nuxtUser.name);
-        }
-      }
-
-      if (!viewerId || !viewerName) {
-        const viewer = await AniList.viewer();
+        const viewer = await ctx.api.viewer();
         if (viewer) {
           viewerId = viewer.id;
           viewerName = viewer.name;
@@ -753,6 +735,8 @@ defineFeature(
       isLoadingAll = true;
       const abortState = { abort: false };
       loadAbortState = abortState;
+      prefetchRelease?.();
+      prefetchRelease = ctx.hooks.setPrefetchPaused(true);
 
       indicatorTimer = setTimeout(() => {
         if (!abortState.abort && isComparePage()) {
@@ -768,17 +752,17 @@ defineFeature(
         const otherTarget = otherId || otherName;
 
         if (!viewerTarget || !otherTarget) {
-          logDebug('[COMPARE] Missing viewer or other user for getMediaList, keeping fallback');
+          ctx.debug.log('Missing viewer or other user for getMediaList, keeping fallback');
           loadFailed = true;
           return;
         }
 
         const [myListRes, otherListRes] = await Promise.all([
-          AniList.getMediaList(viewerTarget, type, {
+          ctx.api.getMediaList(viewerTarget, type, {
             userId: viewerId,
             userName: viewerId ? undefined : viewerName
           }),
-          AniList.getMediaList(otherTarget, type, {
+          ctx.api.getMediaList(otherTarget, type, {
             userId: otherId,
             userName: otherId ? undefined : otherName
           })
@@ -846,7 +830,7 @@ defineFeature(
           matchedNodes.push(row);
         }
 
-        logDebug('[COMPARE] Matched entries via MediaListCollection:', matchedNodes.length);
+        ctx.debug.log('Matched entries via MediaListCollection:', matchedNodes.length);
 
         const main = compareRoot.parentElement || document.querySelector('.ala-compare-main');
         if (!main) return;
@@ -934,26 +918,26 @@ defineFeature(
         lastProcessedCount = matchedNodes.length;
         isCompareLoaded = true;
 
-        installBlocker();
-
         updateStatusCounts(sidebar, matchedNodes);
         applyFilter(customTable, matchedNodes);
       } catch (err) {
         loadFailed = true;
-        setRpcBlock();
         console.error('[AL-Additions] CompareView getMediaList error:', err);
       } finally {
         isLoadingAll = false;
         loadAbortState = null;
+        if (prefetchRelease) {
+          prefetchRelease();
+          prefetchRelease = null;
+        }
         setLoadIndicator(sidebar, null);
       }
     }
 
     function cleanup(): void {
-      if (!isComparePage()) {
-        setRpcBlock();
-      } else {
-        installBlocker();
+      if (prefetchRelease) {
+        prefetchRelease();
+        prefetchRelease = null;
       }
       if (indicatorTimer) {
         clearTimeout(indicatorTimer);
@@ -1126,10 +1110,7 @@ defineFeature(
             isDesktop = nowDesktop;
           }
         };
-        window.addEventListener('resize', syncDetailsOpen);
-        resizeCleanup = () => {
-          window.removeEventListener('resize', syncDetailsOpen);
-        };
+        resizeCleanup = ctx.listen(window, 'resize', syncDetailsOpen);
 
         sidebar.querySelectorAll<HTMLInputElement>('.ala-compare-cb').forEach((cb) => {
           cb.addEventListener('change', () => {
@@ -1194,15 +1175,13 @@ defineFeature(
         applySort(compareRoot, entries, activeSortCol, activeSortDir);
       }
 
-      installBlocker();
-
       if (!isLoadingAll && !isCompareLoaded && !loadFailed && sidebar) {
         loadAllEntriesViaMediaList(compareRoot, sidebar);
       }
     }
 
     const checkView = debounce(() => {
-      if (isMutatingDOM) return;
+      if (disposed || isMutatingDOM) return;
       const path = location.pathname;
       if (!isComparePage()) {
         if (currentRoute) {
@@ -1218,7 +1197,6 @@ defineFeature(
         activeSortDir = 'desc';
         for (const s of STATUSES) activeStatuses.add(s);
         cleanup();
-        installBlocker();
       }
 
       if (isCompareLoaded) return;
@@ -1235,17 +1213,32 @@ defineFeature(
       }
     }, 60);
 
-    installBlocker();
-    Core.ready(checkView);
-    Core.onNavigate(() => {
-      installBlocker();
+    ctx.onRoute(() => isComparePage(), (rc) => {
+      if (disposed) return;
+      if (rc.url.pathname !== currentRoute) {
+        currentRoute = rc.url.pathname;
+        activeSortCol = 'otherScore';
+        activeSortDir = 'desc';
+        for (const s of STATUSES) activeStatuses.add(s);
+        cleanup();
+      }
       checkView();
+      return () => {
+        currentRoute = '';
+        cleanup();
+      };
     });
-    Core.onBodyMutation(() => {
-      if (isComparePage() && !isMutatingDOM) {
-        installBlocker();
+    ctx.ready(checkView);
+    ctx.onNav(checkView);
+    ctx.onBodyMutation(() => {
+      if (!disposed && isComparePage() && !isMutatingDOM) {
         checkView();
       }
     });
+    ctx.onCleanup(() => {
+      disposed = true;
+      currentRoute = '';
+      cleanup();
+    });
   }
-);
+});
