@@ -1,49 +1,48 @@
-import { defineFeature } from '../../core/registry';
-import { markBuiltIn } from '../../utils/standalone';
+import { defineModule } from '../../core/registry';
+import { isBuiltInRunning, markBuiltIn } from '../../utils/standalone';
+import { store as gmStore } from '../../utils/helpers';
 import { CFG, GQL_ORIGIN, MEDIA_ORIGIN, attempt } from './config';
 import {
   win,
   doc,
+  setCoreHooks,
   initUserMap,
   registerGlobalBridges,
   getViewerFromWindow,
   rememberUser,
   incEpoch,
   setFreshFloor,
+  store as gqlStore,
+  rpcCache,
+  rpcInflight,
+  userMap,
+  idToUserMap,
   inflight,
-  navListeners
+  navListeners,
+  clearGlobalCache
 } from './state';
-import {
-  installLazyMedia,
-  installRowSkipping,
-  installObserverCoalescing,
-  installFastInnerText,
-  installProbeMemo,
-  installTierSupport
-} from './domOptimizers';
-import { hookWorker } from './worker';
-import {
-  loadRoutes,
-  triggerEarlyStart,
-  scheduleAutoPrefetch,
-  installPointerPrefetch
-} from './routes';
+import { installLazyMedia, installRowSkipping, installObserverCoalescing } from './domOptimizers';
+import { hookWorker, clearLastAuth } from './worker';
+import { loadRoutes, triggerEarlyStart, scheduleAutoPrefetch, installPointerPrefetch } from './routes';
 import { installGraphQLLayer } from './graphql';
-import { store as gmStore } from '../../utils/helpers';
 
-defineFeature(
-  {
-    id: 'fastLoad',
-    key: 'fastLoadEnabled',
-    section: 'AniList Enhancements',
-    layer: 'intercept',
-    def: false,
-    title: 'AniList Fast Load',
-    help: 'Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.'
+defineModule({
+  id: 'fastLoad',
+  key: 'fastLoadEnabled',
+  section: 'AniList Enhancements',
+  layer: 'intercept',
+  requiresReload: true,
+  def: false,
+  title: 'AniList Fast Load',
+  help: 'Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.',
+  standalone: {
+    name: 'AniList Fast Load',
+    probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning('fastLoad')
   },
-  () => {
+  setup(ctx) {
     if (win.top !== win.self) return;
     if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
+      ctx.setStandalonePaused(true);
       console.warn(
         '[AL-Additions] Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.'
       );
@@ -52,12 +51,24 @@ defineFeature(
 
     win.__ALA_FAST_LOAD__ = '0.4.3';
     markBuiltIn('fastLoad');
+    setCoreHooks(ctx.hooks);
+
+    ctx.hooks.registerCacheBridge({
+      getGqlStore: () => gqlStore,
+      getRpcCache: () => rpcCache,
+      getRpcInflight: () => rpcInflight,
+      getUserMap: () => userMap,
+      getIdMap: () => idToUserMap,
+      clear: () => clearGlobalCache(),
+      clearAuth: () => clearLastAuth()
+    });
 
     let yieldedToStandalone = false;
     const yielded = (): boolean => {
       if (yieldedToStandalone) return true;
       if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
         yieldedToStandalone = true;
+        ctx.setStandalonePaused(true);
         console.warn(
           '[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.'
         );
@@ -82,18 +93,8 @@ defineFeature(
       }
     });
 
-    attempt(() => {
-      const fire = () => navListeners.forEach(attempt);
-      for (const name of ['pushState', 'replaceState'] as const) {
-        const orig = win.history[name];
-        win.history[name] = function (this: History, ...args: any[]) {
-          const r = orig.apply(this, args);
-          fire();
-          return r;
-        };
-      }
-      win.addEventListener('popstate', fire);
-    });
+    navListeners.length = 0;
+    ctx.onNav(() => navListeners.forEach(attempt));
 
     initUserMap();
     registerGlobalBridges();
@@ -110,7 +111,7 @@ defineFeature(
     });
 
     let hiddenAt = 0;
-    doc.addEventListener('visibilitychange', () => {
+    ctx.listen(doc, 'visibilitychange', () => {
       if (doc.hidden) {
         hiddenAt = Date.now();
         return;
@@ -123,13 +124,11 @@ defineFeature(
     });
 
     if (CFG.gqlTtl > 0 && typeof win.fetch === 'function') {
-      installGraphQLLayer(yielded);
+      const uninstallFetch = installGraphQLLayer(yielded);
+      ctx.onCleanup(uninstallFetch);
       hookWorker(yielded);
     }
     if (CFG.coalesceObservers) attempt(installObserverCoalescing);
-    if (CFG.fastInnerText) attempt(installFastInnerText);
-    if (CFG.memoSelectorProbes) attempt(installProbeMemo);
-    if (CFG.blockTierInData || CFG.tierAssist) attempt(installTierSupport);
     if (CFG.lazyMedia) attempt(installLazyMedia);
     if (CFG.rowSkipping) attempt(installRowSkipping);
 
@@ -143,9 +142,13 @@ defineFeature(
 
     if (CFG.prefetch) {
       navListeners.push(() => scheduleAutoPrefetch(yielded, 500));
-      if (doc.readyState !== 'loading') scheduleAutoPrefetch(yielded, 1000);
-      else doc.addEventListener('DOMContentLoaded', () => scheduleAutoPrefetch(yielded, 1000), { once: true });
-      installPointerPrefetch(yielded);
+      ctx.ready(() => scheduleAutoPrefetch(yielded, 1000));
+      installPointerPrefetch(yielded, ctx.listen);
     }
+
+    ctx.onCleanup(() => {
+      navListeners.length = 0;
+      setCoreHooks(null);
+    });
   }
-);
+});

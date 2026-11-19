@@ -3,11 +3,6 @@ export const CFG = {
   rowSkipping: false,
   coalesceObservers: false,
   observerBatchMs: 80,
-  fastInnerText: false,
-  memoSelectorProbes: false,
-  blockTierInData: false,
-  tierAssist: false,
-  tierAssistMs: 250,
 
   gqlTtl: 15_000,
   gqlStaleTtl: 5 * 60_000,
@@ -33,9 +28,7 @@ export const stats = {
   prefetched: 0,
   earlyStarts: 0,
   observerBatches: 0,
-  observerRecordsMerged: 0,
-  probesShared: 0,
-  labelsReleased: 0
+  observerRecordsMerged: 0
 };
 
 export const attempt = <T>(fn: () => T): T | undefined => {

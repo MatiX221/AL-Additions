@@ -1,6 +1,7 @@
 import {
   win,
   doc,
+  coreHooks,
   userMap,
   pausedUntil,
   getViewerFromWindow,
@@ -255,7 +256,7 @@ const prefetched = new Map<string, number>();
 let dwellTimer: any = 0;
 
 export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
-  if (yielded()) return;
+  if (yielded() || coreHooks?.isPrefetchSuppressed()) return;
   const now = Date.now();
   if (doc.hidden || now < pausedUntil || (navigator as any).connection?.saveData) return;
 
@@ -324,7 +325,7 @@ export function scheduleAutoPrefetch(yielded: () => boolean, delay = 600) {
 }
 
 export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
-  if (!CFG.prefetch || yielded()) return;
+  if (!CFG.prefetch || yielded() || coreHooks?.isPrefetchSuppressed()) return;
   const now = Date.now();
   if (doc.hidden || now < pausedUntil || (navigator as any).connection?.saveData) return;
 
@@ -397,11 +398,16 @@ export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
   }
 }
 
-export function installPointerPrefetch(yielded: () => boolean) {
+export function installPointerPrefetch(
+  yielded: () => boolean,
+  listen: (t: EventTarget, type: string, fn: any, opts?: any) => void = (t, type, fn, opts) =>
+    t.addEventListener(type, fn, opts)
+) {
   const linkOf = (event: any) => event.target?.closest?.('a[href]') || null;
   const opts = { capture: true, passive: true };
 
-  doc.addEventListener(
+  listen(
+    doc,
     'pointerover',
     (event: any) => {
       if (event.pointerType && event.pointerType !== 'mouse') return;
@@ -411,8 +417,9 @@ export function installPointerPrefetch(yielded: () => boolean) {
     },
     opts
   );
-  doc.addEventListener('pointerout', () => clearTimeout(dwellTimer), opts);
-  doc.addEventListener(
+  listen(doc, 'pointerout', () => clearTimeout(dwellTimer), opts);
+  listen(
+    doc,
     'pointerdown',
     (event: any) => {
       const anchor = linkOf(event);

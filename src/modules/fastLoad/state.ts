@@ -1,9 +1,15 @@
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
+import type { CoreHooksApi } from '../../types';
 import { store as gmStore } from '../../utils/helpers';
 import { stats, attempt } from './config';
 
 export const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
 export const doc: Document = win.document;
+
+export let coreHooks: CoreHooksApi | null = null;
+export function setCoreHooks(hooks: CoreHooksApi | null): void {
+  coreHooks = hooks;
+}
 
 export const navListeners: Array<() => void> = [];
 export const onNav = (fn: () => void) => navListeners.push(fn);

@@ -5522,11 +5522,6 @@
 		rowSkipping: false,
 		coalesceObservers: false,
 		observerBatchMs: 80,
-		fastInnerText: false,
-		memoSelectorProbes: false,
-		blockTierInData: false,
-		tierAssist: false,
-		tierAssistMs: 250,
 		gqlTtl: 15e3,
 		gqlStaleTtl: 3e5,
 		gqlMaxBytes: 67108864,
@@ -5548,9 +5543,7 @@
 		prefetched: 0,
 		earlyStarts: 0,
 		observerBatches: 0,
-		observerRecordsMerged: 0,
-		probesShared: 0,
-		labelsReleased: 0
+		observerRecordsMerged: 0
 	};
 	var attempt = (fn) => {
 		try {
@@ -5560,6 +5553,10 @@
 	var idle = (win, fn, timeout = 1500) => "requestIdleCallback" in win ? win.requestIdleCallback(fn, { timeout }) : setTimeout(fn, 0);
 	var win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 	var doc = win.document;
+	var coreHooks = null;
+	function setCoreHooks(hooks) {
+		coreHooks = hooks;
+	}
 	var navListeners = [];
 	var onNav = (fn) => navListeners.push(fn);
 	var userMap = new Map();
@@ -5914,101 +5911,6 @@
 			win.MutationObserver = CoalescedMutationObserver;
 		}
 	}
-	function installFastInnerText() {
-		const proto = win.HTMLElement?.prototype || HTMLElement.prototype;
-		const desc = Object.getOwnPropertyDescriptor(proto, "innerText");
-		if (!desc || !desc.get || !desc.configurable) return;
-		const LEAF = ".score, .value, .type, .percentage";
-		Object.defineProperty(proto, "innerText", {
-			...desc,
-			get() {
-				try {
-					if (this.childElementCount === 0 && this.matches(LEAF)) return (this.textContent || "").replace(/\s+/g, " ").trim();
-				} catch {}
-				return desc.get.call(this);
-			}
-		});
-	}
-	function installProbeMemo() {
-		const ElementProto = win.Element?.prototype || Element.prototype;
-		const native = ElementProto.querySelector;
-		let memo = null;
-		ElementProto.querySelector = function querySelector(sel) {
-			if (typeof sel === "string" && sel.charCodeAt(0) === 46 && sel.startsWith(".medialist.table.POINT_")) {
-				if (!memo) {
-					memo = new WeakMap();
-					queueMicrotask(() => {
-						memo = null;
-					});
-				}
-				let perEl = memo.get(this);
-				if (!perEl) memo.set(this, perEl = new Map());
-				if (perEl.has(sel)) {
-					stats.probesShared++;
-					return perEl.get(sel);
-				}
-				const r = native.call(this, sel);
-				perEl.set(sel, r);
-				return r;
-			}
-			return native.call(this, sel);
-		};
-	}
-	function installTierSupport() {
-		const DATA_VALUE = ".data .data-set .value";
-		const mark = (node) => {
-			if (!node || node.nodeType !== 1) return;
-			if (node.matches?.(DATA_VALUE)) node.dataset.tierModified = "true";
-			if (node.firstElementChild) for (const el of node.querySelectorAll(DATA_VALUE)) el.dataset.tierModified = "true";
-		};
-		const DONE_SCORE = ".medialist .score[data-tier-modified]";
-		const releases = new WeakMap();
-		let sweepTimer = 0;
-		const needsBadge = (el) => {
-			const attr = el.getAttribute("score");
-			if (!attr || !(parseFloat(attr) > 0)) return false;
-			const badge = el.firstElementChild;
-			return !badge || (badge.firstElementChild?.textContent || "").trim() !== attr.trim();
-		};
-		function sweep() {
-			sweepTimer = 0;
-			if (doc.hidden) return;
-			let released = 0;
-			for (const el of doc.querySelectorAll(DONE_SCORE)) {
-				const n = releases.get(el) || 0;
-				if (n >= 2 || !needsBadge(el)) continue;
-				releases.set(el, n + 1);
-				delete el.dataset.tierModified;
-				released++;
-			}
-			if (!released || !doc.body) return;
-			stats.labelsReleased += released;
-			const wake = doc.createComment("");
-			doc.body.appendChild(wake);
-			wake.remove();
-		}
-		const scheduleSweep = () => {
-			if (!sweepTimer) sweepTimer = setTimeout(() => attempt(sweep), CFG.tierAssistMs);
-		};
-		new (win.MutationObserver || MutationObserver)((records) => {
-			if (CFG.blockTierInData) for (const r of records) for (const n of r.addedNodes) try {
-				mark(n);
-			} catch {}
-			if (CFG.tierAssist) scheduleSweep();
-		}).observe(doc, CFG.tierAssist ? {
-			childList: true,
-			subtree: true,
-			attributes: true,
-			attributeFilter: ["score"]
-		} : {
-			childList: true,
-			subtree: true
-		});
-		if (CFG.tierAssist) doc.addEventListener("visibilitychange", () => {
-			if (!doc.hidden) scheduleSweep();
-		});
-		if (CFG.blockTierInData) attempt(() => mark(doc.documentElement));
-	}
 	var isTaxonomyQuery = (parsed) => /\bGenreCollection\b|\bMediaTagCollection\b/i.test(String(parsed?.query || ""));
 	var isMediaListQuery = (parsed) => /\bMediaListCollection\b/i.test(String(parsed?.query || ""));
 	var isViewerQuery = (parsed) => /\bViewer\b/i.test(String(parsed?.query || ""));
@@ -6054,6 +5956,9 @@
 	var workerOpts;
 	var WorkerCtor = null;
 	var lastAuth = "";
+	function clearLastAuth() {
+		lastAuth = "";
+	}
 	var RPC_MAX_ENTRIES = 32;
 	var clone = (v) => {
 		try {
@@ -6364,7 +6269,7 @@
 						const id = String(data.id || "");
 						if (id.startsWith("alfl_prefetch_")) return origPost.apply(this, [data, ...rest]);
 						const blocker = win.__ALFL_RPC_BLOCK__;
-						if (typeof blocker === "function" && blocker(String(data.params[1]), data.params[2])) {
+						if (coreHooks?.isRpcBlocked(String(data.params[1]), data.params[2]) || typeof blocker === "function" && blocker(String(data.params[1]), data.params[2])) {
 							logDebug("[FASTLOAD RPC] Blocked request:", JSON.stringify(data.params[2]).slice(0, 60));
 							const targetId = data.params[2]?.id || data.params[2]?.userId;
 							const pageId = data.params[4]?.page?.id || (targetId ? `listComparison-${targetId}` : "listComparison");
@@ -6418,7 +6323,7 @@
 						}
 						const h = data.params[3] || {};
 						const a = h.Authorization ?? h.authorization;
-						if (a) {
+						if (a && !coreHooks?.isSessionClearing()) {
 							lastAuth = String(a);
 							store$1.set("al_token_auth", lastAuth);
 						}
@@ -6678,7 +6583,7 @@
 			cache: init?.cache ?? (isRequest ? input.cache : void 0)
 		};
 		const authHeader = desc.headers.get("authorization");
-		if (authHeader && authHeader.startsWith("Bearer ")) {
+		if (authHeader && authHeader.startsWith("Bearer ") && !coreHooks?.isSessionClearing()) {
 			if (authHeader.slice(7).trim()) store$1.set("al_token_auth", authHeader);
 		}
 		const mediaList = isMediaListQuery(parsed);
@@ -6695,8 +6600,8 @@
 		if (init?.signal?.aborted) return nativeFetch(input, init);
 		if (!replay) attempt(() => rememberQuery(desc, parsed));
 		const blocker = win.__ALFL_RPC_BLOCK__;
-		if (typeof blocker === "function" && blocker(parsed?.query, parsed?.variables)) {
-			logDebug("[FASTLOAD] Blocked GQL fetch via __ALFL_RPC_BLOCK__:", JSON.stringify(parsed?.variables));
+		if (coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) || typeof blocker === "function" && blocker(parsed?.query, parsed?.variables)) {
+			logDebug("[FASTLOAD] Blocked GQL fetch:", JSON.stringify(parsed?.variables));
 			const dummy = { data: { Page: {
 				pageInfo: {
 					total: 0,
@@ -6800,7 +6705,7 @@
 	}
 	function installGraphQLLayer(yielded) {
 		const nativeFetch = win.fetch.bind(win);
-		win.fetch = async function fetch(input, init) {
+		const wrappedFetch = async function fetch(input, init) {
 			if (yielded()) return nativeFetch(input, init);
 			let job = null;
 			try {
@@ -6823,6 +6728,10 @@
 				return p;
 			}
 			return cachedFetch(nativeFetch, job, input, init, init?.__alfl === "replay");
+		};
+		win.fetch = wrappedFetch;
+		return () => {
+			if (win.fetch === wrappedFetch) win.fetch = nativeFetch;
 		};
 	}
 	var sameId = (a, b) => a === b || typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
@@ -7072,7 +6981,7 @@
 	var prefetched = new Map();
 	var dwellTimer = 0;
 	function prefetchFor(anchor, yielded) {
-		if (yielded()) return;
+		if (yielded() || coreHooks?.isPrefetchSuppressed()) return;
 		const now = Date.now();
 		if (doc.hidden || now < pausedUntil || navigator.connection?.saveData) return;
 		let url;
@@ -7126,7 +7035,7 @@
 		}, delay);
 	}
 	function autoPrefetchListsForCurrentRoute(yielded) {
-		if (!CFG.prefetch || yielded()) return;
+		if (!CFG.prefetch || yielded() || coreHooks?.isPrefetchSuppressed()) return;
 		const now = Date.now();
 		if (doc.hidden || now < pausedUntil || navigator.connection?.saveData) return;
 		const path = win.location.pathname;
@@ -7175,119 +7084,128 @@
 			}, 300);
 		}
 	}
-	function installPointerPrefetch(yielded) {
+	function installPointerPrefetch(yielded, listen = (t, type, fn, opts) => t.addEventListener(type, fn, opts)) {
 		const linkOf = (event) => event.target?.closest?.("a[href]") || null;
 		const opts = {
 			capture: true,
 			passive: true
 		};
-		doc.addEventListener("pointerover", (event) => {
+		listen(doc, "pointerover", (event) => {
 			if (event.pointerType && event.pointerType !== "mouse") return;
 			const anchor = linkOf(event);
 			clearTimeout(dwellTimer);
 			if (anchor) dwellTimer = setTimeout(() => prefetchFor(anchor, yielded), CFG.prefetchDwellMs);
 		}, opts);
-		doc.addEventListener("pointerout", () => clearTimeout(dwellTimer), opts);
-		doc.addEventListener("pointerdown", (event) => {
+		listen(doc, "pointerout", () => clearTimeout(dwellTimer), opts);
+		listen(doc, "pointerdown", (event) => {
 			const anchor = linkOf(event);
 			if (anchor) prefetchFor(anchor, yielded);
 		}, opts);
 	}
-	defineFeature({
+	defineModule({
 		id: "fastLoad",
 		key: "fastLoadEnabled",
 		section: "AniList Enhancements",
 		layer: "intercept",
+		requiresReload: true,
 		def: false,
 		title: "AniList Fast Load",
-		help: "Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start."
-	}, () => {
-		if (win.top !== win.self) return;
-		if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
-			console.warn("[AL-Additions] Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.");
-			return;
-		}
-		win.__ALA_FAST_LOAD__ = "0.4.3";
-		markBuiltIn("fastLoad");
-		let yieldedToStandalone = false;
-		const yielded = () => {
-			if (yieldedToStandalone) return true;
+		help: "Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.",
+		standalone: {
+			name: "AniList Fast Load",
+			probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning("fastLoad")
+		},
+		setup(ctx) {
+			if (win.top !== win.self) return;
 			if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
-				yieldedToStandalone = true;
-				console.warn("[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.");
-			}
-			return yieldedToStandalone;
-		};
-		attempt(() => {
-			const parent = doc.head || doc.documentElement;
-			for (const [href, cors] of [
-				[GQL_ORIGIN, true],
-				[MEDIA_ORIGIN, false],
-				["https://fonts.googleapis.com", false],
-				["https://fonts.gstatic.com", true]
-			]) {
-				if (parent.querySelector(`link[rel="preconnect"][href="${href}"]`)) continue;
-				const link = doc.createElement("link");
-				link.rel = "preconnect";
-				link.href = href;
-				if (cors) link.crossOrigin = "";
-				parent.appendChild(link);
-			}
-		});
-		attempt(() => {
-			const fire = () => navListeners.forEach(attempt);
-			for (const name of ["pushState", "replaceState"]) {
-				const orig = win.history[name];
-				win.history[name] = function(...args) {
-					const r = orig.apply(this, args);
-					fire();
-					return r;
-				};
-			}
-			win.addEventListener("popstate", fire);
-		});
-		initUserMap();
-		registerGlobalBridges();
-		attempt(() => {
-			const viewer = getViewerFromWindow();
-			if (viewer.name && viewer.id) {
-				rememberUser(viewer.name, viewer.id);
-				store$1.set("al_user_id", viewer.id);
-				store$1.set("al_username", viewer.name);
-			} else if (viewer.name) store$1.set("al_username", viewer.name);
-		});
-		let hiddenAt = 0;
-		doc.addEventListener("visibilitychange", () => {
-			if (doc.hidden) {
-				hiddenAt = Date.now();
+				ctx.setStandalonePaused(true);
+				console.warn("[AL-Additions] Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.");
 				return;
 			}
-			if (hiddenAt && Date.now() - hiddenAt > 6e5) {
-				incEpoch();
-				setFreshFloor(Date.now());
+			win.__ALA_FAST_LOAD__ = "0.4.3";
+			markBuiltIn("fastLoad");
+			setCoreHooks(ctx.hooks);
+			ctx.hooks.registerCacheBridge({
+				getGqlStore: () => store,
+				getRpcCache: () => rpcCache,
+				getRpcInflight: () => rpcInflight,
+				getUserMap: () => userMap,
+				getIdMap: () => idToUserMap,
+				clear: () => clearGlobalCache(),
+				clearAuth: () => clearLastAuth()
+			});
+			let yieldedToStandalone = false;
+			const yielded = () => {
+				if (yieldedToStandalone) return true;
+				if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
+					yieldedToStandalone = true;
+					ctx.setStandalonePaused(true);
+					console.warn("[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.");
+				}
+				return yieldedToStandalone;
+			};
+			attempt(() => {
+				const parent = doc.head || doc.documentElement;
+				for (const [href, cors] of [
+					[GQL_ORIGIN, true],
+					[MEDIA_ORIGIN, false],
+					["https://fonts.googleapis.com", false],
+					["https://fonts.gstatic.com", true]
+				]) {
+					if (parent.querySelector(`link[rel="preconnect"][href="${href}"]`)) continue;
+					const link = doc.createElement("link");
+					link.rel = "preconnect";
+					link.href = href;
+					if (cors) link.crossOrigin = "";
+					parent.appendChild(link);
+				}
+			});
+			navListeners.length = 0;
+			ctx.onNav(() => navListeners.forEach(attempt));
+			initUserMap();
+			registerGlobalBridges();
+			attempt(() => {
+				const viewer = getViewerFromWindow();
+				if (viewer.name && viewer.id) {
+					rememberUser(viewer.name, viewer.id);
+					store$1.set("al_user_id", viewer.id);
+					store$1.set("al_username", viewer.name);
+				} else if (viewer.name) store$1.set("al_username", viewer.name);
+			});
+			let hiddenAt = 0;
+			ctx.listen(doc, "visibilitychange", () => {
+				if (doc.hidden) {
+					hiddenAt = Date.now();
+					return;
+				}
+				if (hiddenAt && Date.now() - hiddenAt > 6e5) {
+					incEpoch();
+					setFreshFloor(Date.now());
+				}
+				inflight.clear();
+			});
+			if (CFG.gqlTtl > 0 && typeof win.fetch === "function") {
+				const uninstallFetch = installGraphQLLayer(yielded);
+				ctx.onCleanup(uninstallFetch);
+				hookWorker(yielded);
 			}
-			inflight.clear();
-		});
-		if (CFG.gqlTtl > 0 && typeof win.fetch === "function") {
-			installGraphQLLayer(yielded);
-			hookWorker(yielded);
-		}
-		if (CFG.coalesceObservers) attempt(installObserverCoalescing);
-		if (CFG.fastInnerText) attempt(installFastInnerText);
-		if (CFG.memoSelectorProbes) attempt(installProbeMemo);
-		if (CFG.blockTierInData || CFG.tierAssist) attempt(installTierSupport);
-		if (CFG.lazyMedia) attempt(installLazyMedia);
-		if (CFG.rowSkipping) attempt(installRowSkipping);
-		if (CFG.earlyStart) {
-			loadRoutes();
-			triggerEarlyStart(yielded);
-			navListeners.push(() => triggerEarlyStart(yielded));
-		} else if (CFG.prefetch) loadRoutes();
-		if (CFG.prefetch) {
-			navListeners.push(() => scheduleAutoPrefetch(yielded, 500));
-			if (doc.readyState !== "loading") scheduleAutoPrefetch(yielded, 1e3);
-			else doc.addEventListener("DOMContentLoaded", () => scheduleAutoPrefetch(yielded, 1e3), { once: true });
-			installPointerPrefetch(yielded);
+			if (CFG.coalesceObservers) attempt(installObserverCoalescing);
+			if (CFG.lazyMedia) attempt(installLazyMedia);
+			if (CFG.rowSkipping) attempt(installRowSkipping);
+			if (CFG.earlyStart) {
+				loadRoutes();
+				triggerEarlyStart(yielded);
+				navListeners.push(() => triggerEarlyStart(yielded));
+			} else if (CFG.prefetch) loadRoutes();
+			if (CFG.prefetch) {
+				navListeners.push(() => scheduleAutoPrefetch(yielded, 500));
+				ctx.ready(() => scheduleAutoPrefetch(yielded, 1e3));
+				installPointerPrefetch(yielded, ctx.listen);
+			}
+			ctx.onCleanup(() => {
+				navListeners.length = 0;
+				setCoreHooks(null);
+			});
 		}
 	});
 	defineModule({

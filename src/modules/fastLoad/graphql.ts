@@ -1,5 +1,6 @@
 import {
   win,
+  coreHooks,
   store,
   inflight,
   bytes,
@@ -216,7 +217,7 @@ export async function classify(input: any, init?: RequestInit) {
   };
 
   const authHeader = desc.headers.get('authorization');
-  if (authHeader && authHeader.startsWith('Bearer ')) {
+  if (authHeader && authHeader.startsWith('Bearer ') && !coreHooks?.isSessionClearing()) {
     const token = authHeader.slice(7).trim();
     if (token) {
       gmStore.set('al_token_auth', authHeader);
@@ -233,8 +234,11 @@ export function cachedFetch(nativeFetch: any, job: any, input: any, init?: Reque
   if (!replay) attempt(() => rememberQuery(desc, parsed));
 
   const blocker = (win as any).__ALFL_RPC_BLOCK__;
-  if (typeof blocker === 'function' && blocker(parsed?.query, parsed?.variables)) {
-    logDebug('[FASTLOAD] Blocked GQL fetch via __ALFL_RPC_BLOCK__:', JSON.stringify(parsed?.variables));
+  const isBlocked =
+    coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) ||
+    (typeof blocker === 'function' && blocker(parsed?.query, parsed?.variables));
+  if (isBlocked) {
+    logDebug('[FASTLOAD] Blocked GQL fetch:', JSON.stringify(parsed?.variables));
     const dummy = {
       data: {
         Page: {
@@ -375,10 +379,10 @@ export function cachedFetch(nativeFetch: any, job: any, input: any, init?: Reque
   );
 }
 
-export function installGraphQLLayer(yielded: () => boolean) {
+export function installGraphQLLayer(yielded: () => boolean): () => void {
   const nativeFetch = win.fetch.bind(win);
 
-  win.fetch = async function fetch(input: any, init?: RequestInit) {
+  const wrappedFetch = async function fetch(input: any, init?: RequestInit) {
     if (yielded()) return nativeFetch(input, init);
     let job = null;
     try {
@@ -407,5 +411,12 @@ export function installGraphQLLayer(yielded: () => boolean) {
       return p;
     }
     return cachedFetch(nativeFetch, job, input, init, (init as any)?.__alfl === 'replay');
+  };
+
+  win.fetch = wrappedFetch;
+  return () => {
+    if (win.fetch === wrappedFetch) {
+      win.fetch = nativeFetch;
+    }
   };
 }

@@ -1,5 +1,6 @@
 import {
   win,
+  coreHooks,
   rpcCache,
   rpcInflight,
   rpcEpoch,
@@ -31,6 +32,10 @@ export let workerUrl: string | null = null;
 export let workerOpts: any;
 export let WorkerCtor: any = null;
 export let lastAuth = '';
+
+export function clearLastAuth(): void {
+  lastAuth = '';
+}
 
 const RPC_MAX_ENTRIES = 32;
 
@@ -379,7 +384,10 @@ export function hookWorker(yielded: () => boolean) {
             return origPost.apply(this, [data, ...rest] as any);
           }
           const blocker = win.__ALFL_RPC_BLOCK__;
-          if (typeof blocker === 'function' && blocker(String(data.params[1]), data.params[2])) {
+          const isBlocked =
+            coreHooks?.isRpcBlocked(String(data.params[1]), data.params[2]) ||
+            (typeof blocker === 'function' && blocker(String(data.params[1]), data.params[2]));
+          if (isBlocked) {
             logDebug('[FASTLOAD RPC] Blocked request:', JSON.stringify(data.params[2]).slice(0, 60));
             const targetId = data.params[2]?.id || data.params[2]?.userId;
             const pageId = data.params[4]?.page?.id || (targetId ? `listComparison-${targetId}` : 'listComparison');
@@ -429,7 +437,7 @@ export function hookWorker(yielded: () => boolean) {
           }
           const h = data.params[3] || {};
           const a = h.Authorization ?? h.authorization;
-          if (a) {
+          if (a && !coreHooks?.isSessionClearing()) {
             lastAuth = String(a);
             gmStore.set('al_token_auth', lastAuth);
           }
