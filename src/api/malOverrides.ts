@@ -1,6 +1,8 @@
 import { SETTING_PREFIX, type ManualOverride, type ManualOverrideStore, type SyncMediaType } from '../types';
-import { parseToggle, store } from '../utils/helpers';
+import { createCoreLogger, parseToggle, store } from '../utils/helpers';
 import { AniList } from './anilist';
+
+const malLog = createCoreLogger('mal');
 
 export const OVERRIDES_SETTING_KEY = 'syncManualOverrides';
 export const MANUAL_OVERRIDES_ENABLED_KEY = 'manualOverridesEnabled';
@@ -243,7 +245,7 @@ export async function refreshStaleOverrides(): Promise<void> {
           saveManualOverrides(current);
         }
       } catch (e) {
-        console.warn('[AL-Additions] Failed to refresh stale overrides batch:', e);
+        malLog.warn('Failed to refresh stale overrides batch:', e);
         break;
       }
     }

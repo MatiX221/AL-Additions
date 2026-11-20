@@ -141,6 +141,70 @@
 		}
 		return typeof imported === "function" ? imported : null;
 	}
+	function downloadFile(url, name, opts = {}) {
+		let settled = false;
+		const shouldOpenTabOnError = () => typeof opts.openTabOnError === "function" ? !!opts.openTabOnError() : opts.openTabOnError !== false;
+		const triggerTabFallback = () => {
+			if (settled) return;
+			settled = true;
+			openTab(url);
+			opts.onComplete?.("tab");
+		};
+		const gmDownload = resolveGm("GM_download", _GM_download);
+		if (gmDownload) try {
+			const handle = gmDownload({
+				url,
+				name,
+				saveAs: !!opts.saveAs,
+				onload: () => {
+					if (settled) return;
+					settled = true;
+					opts.onComplete?.("download");
+				},
+				onerror: (err) => {
+					if (settled) return;
+					if (err?.error === "aborted") {
+						settled = true;
+						opts.onAbort?.();
+						return;
+					}
+					if (shouldOpenTabOnError()) triggerTabFallback();
+					else {
+						settled = true;
+						opts.onError?.(err);
+					}
+				},
+				ontimeout: () => {
+					if (settled) return;
+					if (shouldOpenTabOnError()) triggerTabFallback();
+					else {
+						settled = true;
+						opts.onError?.(new Error("Download timed out"));
+					}
+				},
+				onabort: () => {
+					if (settled) return;
+					settled = true;
+					opts.onAbort?.();
+				}
+			});
+			if (handle && typeof handle.abort === "function") return { abort: () => handle.abort?.() };
+			return null;
+		} catch (err) {
+			if (shouldOpenTabOnError()) triggerTabFallback();
+			else if (!settled) {
+				settled = true;
+				opts.onError?.(err);
+			}
+			return null;
+		}
+		if (shouldOpenTabOnError()) triggerTabFallback();
+		else {
+			settled = true;
+			opts.onError?.(new Error("GM_download unavailable"));
+		}
+		return null;
+	}
 	var store$1 = {
 		get: (k, d) => _GM_getValue(k, d),
 		set: (k, v) => _GM_setValue(k, v),
@@ -176,41 +240,111 @@
 			};
 		}
 	};
-	var debugChannels = new Map();
-	function registerDebugChannel(channel, settingKey, def = false, prefixPattern) {
-		const existing = debugChannels.get(channel);
-		const escapedChannel = channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const defaultPattern = channel ? new RegExp(`^\\[${escapedChannel}(?=$|[\\]:\\s])`, "i") : void 0;
-		debugChannels.set(channel, {
-			settingKey,
-			def,
-			pattern: prefixPattern ?? existing?.pattern ?? defaultPattern
-		});
+	var CORE_DEBUG_SCOPE = "core";
+	var CORE_DEBUG_MASTER = {
+		scope: CORE_DEBUG_SCOPE,
+		title: "Core / Kernel Debug",
+		help: "Enable verbose debug logging across core subsystems, settings, and API clients."
+	};
+	var CORE_DEBUG_CHANNELS = {
+		core: {
+			id: "general",
+			label: "Core",
+			title: "Core & Observer",
+			help: "Log DOM observer mutations, route changes, module lifecycle, and core bus events."
+		},
+		settings: {
+			id: "settings",
+			label: "Settings",
+			title: "Settings & Backup",
+			help: "Log settings migrations, backup creation, and restore imports."
+		},
+		anilist: {
+			id: "anilist",
+			label: "AniList",
+			title: "AniList API",
+			help: "Log AniList GraphQL caching, subset matching, and API requests."
+		},
+		mal: {
+			id: "mal",
+			label: "MAL",
+			title: "MyAnimeList API",
+			help: "Log MyAnimeList API requests, responses, and override cache refreshes."
+		}
+	};
+	function getDebuggableChannels(debug) {
+		if (!debug || debug.debug === false || !debug.channels) return [];
+		const out = [];
+		for (const [id, ch] of Object.entries(debug.channels)) if (ch && ch.debug === true) out.push([id, ch]);
+		return out;
 	}
-	function isDebug(module) {
+	function isDebugEnabled(scope, channel) {
 		try {
 			const win = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
 			if (win.__ALA_DEBUG__ || win.__ALFL_DEBUG__) return true;
 			if (!parseToggle(store$1.get(`ala_setting_devModeEnabled`, false))) return false;
-			if (!module) return true;
-			const channel = debugChannels.get(module);
-			if (channel) return parseToggle(store$1.get(channel.settingKey, channel.def));
-			return true;
+			const raw = store$1.get(`${SETTING_PREFIX}debug`, null);
+			let map = null;
+			if (raw && typeof raw === "object" && !Array.isArray(raw)) map = raw;
+			else if (typeof raw === "string") try {
+				const parsed = JSON.parse(raw);
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) map = parsed;
+			} catch {}
+			if (!map) return false;
+			const entry = Object.prototype.hasOwnProperty.call(map, scope) ? map[scope] : void 0;
+			if (!entry || typeof entry !== "object") return false;
+			if (!parseToggle(entry.enabled)) return false;
+			if (!channel) return true;
+			const channels = entry.channels;
+			if (!channels || typeof channels !== "object") return true;
+			if (!Object.prototype.hasOwnProperty.call(channels, channel)) return true;
+			return parseToggle(channels[channel]);
 		} catch {
 			return false;
 		}
 	}
-	function logDebug(moduleOrTag, ...args) {
-		let mod;
-		for (const [channel, entry] of debugChannels) if (entry.pattern) {
-			if (entry.pattern.global || entry.pattern.sticky) entry.pattern.lastIndex = 0;
-			if (entry.pattern.test(moduleOrTag)) {
-				mod = channel;
-				break;
+	function createLogger(prefix, isEnabled, meta) {
+		const logger = {
+			label: meta.label,
+			title: meta.title,
+			help: meta.help,
+			canDebug: meta.canDebug,
+			enabled: () => {
+				try {
+					return !!meta.canDebug && !!isEnabled();
+				} catch {
+					return false;
+				}
+			},
+			debug: ((...args) => {
+				if (!logger.enabled()) return;
+				console.debug(prefix, ...args);
+			}),
+			warn: (...args) => {
+				console.warn(prefix, ...args);
+			},
+			error: (...args) => {
+				console.error(prefix, ...args);
 			}
+		};
+		return Object.freeze(logger);
+	}
+	function createCoreLogger(channelOrOpts) {
+		if (typeof channelOrOpts === "string") {
+			const def = CORE_DEBUG_CHANNELS[channelOrOpts];
+			return createLogger(`[${def.label}]`, () => isDebugEnabled(CORE_DEBUG_SCOPE, def.id), {
+				label: def.label,
+				title: def.title,
+				help: def.help,
+				canDebug: true
+			});
 		}
-		if (!isDebug(mod)) return;
-		console.debug(moduleOrTag, ...args);
+		return createLogger(`[${channelOrOpts.label}]`, () => isDebugEnabled(channelOrOpts.scope, channelOrOpts.channel), {
+			label: channelOrOpts.label,
+			title: channelOrOpts.title ?? channelOrOpts.label,
+			help: channelOrOpts.help,
+			canDebug: true
+		});
 	}
 	function jsonGet(key, fallback) {
 		try {
@@ -279,7 +413,7 @@
 	var PREFIX = SETTING_PREFIX;
 	var features = [];
 	var ROWS = {};
-	var hasOwn$1 = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+	var hasOwn$2 = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 	function cloneJsonValue(val) {
 		if (val === null || typeof val !== "object") return val;
 		if (Array.isArray(val)) return val.map((item) => cloneJsonValue(item));
@@ -368,7 +502,7 @@
 					return JSON.parse(el.value);
 				} catch (_) {
 					const key = el.dataset?.key;
-					return key && hasOwn$1(ROWS, key) ? cloneJsonValue(ROWS[key].def) : void 0;
+					return key && hasOwn$2(ROWS, key) ? cloneJsonValue(ROWS[key].def) : void 0;
 				}
 			},
 			write: (el, v) => {
@@ -393,17 +527,13 @@
 			legacy: o.legacy || []
 		}));
 		const batch = [toggle, ...options];
-		if (f.debug) batch.push({
-			key: f.debug.key,
-			type: "toggle",
-			def: false,
-			legacy: [f.debug.key],
-			title: f.debug.title,
-			help: f.debug.help
-		});
+		if (f.debug && f.debug.debug !== false) {
+			const channelEntries = Object.entries(f.debug.channels || {});
+			for (const [chId] of channelEntries) if (chId.toLowerCase() === "general") throw new Error(`Debug channel "${chId}" for module "${f.id}" conflicts with reserved "general" channel`);
+		}
 		const seenKeys = new Set();
 		for (const row of batch) {
-			if (seenKeys.has(row.key) || hasOwn$1(ROWS, row.key)) throw new Error(`Duplicate setting: ${row.key}`);
+			if (seenKeys.has(row.key) || hasOwn$2(ROWS, row.key)) throw new Error(`Duplicate setting: ${row.key}`);
 			seenKeys.add(row.key);
 		}
 		for (const row of batch) {
@@ -431,7 +561,7 @@
 		const rowType = o.type || "toggle";
 		const rowDef = o.def !== void 0 ? o.def : rowType === "json" ? {} : false;
 		if (rowType === "toggle" && rowDef !== false) throw new Error(`Toggle setting "${o.key}" must default to false`);
-		if (hasOwn$1(ROWS, o.key)) throw new Error(`Duplicate setting: ${o.key}`);
+		if (hasOwn$2(ROWS, o.key)) throw new Error(`Duplicate setting: ${o.key}`);
 		const row = {
 			...o,
 			type: rowType,
@@ -441,13 +571,17 @@
 		ROWS[row.key] = row;
 		return row;
 	}
+	function has(key) {
+		if (!hasOwn$2(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
+		return store$1.get(PREFIX + key, void 0) !== void 0;
+	}
 	function get(key) {
-		if (!hasOwn$1(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
+		if (!hasOwn$2(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
 		const r = ROWS[key];
 		return TYPES$1[r.type].normalize(store$1.get(PREFIX + key, r.def), r);
 	}
 	function set(key, raw) {
-		if (!hasOwn$1(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
+		if (!hasOwn$2(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
 		const r = ROWS[key];
 		const normalized = TYPES$1[r.type].normalize(raw, r);
 		store$1.set(PREFIX + key, normalized);
@@ -476,17 +610,88 @@
 		}, "settings migration");
 	}
 	var Settings = {
+		has,
 		get,
 		set,
 		register,
 		registerCoreSetting,
 		migrate
 	};
+	var coreLog$4 = createCoreLogger("core");
 	var providers = new Map();
+	var watchersByProvider = new Map();
+	function isProviderConnected(providerId) {
+		try {
+			return !!providers.get(providerId)?.isConnected();
+		} catch {
+			return false;
+		}
+	}
+	function clearEntryKeyUnsubs(entry) {
+		for (const unsub of entry.keyUnsubs) try {
+			unsub();
+		} catch {}
+		entry.keyUnsubs.length = 0;
+	}
+	function notifyWatcherTransition(entry) {
+		if (!entry.active) return;
+		const next = isProviderConnected(entry.providerId);
+		if (next === entry.lastConnected) return;
+		entry.lastConnected = next;
+		try {
+			entry.cb(next);
+		} catch (e) {
+			coreLog$4.error(`Account watcher (${entry.providerId}) failed:`, e);
+		}
+	}
+	function bindEntryKeys(entry) {
+		clearEntryKeyUnsubs(entry);
+		if (!entry.active) return;
+		const keys = getAccountSecretKeys(entry.providerId);
+		for (const key of keys) entry.keyUnsubs.push(store$1.watch(key, () => {
+			notifyWatcherTransition(entry);
+		}));
+	}
+	function reconcileWatchersForProvider(providerId) {
+		const set = watchersByProvider.get(providerId);
+		if (!set) return;
+		for (const entry of [...set]) {
+			if (!entry.active) continue;
+			bindEntryKeys(entry);
+			notifyWatcherTransition(entry);
+		}
+	}
 	function registerAccountProvider(provider) {
 		providers.set(provider.id, provider);
+		reconcileWatchersForProvider(provider.id);
 		return () => {
-			if (providers.get(provider.id) === provider) providers.delete(provider.id);
+			if (providers.get(provider.id) === provider) {
+				providers.delete(provider.id);
+				reconcileWatchersForProvider(provider.id);
+			}
+		};
+	}
+	function watchAccountProvider(providerId, cb) {
+		const entry = {
+			providerId,
+			cb,
+			active: true,
+			lastConnected: isProviderConnected(providerId),
+			keyUnsubs: []
+		};
+		let set = watchersByProvider.get(providerId);
+		if (!set) {
+			set = new Set();
+			watchersByProvider.set(providerId, set);
+		}
+		set.add(entry);
+		bindEntryKeys(entry);
+		return () => {
+			if (!entry.active) return;
+			entry.active = false;
+			clearEntryKeyUnsubs(entry);
+			set?.delete(entry);
+			if (set && set.size === 0 && watchersByProvider.get(providerId) === set) watchersByProvider.delete(providerId);
 		};
 	}
 	function getAccountProvider(id) {
@@ -513,10 +718,11 @@
 			try {
 				await p.onAuthCallback();
 			} catch (e) {
-				console.error("[AL-Additions]", `account auth callback (${p.id})`, e);
+				coreLog$4.error(`Account auth callback (${p.id}) failed:`, e);
 			}
 		}
 	}
+	var coreLog$3 = createCoreLogger("core");
 	var ServiceRegistryImpl = class {
 		services = new Map();
 		watchers = new Map();
@@ -589,11 +795,11 @@
 					} else try {
 						res();
 					} catch (e) {
-						console.error("[AL-Additions] Service subscriber cleanup failed:", e);
+						coreLog$3.error("Service subscriber cleanup failed:", e);
 					}
 				} else if (entry.gen === myGen) entry.cleanup = null;
 			} catch (e) {
-				console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
+				coreLog$3.error(`Service watcher for "${key}" failed:`, e);
 			}
 		}
 		runCleanup(entry) {
@@ -603,7 +809,7 @@
 			try {
 				fn();
 			} catch (e) {
-				console.error("[AL-Additions] Service subscriber cleanup failed:", e);
+				coreLog$3.error("Service subscriber cleanup failed:", e);
 			}
 		}
 	};
@@ -618,7 +824,7 @@
 				try {
 					entry.cb(payload);
 				} catch (e) {
-					console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
+					coreLog$3.error(`Event listener for "${key}" failed:`, e);
 				}
 			}
 		}
@@ -662,7 +868,7 @@
 				try {
 					cb(entry.payload);
 				} catch (e) {
-					console.error(`[AL-Additions] Retained event listener for "${key}" failed:`, e);
+					coreLog$3.error(`Retained event listener for "${key}" failed:`, e);
 				}
 			}
 			return unsub;
@@ -846,7 +1052,7 @@
 				try {
 					entry.cb(normalizedEvent);
 				} catch (e) {
-					console.error("[AL-Additions] onGqlFetch listener failed:", e);
+					coreLog$3.error("onGqlFetch listener failed:", e);
 				}
 			}
 		}
@@ -858,11 +1064,33 @@
 			isSessionClearing() {
 				return clearingDepth > 0;
 			},
+			getAuthHeader() {
+				const val = store$1.get("al_token_auth", null);
+				if (typeof val !== "string") return null;
+				const trimmed = val.trim();
+				return trimmed.replace(/^Bearer(?:\s+|$)/i, "").trim() ? trimmed : null;
+			},
+			setAuthHeader(header) {
+				if (clearingDepth > 0) return;
+				if (header == null) {
+					store$1.del("al_token_auth");
+					return;
+				}
+				if (typeof header !== "string") return;
+				const trimmed = header.trim();
+				if (!trimmed.replace(/^Bearer(?:\s+|$)/i, "").trim()) return;
+				store$1.set("al_token_auth", trimmed);
+			},
 			clearAuth() {
+				try {
+					store$1.del("al_token_auth");
+				} catch (e) {
+					coreLog$3.error("Failed to clear stored auth header:", e);
+				}
 				try {
 					cacheBridge?.clearAuth();
 				} catch (e) {
-					console.error("[AL-Additions] cacheBridge.clearAuth failed:", e);
+					coreLog$3.error("cacheBridge.clearAuth failed:", e);
 				}
 			},
 			registerCacheBridge(bridge) {
@@ -932,7 +1160,7 @@
 					try {
 						if (entry.cb(normalizedQuery, normalizedVars)) return true;
 					} catch (e) {
-						console.error("[AL-Additions] RPC blocker failed:", e);
+						coreLog$3.error("RPC blocker failed:", e);
 					}
 				}
 				return false;
@@ -955,6 +1183,7 @@
 			}
 		};
 	})();
+	var coreLog$2 = createCoreLogger("core");
 	var entries = new Map();
 	function resolveRegisterMenuCommand() {
 		const g = globalThis;
@@ -979,7 +1208,7 @@
 					try {
 						entry?.handler?.();
 					} catch (e) {
-						console.error(`[AL-Additions] Menu command "${label}" failed:`, e);
+						coreLog$2.error(`Menu command "${label}" failed:`, e);
 					}
 				});
 			}
@@ -988,6 +1217,7 @@
 			if (entry && entry.handler === onClick) entry.handler = null;
 		};
 	}
+	var coreLog$1 = createCoreLogger("core");
 	var Core = (() => {
 		const navCbs = new Set();
 		const bodyCbs = new Set();
@@ -1016,7 +1246,7 @@
 		function notifyNav() {
 			if (muted || location.href === lastHref) return;
 			lastHref = location.href;
-			logDebug("[CORE]", "Navigation detected:", location.pathname + location.search);
+			coreLog$1.debug("Navigation detected:", location.pathname + location.search);
 			fire(navCbs);
 		}
 		for (const name of ["pushState", "replaceState"]) {
@@ -1096,7 +1326,7 @@
 					flushTimer = 0;
 					const batch = queued;
 					queued = [];
-					logDebug("[OBSERVER]", `Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
+					coreLog$1.debug(`Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
 					fire(bodyCbs, batch);
 				}, 50);
 			});
@@ -1255,6 +1485,7 @@
 		...opts,
 		type: "error"
 	});
+	var coreLog = createCoreLogger("core");
 	var modules = [];
 	var LAYER_ORDER = {
 		intercept: 0,
@@ -1294,7 +1525,7 @@
 		if (changed) for (const cb of [...statusListeners]) try {
 			cb(id, status);
 		} catch (e) {
-			console.error("[AL-Additions] Module status listener failed:", e);
+			coreLog.error("Module status listener failed:", e);
 		}
 	}
 	function resolveAllStates(stagedEnabled) {
@@ -1482,11 +1713,33 @@
 	function syncAllLiveStatuses(statuses) {
 		for (const [id, st] of Object.entries(statuses)) emitStatusChange(id, st);
 	}
+	function createScopedStorage(storagePrefix, isDisposed, wrapWatch = (fn) => fn(), guardClear = false) {
+		return {
+			get: (k, d) => store$1.get(`${storagePrefix}${k}`, d),
+			set: (k, v) => {
+				if (!isDisposed()) store$1.set(`${storagePrefix}${k}`, v);
+			},
+			del: (k) => {
+				if (!isDisposed()) store$1.del(`${storagePrefix}${k}`);
+			},
+			watch: (k, cb) => {
+				if (isDisposed()) return () => {};
+				return wrapWatch(() => store$1.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => {
+					if (isDisposed()) return;
+					cb(k, oldV, newV, remote);
+				}));
+			},
+			clear: () => {
+				if (guardClear && isDisposed()) return;
+				for (const k of store$1.list()) if (k.startsWith(storagePrefix)) store$1.del(k);
+			}
+		};
+	}
 	function runCleanupsReverse(id, cleanups) {
 		for (let i = cleanups.length - 1; i >= 0; i--) try {
 			cleanups[i]();
 		} catch (e) {
-			console.error(`[AL-Additions] Module "${id}" failed during cleanup:`, e);
+			coreLog.error(`Module "${id}" failed during cleanup:`, e);
 		}
 		cleanups.length = 0;
 	}
@@ -1668,10 +1921,10 @@
 					else if (res && typeof res.then === "function") Promise.resolve(res).then((maybeCleanup) => {
 						if (typeof maybeCleanup === "function") rc.onCleanup(maybeCleanup);
 					}, (err) => {
-						if (!localAc.signal.aborted) console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+						if (!localAc.signal.aborted) coreLog.error(`Module "${rec.id}" route handler failed:`, err);
 					});
 				} catch (err) {
-					console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+					coreLog.error(`Module "${rec.id}" route handler failed:`, err);
 				}
 			};
 			evaluate();
@@ -1719,6 +1972,40 @@
 				};
 			});
 		};
+		const httpDownload = (url, name, opts = {}) => {
+			if (disposed || ac.signal.aborted) return Promise.reject(new Error("Download aborted"));
+			return new Promise((resolve, reject) => {
+				const entry = { reject };
+				activeRequests.add(entry);
+				const settle = (fn) => {
+					if (!activeRequests.has(entry)) return;
+					activeRequests.delete(entry);
+					fn();
+				};
+				let settled = false;
+				const handle = downloadFile(url, name, {
+					saveAs: opts.saveAs,
+					openTabOnError: () => !disposed && !ac.signal.aborted && opts.openTabOnError !== false,
+					onComplete: (outcome) => {
+						settled = true;
+						settle(() => resolve(outcome));
+					},
+					onAbort: () => {
+						settled = true;
+						settle(() => reject(new Error("Download aborted")));
+					},
+					onError: (err) => {
+						settled = true;
+						settle(() => reject(err instanceof Error ? err : new Error(String(err || "Download failed"))));
+					}
+				});
+				if (!settled) entry.abort = () => {
+					try {
+						handle?.abort?.();
+					} catch {}
+				};
+			});
+		};
 		const trackedHooks = {
 			setSessionClearing: (active) => {
 				if (disposed) return;
@@ -1731,6 +2018,10 @@
 				}
 			},
 			isSessionClearing: () => CoreHooks.isSessionClearing(),
+			getAuthHeader: () => CoreHooks.getAuthHeader(),
+			setAuthHeader: (header) => {
+				if (!disposed) CoreHooks.setAuthHeader(header);
+			},
 			clearAuth: () => {
 				if (!disposed) CoreHooks.clearAuth();
 			},
@@ -1749,29 +2040,108 @@
 			setPrefetchPaused: (paused) => whenAlive(() => CoreHooks.setPrefetchPaused(paused)),
 			isPrefetchSuppressed: () => CoreHooks.isPrefetchSuppressed()
 		};
-		const debugChannel = rec.debugChannel || rec.id;
+		const debugDef = rec.debug;
+		const hasModuleDebug = Boolean(debugDef && debugDef.debug !== false);
+		const debugLabel = debugDef?.label || rec.title || rec.id;
+		const debugTitle = hasModuleDebug ? debugDef.title || rec.title : rec.title;
+		const debugHelp = hasModuleDebug ? debugDef.help ?? rec.help : rec.help;
+		const hasDebuggableChannels = getDebuggableChannels(debugDef).length > 0;
+		const rootLogger = createLogger(`[${debugLabel}]`, hasModuleDebug ? () => !disposed && isDebugEnabled(rec.id, hasDebuggableChannels ? "general" : void 0) : () => false, {
+			label: debugLabel,
+			title: debugTitle,
+			help: debugHelp,
+			canDebug: hasModuleDebug
+		});
+		const channelLoggers = new Map();
+		const getChannelLogger = (chId) => {
+			const cached = channelLoggers.get(chId);
+			if (cached) return cached;
+			const chDef = debugDef?.channels && Object.prototype.hasOwnProperty.call(debugDef.channels, chId) ? debugDef.channels[chId] : void 0;
+			if (!chDef) {
+				const fallback = Object.freeze({
+					id: chId,
+					...createLogger(`[${debugLabel} (${chId})]`, () => false, {
+						label: chId,
+						title: chId,
+						canDebug: false
+					})
+				});
+				channelLoggers.set(chId, fallback);
+				return fallback;
+			}
+			const canDebug = hasModuleDebug && chDef.debug === true;
+			const chLogger = Object.freeze({
+				id: chId,
+				...createLogger(`[${debugLabel} (${chDef.label})]`, canDebug ? () => !disposed && isDebugEnabled(rec.id, chId) : () => false, {
+					label: chDef.label,
+					title: chDef.title || chDef.label,
+					help: chDef.help,
+					canDebug
+				})
+			});
+			channelLoggers.set(chId, chLogger);
+			return chLogger;
+		};
+		const ctxLog = Object.freeze({
+			...rootLogger,
+			channel: (chId) => getChannelLogger(String(chId))
+		});
+		let sessionWrapper = null;
+		let apiWrapper = null;
+		const getSessionWrapper = () => {
+			if (!sessionWrapper) sessionWrapper = {
+				peek: (opts) => getCoreSession().peek(disposed && opts?.reconcile ? {
+					...opts,
+					reconcile: false
+				} : opts),
+				get userId() {
+					return getCoreSession().userId;
+				},
+				get username() {
+					return getCoreSession().username;
+				},
+				get scoreFormat() {
+					return getCoreSession().scoreFormat;
+				},
+				hasAuth: () => getCoreSession().hasAuth(),
+				clear: () => {
+					if (!disposed) getCoreSession().clear();
+				},
+				syncFromPage: () => {
+					if (!disposed) getCoreSession().syncFromPage?.();
+				},
+				recordHint: (hint) => {
+					if (!disposed) getCoreSession().recordHint(hint);
+				}
+			};
+			return sessionWrapper;
+		};
+		const getApiWrapper = () => {
+			if (!apiWrapper) apiWrapper = {
+				query: (...args) => getCoreApi().query(...args),
+				getMediaList: (...args) => getCoreApi().getMediaList(...args),
+				viewer: (...args) => getCoreApi().viewer(...args),
+				clearViewer: () => getCoreApi().clearViewer(),
+				invalidate: (...args) => getCoreApi().invalidate(...args),
+				invalidateMediaList: (...args) => getCoreApi().invalidateMediaList(...args),
+				hasAuth: () => getCoreApi().hasAuth(),
+				resumeAt: () => getCoreApi().resumeAt(),
+				media: getCoreApi().media,
+				get session() {
+					return getSessionWrapper();
+				}
+			};
+			return apiWrapper;
+		};
 		const eventOwner = Symbol(`events:${rec.id}`);
 		let retainedTracked = false;
 		return {
 			id: rec.id,
+			title: rec.title,
+			help: rec.help,
 			get: (key) => Settings.get(key),
 			set: (key, val) => Settings.set(key, val),
-			storage: {
-				get: (k, d) => store$1.get(`${storagePrefix}${k}`, d),
-				set: (k, v) => {
-					if (!disposed) store$1.set(`${storagePrefix}${k}`, v);
-				},
-				del: (k) => {
-					if (!disposed) store$1.del(`${storagePrefix}${k}`);
-				},
-				watch: (k, cb) => whenAlive(() => store$1.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => {
-					if (disposed) return;
-					cb(k, oldV, newV, remote);
-				})),
-				clear: () => {
-					for (const k of store$1.list()) if (k.startsWith(storagePrefix)) store$1.del(k);
-				}
-			},
+			storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
 			persistent: (key, prune) => persistent(key, prune),
 			ready: (cb) => whenAlive(() => Core.ready(cb)),
 			onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
@@ -1803,20 +2173,22 @@
 					const r = await httpRequest(url, opts);
 					if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
 					return JSON.parse(r.responseText || "");
-				}
+				},
+				download: httpDownload
 			},
 			get api() {
-				return getCoreApi();
+				return getApiWrapper();
 			},
 			get session() {
-				return getCoreSession();
+				return getSessionWrapper();
 			},
 			accounts: {
 				get: (id) => getAccountProvider(id),
 				isConnected: (id) => !!getAccountProvider(id)?.isConnected(),
 				connect: (id) => getAccountProvider(id)?.connect(),
 				disconnect: (id) => getAccountProvider(id)?.disconnect(),
-				clearSecrets: (providerId) => clearAccountSecrets(providerId)
+				clearSecrets: (providerId) => clearAccountSecrets(providerId),
+				watch: (id, cb) => whenAlive(() => watchAccountProvider(id, cb))
 			},
 			toast: {
 				show: showToast,
@@ -1845,12 +2217,7 @@
 				onRetained: (event, cb) => whenAlive(() => EventBus.onRetained(event, cb))
 			},
 			hooks: trackedHooks,
-			debug: {
-				enabled: () => isDebug(debugChannel),
-				log: (...args) => {
-					if (isDebug(debugChannel)) console.debug(`[${debugChannel.toUpperCase()}]`, ...args);
-				}
-			},
+			log: ctxLog,
 			setStandalonePaused: (paused) => {
 				if (disposed) return;
 				const next = !!paused;
@@ -1925,11 +2292,11 @@
 		rec.abortController = ac;
 		rec.booted = true;
 		const ctx = createContextForRecord(rec, cleanups, ac);
-		logDebug("[CORE]", `Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
+		coreLog.debug(`Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
 		const handleFailure = (err) => {
 			if (rec.bootSeq !== seq) return;
 			const msg = err instanceof Error ? err.message : String(err);
-			console.error(`[AL-Additions] Module "${rec.id}" failed during setup:`, err);
+			coreLog.error(`Module "${rec.id}" failed during setup:`, err);
 			cascadeDispose([rec.id]);
 			rec.runtimeError = msg;
 			syncAllLiveStatuses(resolveAllStates().statuses);
@@ -1968,7 +2335,7 @@
 	}
 	function defineModule(meta) {
 		if (!ID_RE.test(meta.id)) {
-			console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+			coreLog.error(`Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
 			invalidIds.set(meta.id, {
 				active: false,
 				reason: "invalid-id"
@@ -1981,7 +2348,7 @@
 		}
 		const existing = recordsById.get(meta.id);
 		if (existing) {
-			console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
+			coreLog.error(`Duplicate module ID "${meta.id}" ignored.`);
 			existing.idCollision = true;
 			emitStatusChange(meta.id, {
 				active: false,
@@ -2012,9 +2379,10 @@
 			debug: meta.debug,
 			standalone: meta.standalone
 		});
-		if (meta.debug) registerDebugChannel(meta.debug.channel || meta.id, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
 		registerRecord({
 			id: meta.id,
+			title: meta.title,
+			help: meta.help,
 			setting: meta.key,
 			hosts,
 			layer,
@@ -2022,7 +2390,7 @@
 			requiresReload: !!meta.requiresReload,
 			dependsOn,
 			after,
-			debugChannel: meta.debug?.channel || meta.id,
+			debug: meta.debug,
 			standalone: meta.standalone,
 			migrate: meta.migrate,
 			setup: meta.setup,
@@ -2037,7 +2405,7 @@
 	}
 	function registerShellModule(name, init, hosts = ["anilist.co"]) {
 		if (!ID_RE.test(name)) {
-			console.error(`[AL-Additions] Invalid shell module ID "${name}". Must match ${ID_RE}.`);
+			coreLog.error(`Invalid shell module ID "${name}". Must match ${ID_RE}.`);
 			invalidIds.set(name, {
 				active: false,
 				reason: "invalid-id"
@@ -2050,7 +2418,7 @@
 		}
 		const existing = recordsById.get(name);
 		if (existing) {
-			console.error(`[AL-Additions] Duplicate module ID "${name}" ignored.`);
+			coreLog.error(`Duplicate module ID "${name}" ignored.`);
 			existing.idCollision = true;
 			emitStatusChange(name, {
 				active: false,
@@ -2060,6 +2428,8 @@
 		}
 		registerRecord({
 			id: name,
+			title: name,
+			help: "",
 			setting: null,
 			hosts: hosts.slice(),
 			layer: "shell",
@@ -2090,10 +2460,33 @@
 			const layerRecs = records.filter((r) => !r.invalidId && !r.idCollision && r.layer === layer).sort((a, b) => a.id.localeCompare(b.id));
 			for (const rec of layerRecs) {
 				if (!rec.migrate) continue;
+				let migrateDone = false;
+				const migrationCtx = {
+					id: rec.id,
+					storage: createScopedStorage(`ala_mod_${rec.id}_`, () => migrateDone, void 0, true),
+					settings: {
+						has: (key) => Settings.has(key),
+						get: (key) => Settings.get(key),
+						set: (key, val) => {
+							if (!migrateDone) Settings.set(key, val);
+						}
+					},
+					legacy: {
+						get: (key, def) => store$1.get(key, def),
+						set: (key, val) => {
+							if (!migrateDone) store$1.set(key, val);
+						},
+						del: (key) => {
+							if (!migrateDone) store$1.del(key);
+						}
+					}
+				};
 				try {
-					rec.migrate();
+					rec.migrate(migrationCtx);
 				} catch (e) {
-					console.error(`[AL-Additions] Module "${rec.id}" failed during migrate:`, e);
+					coreLog.error(`Module "${rec.id}" failed during migrate:`, e);
+				} finally {
+					migrateDone = true;
 				}
 			}
 		}
@@ -2276,6 +2669,10 @@
 		legacy: ["behindDotsEnabled", "airingProgressIndicatorEnabled"],
 		title: "Airing Progress Indicator",
 		help: "Show an orange indicator when your watched episode count is behind the number of aired episodes.",
+		debug: {
+			debug: false,
+			label: "Airing Dots"
+		},
 		setup(ctx) {
 			const CLASS = "daiya-behind-dot";
 			const ORANGE = "rgb(255, 152, 0)";
@@ -2440,7 +2837,7 @@
 						if (batch.length >= BATCH) break;
 					}
 					running++;
-					updateBatch(batch).catch((e) => console.error("[AL-Additions] airing batch", e)).finally(() => {
+					updateBatch(batch).catch((e) => ctx.log.error("airing batch", e)).finally(() => {
 						batch.forEach((id) => active.delete(id));
 						running--;
 						queueIDs([]);
@@ -3684,6 +4081,10 @@
 		],
 		title: "Anime Opening & Ending Songs",
 		help: "Show OP/ED theme songs on anime pages.",
+		debug: {
+			debug: false,
+			label: "AniSongs"
+		},
 		options: [{
 			key: "aniSongsProviders",
 			type: "json",
@@ -3865,7 +4266,7 @@
 					const overview = await ctx.waitForSelector(".overview", 1e4);
 					if (cur === mine && overview && animeId() === id) mount(mine, overview);
 				} catch (err) {
-					console.error("[AL-Additions] Anisongs sync error:", err);
+					ctx.log.error("Anisongs sync error:", err);
 					if (cur === mine) {
 						cur = null;
 						backoff = {
@@ -3886,7 +4287,7 @@
 					if (overview) try {
 						mount(cur, overview);
 					} catch (err) {
-						console.error("[AL-Additions] Anisongs repair error:", err);
+						ctx.log.error("Anisongs repair error:", err);
 					}
 				}
 			}
@@ -3960,27 +4361,13 @@
       @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
 			const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
 			const bannerAllowed = () => !!mediaRoute() || /^\/user\//.test(location.pathname) && !!ctx.get("bannerProfiles");
-			function download(onSaved) {
+			async function download() {
 				const banner = findBannerElement();
 				const url = banner && bannerAllowed() && bannerUrl(banner);
-				if (!url) return;
+				if (!url) return null;
 				const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
 				const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
-				const fallback = () => {
-					openTab(url);
-					onSaved?.();
-				};
-				if (typeof _GM_download === "function") try {
-					_GM_download({
-						url,
-						name,
-						saveAs: false,
-						onload: () => onSaved?.(),
-						onerror: fallback
-					});
-					return;
-				} catch (_) {}
-				fallback();
+				return ctx.http.download(url, name);
 			}
 			function createButton() {
 				const btn = document.createElement("button");
@@ -3994,16 +4381,17 @@
 				btn.addEventListener("click", (e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					download(() => {
+					download().then((outcome) => {
+						if (!outcome) return;
 						btn.classList.add("is-done");
 						ico.innerHTML = icon("check", 18);
-						lbl.textContent = "Saved";
+						lbl.textContent = outcome === "tab" ? "Opened" : "Saved";
 						ctx.timeout(() => {
 							btn.classList.remove("is-done");
 							ico.innerHTML = icon("download", 18);
 							lbl.textContent = "Download banner";
 						}, 1600);
-					});
+					}).catch(() => {});
 				});
 				return btn;
 			}
@@ -4798,9 +5186,9 @@
 			userMap?.set(otherName.toLowerCase(), otherId);
 			idMap?.set(otherId, otherName);
 		}
-		ctx.api.session.syncFromPage?.();
-		let viewerId = Number(store$1.get("al_user_id", 0)) || void 0;
-		let viewerName = store$1.get("al_username", null) || void 0;
+		const snap = ctx.session.peek({ reconcile: true });
+		let viewerId = snap.userId || void 0;
+		let viewerName = snap.username || void 0;
 		if (!viewerId || !viewerName) {
 			const viewer = await ctx.api.viewer();
 			if (viewer) {
@@ -4933,7 +5321,7 @@
 			const viewerTarget = viewerId || viewerName;
 			const otherTarget = otherId || otherName;
 			if (!viewerTarget || !otherTarget) {
-				ctx.debug.log("Missing viewer or other user for getMediaList, keeping fallback");
+				ctx.log.debug("Missing viewer or other user for getMediaList, keeping fallback");
 				state.loadFailed = true;
 				return;
 			}
@@ -4959,7 +5347,7 @@
 				seenMediaIds.add(mediaId);
 				matchedNodes.push(buildCompareRow(otherEntry, myEntry, type, safeOtherName, scopeAttr));
 			}
-			ctx.debug.log("Matched entries via MediaListCollection:", matchedNodes.length);
+			ctx.log.debug("Matched entries via MediaListCollection:", matchedNodes.length);
 			const customTable = mountCompareTable(state, compareRoot, type, safeOtherName, scopeAttr, matchedNodes);
 			if (!customTable) return;
 			compareRoot.style.display = "none";
@@ -4970,7 +5358,7 @@
 			applyFilter(state, customTable, matchedNodes);
 		} catch (err) {
 			state.loadFailed = true;
-			console.error("[AL-Additions] CompareView getMediaList error:", err);
+			ctx.log.error("CompareView getMediaList error:", err);
 		} finally {
 			state.isLoadingAll = false;
 			state.loadAbortState = null;
@@ -4990,10 +5378,9 @@
 		title: "Compare View Improvements",
 		help: "Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.",
 		debug: {
-			key: "debugCompareView",
+			label: "Compare View",
 			title: "Compare View Debug",
-			help: "Log list comparison data loading, score diffs, sorting, and filtering passes.",
-			pattern: /^\[COMPARE/i
+			help: "Log list comparison data loading, score diffs, sorting, and filtering passes."
 		},
 		setup(ctx) {
 			ctx.addStyle(COMPARE_CSS_ID, COMPARE_CSS);
@@ -5136,6 +5523,16 @@
 	function setCoreHooks(hooks) {
 		coreHooks = hooks;
 	}
+	var coreSession = null;
+	function setCoreSession(session) {
+		coreSession = session;
+	}
+	var fastLoadLog = null;
+	var fastLoadRpcLog = null;
+	function setFastLoadLogs(log, rpc) {
+		fastLoadLog = log;
+		fastLoadRpcLog = rpc;
+	}
 	var navListeners = [];
 	var onNav = (fn) => navListeners.push(fn);
 	var userMap = new Map();
@@ -5215,13 +5612,10 @@
 				if (typeof user.name === "string" && user.name) res.name = user.name;
 			}
 		});
-		if (!res.id) {
-			const storedId = Number(store$1.get("al_user_id", 0));
-			if (storedId > 0) res.id = storedId;
-		}
-		if (!res.name) {
-			const stored = store$1.get("al_username", null);
-			if (stored) res.name = stored;
+		if (!res.id || !res.name) {
+			const snap = coreSession?.peek();
+			if (!res.id && snap?.userId) res.id = snap.userId;
+			if (!res.name && snap?.username) res.name = snap.username;
 		}
 		if (!res.name && doc) {
 			const m = (doc.querySelector("nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .nav a[href^=\"/user/\"]")?.getAttribute("href"))?.match(/^\/user\/([^/?#]+)/);
@@ -5512,8 +5906,9 @@
 		for (const k of Object.keys(vars)) if (vars[k] !== void 0 && vars[k] !== null) copy[k] = vars[k];
 		if (copy.userName && !copy.userId) {
 			const name = String(copy.userName).toLowerCase();
-			const mine = String(store$1.get("al_username", "") || "").toLowerCase();
-			const id = userMap.get(name) || (name === mine ? Number(store$1.get("al_user_id", 0)) : 0);
+			const snap = coreSession?.peek();
+			const mine = String(snap?.username || "").toLowerCase();
+			const id = userMap.get(name) || (name === mine && snap?.userId ? Number(snap.userId) : 0);
 			if (id) {
 				copy.userId = id;
 				delete copy.userName;
@@ -5578,10 +5973,12 @@
 			};
 			scanUsers(res);
 			const viewer = res.Viewer || res.data?.Viewer;
-			if (viewer && viewer.id && viewer.name) {
-				rememberUser(String(viewer.name), Number(viewer.id));
-				store$1.set("al_user_id", Number(viewer.id));
-				store$1.set("al_username", String(viewer.name));
+			if (viewer && (viewer.id || viewer.name)) {
+				if (viewer.id && viewer.name) rememberUser(String(viewer.name), Number(viewer.id));
+				coreSession?.recordHint({
+					userId: viewer.id ? Number(viewer.id) : void 0,
+					username: viewer.name ? String(viewer.name) : void 0
+				});
 			}
 			const user = res.User || res.data?.User || res.MediaListCollection?.user || res.data?.MediaListCollection?.user;
 			if (user && user.id && user.name) rememberUser(String(user.name), Number(user.id));
@@ -5597,7 +5994,7 @@
 		const p = pMap.get(id);
 		if (!p) return;
 		pMap.delete(id);
-		logDebug("[FASTLOAD RPC] IN", id, Object.keys(d));
+		fastLoadRpcLog?.debug("IN", id, Object.keys(d));
 		if (d.result) extractUsersFromRpcResult(d.result);
 		if (p.mutation) {
 			if (coreHooks?.hasGqlFetchSubscribers() && p.query) coreHooks.emitGqlFetch({
@@ -5662,7 +6059,7 @@
 	function prefetchWorkerList(type, userId, userName) {
 		const url = findWorkerUrl();
 		if (!url || !WorkerCtor) {
-			logDebug("[FASTLOAD RPC] Prefetch skipped: worker script unknown");
+			fastLoadRpcLog?.debug("Prefetch skipped: worker script unknown");
 			return;
 		}
 		if (!userId && userName) userId = userMap.get(userName.toLowerCase()) || 0;
@@ -5673,7 +6070,7 @@
 			tpl = JSON.parse(raw);
 		} catch {}
 		if (!tpl) {
-			logDebug("[FASTLOAD RPC] Prefetch skipped: no list template yet");
+			fastLoadRpcLog?.debug("Prefetch skipped: no list template yet");
 			return;
 		}
 		const vars = {
@@ -5687,7 +6084,7 @@
 			vars.userName = userName;
 			delete vars.userId;
 		}
-		const authVal = lastAuth || store$1.get("al_token_auth", "") || (store$1.get("al_token", null) ? `Bearer ${store$1.get("al_token", null)}` : "");
+		const authVal = lastAuth || coreHooks?.getAuthHeader() || "";
 		const headers = { ...tpl.headers || {} };
 		if (authVal) {
 			headers.Authorization = authVal;
@@ -5719,7 +6116,7 @@
 		try {
 			w = new WorkerCtor(url, workerOpts);
 		} catch (err) {
-			logDebug("[FASTLOAD RPC] Prefetch worker failed to start", err);
+			fastLoadRpcLog?.debug("Prefetch worker failed to start", err);
 			return;
 		}
 		const id = `alfl_prefetch_${type}_${now}`;
@@ -5749,7 +6146,7 @@
 			attempt(() => w.terminate());
 		};
 		const timer = setTimeout(() => {
-			logDebug("[FASTLOAD RPC] Prefetch timed out", type);
+			fastLoadRpcLog?.debug("Prefetch timed out", type);
 			finish();
 		}, 3e4);
 		const startEpoch = rpcEpoch;
@@ -5785,7 +6182,7 @@
 					}
 					while (rpcCache.size > RPC_MAX_ENTRIES) rpcCache.delete(rpcCache.keys().next().value);
 				});
-				logDebug("[FASTLOAD RPC] Prefetch cached", type, Object.keys(d));
+				fastLoadRpcLog?.debug("Prefetch cached", type, Object.keys(d));
 				for (const k of [key, ...possibleKeys]) {
 					const f = rpcInflight.get(k);
 					if (f) {
@@ -5794,7 +6191,7 @@
 					}
 				}
 			} else {
-				logDebug("[FASTLOAD RPC] Prefetch failed", d.error);
+				fastLoadRpcLog?.debug("Prefetch failed", d.error);
 				for (const k of [key, ...possibleKeys]) {
 					const f = rpcInflight.get(k);
 					if (f) {
@@ -5807,7 +6204,7 @@
 			attempt(() => w.terminate());
 		});
 		w.addEventListener("error", (e) => {
-			logDebug("[FASTLOAD RPC] Prefetch worker error", e?.message);
+			fastLoadRpcLog?.debug("Prefetch worker error", e?.message);
 			attempt(() => {
 				win.localStorage?.removeItem("alfl:workerUrl");
 				store$1.del("alfl:workerUrl");
@@ -5815,7 +6212,7 @@
 			workerUrl = null;
 			finish();
 		});
-		logDebug("[FASTLOAD RPC] Prefetch dispatching", type, vars);
+		fastLoadRpcLog?.debug("Prefetch dispatching", type, vars);
 		w.postMessage({
 			type: "RPC",
 			id,
@@ -5839,7 +6236,7 @@
 							store$1.set("alfl:workerUrl", workerUrl);
 						});
 						workerOpts = options;
-						logDebug("[FASTLOAD RPC] Page worker created:", urlStr);
+						fastLoadRpcLog?.debug("Page worker created:", urlStr);
 					}
 					if (!watched.has(instance)) {
 						watched.add(instance);
@@ -5862,7 +6259,7 @@
 						if (id.startsWith("alfl_prefetch_")) return origPost.apply(this, [data, ...rest]);
 						const blocker = win.__ALFL_RPC_BLOCK__;
 						if (coreHooks?.isRpcBlocked(String(data.params[1]), data.params[2]) || typeof blocker === "function" && blocker(String(data.params[1]), data.params[2])) {
-							logDebug("[FASTLOAD RPC] Blocked request:", JSON.stringify(data.params[2]).slice(0, 60));
+							fastLoadRpcLog?.debug("Blocked request:", JSON.stringify(data.params[2]).slice(0, 60));
 							const targetId = data.params[2]?.id || data.params[2]?.userId;
 							const pageId = data.params[4]?.page?.id || (targetId ? `listComparison-${targetId}` : "listComparison");
 							const pageNum = data.params[2]?.page || 1;
@@ -5915,9 +6312,9 @@
 						}
 						const h = data.params[3] || {};
 						const a = h.Authorization ?? h.authorization;
-						if (a && !coreHooks?.isSessionClearing()) {
+						if (a && /^Bearer\s+/i.test(String(a)) && !coreHooks?.isSessionClearing()) {
 							lastAuth = String(a);
-							store$1.set("al_token_auth", lastAuth);
+							coreHooks?.setAuthHeader(lastAuth);
 						}
 						const q = {
 							query: data.params[1],
@@ -5993,7 +6390,7 @@
 							}
 							if (hit) {
 								stats.cacheHits++;
-								logDebug("[FASTLOAD RPC] HIT", label, `${Math.round((Date.now() - hit.time) / 1e3)}s old`);
+								fastLoadRpcLog?.debug("HIT", label, `${Math.round((Date.now() - hit.time) / 1e3)}s old`);
 								const worker = this;
 								const reply = {
 									...clone(hit.msg),
@@ -6005,11 +6402,11 @@
 							}
 							if (flying) {
 								stats.deduped++;
-								logDebug("[FASTLOAD RPC] Attached to in-flight prefetch:", label);
+								fastLoadRpcLog?.debug("Attached to in-flight prefetch:", label);
 								const worker = this;
 								const replyId = data.id;
 								flying.promise.then((msg) => {
-									logDebug("[FASTLOAD RPC] In-flight prefetch delivered to page:", label);
+									fastLoadRpcLog?.debug("In-flight prefetch delivered to page:", label);
 									const reply = {
 										...clone(msg),
 										id: replyId
@@ -6021,7 +6418,7 @@
 								});
 								return;
 							}
-							logDebug("[FASTLOAD RPC] MISS", label, JSON.stringify(q.variables).slice(0, 80));
+							fastLoadRpcLog?.debug("MISS", label, JSON.stringify(q.variables).slice(0, 80));
 							let pMap = workerPending.get(this);
 							if (!pMap) {
 								pMap = new Map();
@@ -6193,9 +6590,7 @@
 			cache: init?.cache ?? (isRequest ? input.cache : void 0)
 		};
 		const authHeader = desc.headers.get("authorization");
-		if (authHeader && authHeader.startsWith("Bearer ") && !coreHooks?.isSessionClearing()) {
-			if (authHeader.slice(7).trim()) store$1.set("al_token_auth", authHeader);
-		}
+		if (authHeader && /^Bearer\s+/i.test(authHeader) && !coreHooks?.isSessionClearing()) coreHooks?.setAuthHeader(authHeader);
 		const mediaList = isMediaListQuery(parsed);
 		const bypass = noStore(desc) || !mediaList && isVolatile(parsed);
 		return {
@@ -6211,7 +6606,7 @@
 		if (!(alflMode === true || alflMode === "replay" || alflMode === "internal")) attempt(() => rememberQuery(desc, parsed));
 		const blocker = win.__ALFL_RPC_BLOCK__;
 		if (coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) || typeof blocker === "function" && blocker(parsed?.query, parsed?.variables)) {
-			logDebug("[FASTLOAD] Blocked GQL fetch:", JSON.stringify(parsed?.variables));
+			fastLoadLog?.debug("Blocked GQL fetch:", JSON.stringify(parsed?.variables));
 			const dummy = { data: { Page: {
 				pageInfo: {
 					total: 0,
@@ -6242,7 +6637,7 @@
 			const storedTax = loadStoredTaxonomy();
 			if (storedTax && now - storedTax.time < TAXONOMY_TTL) {
 				stats.cacheHits++;
-				logDebug("[FASTLOAD] Cache HIT (24h localStorage): GenreCollection & MediaTagCollection");
+				fastLoadLog?.debug("Cache HIT (24h localStorage): GenreCollection & MediaTagCollection");
 				const HeadersCtor = win.Headers || Headers;
 				const ResponseCtor = win.Response || Response;
 				return Promise.resolve(new ResponseCtor(storedTax.text, {
@@ -6254,29 +6649,29 @@
 		}
 		if (cached && cached.time >= freshFloor && now - cached.time < ttl) {
 			stats.cacheHits++;
-			logDebug("[FASTLOAD] Cache HIT (RAM):", isMediaListQuery(parsed) ? "MediaListCollection" : "GraphQL query", `${Math.round((now - cached.time) / 1e3)}s old`);
+			fastLoadLog?.debug("Cache HIT (RAM):", isMediaListQuery(parsed) ? "MediaListCollection" : "GraphQL query", `${Math.round((now - cached.time) / 1e3)}s old`);
 			return Promise.resolve(toResponse(cached.snap));
 		}
 		const flying = inflight.get(key);
 		if (flying) {
 			stats.deduped++;
-			logDebug("[FASTLOAD] Attached to in-flight request:", isMediaListQuery(parsed) ? "MediaListCollection" : "GraphQL query");
+			fastLoadLog?.debug("Attached to in-flight request:", isMediaListQuery(parsed) ? "MediaListCollection" : "GraphQL query");
 			return abortable(flying.then((snap) => toResponse(snap), () => nativeFetch(input, init)), init?.signal);
 		}
 		const myEpoch = epoch;
 		const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
 		const opName = parsed.operationName || (isMediaListQuery(parsed) ? "MediaListCollection" : "query");
-		logDebug(alflMode === "replay" ? "[FASTLOAD] Cache MISS (prefetch fetch):" : "[FASTLOAD] Cache MISS (network fetch):", opName, "key:", key);
+		fastLoadLog?.debug(alflMode === "replay" ? "Cache MISS (prefetch fetch):" : "Cache MISS (network fetch):", opName, "key:", key);
 		const original = trackedNativeFetch(nativeFetch, job, input, init);
 		const snapshot = original.then(async (res) => {
 			note429(res);
 			if (res.status !== 200 || res.bodyUsed || typeof res.clone !== "function") {
-				logDebug("[FASTLOAD] Response not cacheable:", res.status, opName);
+				fastLoadLog?.debug("Response not cacheable:", res.status, opName);
 				throw new Error("not cacheable");
 			}
 			const buf = await res.clone().arrayBuffer();
 			if (hasGraphQLErrors(buf)) {
-				logDebug("[FASTLOAD] Response had GraphQL errors:", opName);
+				fastLoadLog?.debug("Response had GraphQL errors:", opName);
 				throw new Error("graphql errors");
 			}
 			return {
@@ -6291,7 +6686,7 @@
 			if (inflight.get(key) === snapshot) inflight.delete(key);
 			if (epoch === myEpoch) {
 				put(key, snap);
-				logDebug("[FASTLOAD] Cached in RAM:", opName, `${Math.round(snap.buf.byteLength / 1024)} KB`);
+				fastLoadLog?.debug("Cached in RAM:", opName, `${Math.round(snap.buf.byteLength / 1024)} KB`);
 			}
 			attempt(() => {
 				if (isViewerQuery(parsed)) extractUsersFromRpcResult(JSON.parse(decoder.decode(snap.buf))?.data);
@@ -6570,9 +6965,7 @@
 	}
 	function getReplayAuthToken() {
 		if (lastAuth) return lastAuth.replace(/^Bearer\s+/i, "").trim();
-		const stored = store$1.get("al_token", null);
-		if (stored) return stored;
-		const storedHeader = store$1.get("al_token_auth", null);
+		const storedHeader = coreHooks?.getAuthHeader();
 		if (storedHeader) return storedHeader.replace(/^Bearer\s+/i, "").trim();
 		return null;
 	}
@@ -6601,7 +6994,7 @@
 			stamps.push(Date.now());
 			sent++;
 			attempt(() => {
-				logDebug("[FASTLOAD] Replay/Prefetch dispatching for:", route.shape, "vars:", parsed.variables);
+				fastLoadLog?.debug("Replay/Prefetch dispatching for:", route.shape, "vars:", parsed.variables);
 				win.fetch(request.url, {
 					method: "POST",
 					headers,
@@ -6639,7 +7032,8 @@
 		if (listMatch) {
 			const targetUser = listMatch[1] || getLocalUsername();
 			const listType = listMatch[2].toLowerCase() === "mangalist" ? "MANGA" : "ANIME";
-			const userId = targetUser ? userMap.get(targetUser.toLowerCase()) || (targetUser.toLowerCase() === getLocalUsername()?.toLowerCase() ? Number(store$1.get("al_user_id", 0)) : 0) : 0;
+			const myId = coreSession?.peek().userId || 0;
+			const userId = targetUser ? userMap.get(targetUser.toLowerCase()) || (targetUser.toLowerCase() === getLocalUsername()?.toLowerCase() ? myId : 0) : 0;
 			if (userId || targetUser) prefetchWorkerList(listType, userId, targetUser || void 0);
 			return;
 		}
@@ -6668,7 +7062,7 @@
 		if (sent) {
 			prefetched.set(key, now);
 			stats.prefetched += sent;
-			logDebug("[FASTLOAD] Prefetch sent for:", route.shape, route.id);
+			fastLoadLog?.debug("Prefetch sent for:", route.shape, route.id);
 		}
 	}
 	var autoPrefetchTimer = 0;
@@ -6685,8 +7079,8 @@
 		const path = win.location.pathname;
 		if (path.toLowerCase().includes("/compare")) return;
 		const viewer = getViewerFromWindow();
-		const myId = viewer.id || Number(store$1.get("al_user_id", 0));
-		const myName = viewer.name || store$1.get("al_username", null);
+		const myId = viewer.id;
+		const myName = viewer.name || null;
 		const userMatch = path.match(/^\/user\/([^/]+)(?:\/([^/]+))?/i);
 		let isAnotherUserPage = false;
 		let otherUser = "";
@@ -6702,7 +7096,7 @@
 			}
 		}
 		if (isAnotherUserPage) {
-			logDebug("[FASTLOAD RPC] Auto-prefetching for target user:", otherUser, "subRoute:", subRoute);
+			fastLoadRpcLog?.debug("Auto-prefetching for target user:", otherUser, "subRoute:", subRoute);
 			if (subRoute !== "animelist") setTimeout(() => {
 				prefetchWorkerList("ANIME", otherUserId, otherUser);
 			}, 100);
@@ -6755,10 +7149,15 @@
 		title: "AniList Fast Load",
 		help: "Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.",
 		debug: {
-			key: "debugFastLoad",
+			label: "Fast Load",
 			title: "Fast Load Debug",
-			help: "Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity.",
-			pattern: /^\[(?:FASTLOAD|ALFL)/i
+			help: "Log GraphQL caching, prefetching, deduplication, and Web Worker RPC activity.",
+			channels: { rpc: {
+				label: "RPC",
+				title: "Web Worker RPC",
+				debug: true,
+				help: "Log Web Worker RPC requests, cache hits/misses, and prefetches."
+			} }
 		},
 		standalone: {
 			name: "AniList Fast Load",
@@ -6768,12 +7167,14 @@
 			if (win.top !== win.self) return;
 			if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
 				ctx.setStandalonePaused(true);
-				console.warn("[AL-Additions] Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.");
+				ctx.log.warn("Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.");
 				return;
 			}
 			win.__ALA_FAST_LOAD__ = "0.4.3";
 			markBuiltIn("fastLoad");
 			setCoreHooks(ctx.hooks);
+			setCoreSession(ctx.session);
+			setFastLoadLogs(ctx.log, ctx.log.channel("rpc"));
 			ctx.hooks.registerCacheBridge({
 				getGqlStore: () => store,
 				getRpcCache: () => rpcCache,
@@ -6790,7 +7191,7 @@
 					yieldedToStandalone = true;
 					ctx.hooks.markFetchOwner(false);
 					ctx.setStandalonePaused(true);
-					console.warn("[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.");
+					ctx.log.warn("Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.");
 				}
 				return yieldedToStandalone;
 			};
@@ -6818,9 +7219,11 @@
 				const viewer = getViewerFromWindow();
 				if (viewer.name && viewer.id) {
 					rememberUser(viewer.name, viewer.id);
-					store$1.set("al_user_id", viewer.id);
-					store$1.set("al_username", viewer.name);
-				} else if (viewer.name) store$1.set("al_username", viewer.name);
+					ctx.session.recordHint({
+						userId: viewer.id,
+						username: viewer.name
+					});
+				} else if (viewer.name) ctx.session.recordHint({ username: viewer.name });
 			});
 			let hiddenAt = 0;
 			ctx.listen(doc, "visibilitychange", () => {
@@ -6858,6 +7261,8 @@
 			}
 			ctx.onCleanup(() => {
 				navListeners.length = 0;
+				setFastLoadLogs(null, null);
+				setCoreSession(null);
 				setCoreHooks(null);
 			});
 		}
@@ -7095,10 +7500,9 @@
 		title: "List Score & Progress Editor",
 		help: "Show your score and episode/chapter progress controls on anime and manga pages.",
 		debug: {
-			key: "debugMediaInfo",
+			label: "Media Info",
 			title: "Media Info Debug",
-			help: "Log media info sidebar updates, progress steppers, and save requests.",
-			pattern: /^\[MEDIAINFO/i
+			help: "Log media info sidebar updates, progress steppers, and save requests."
 		},
 		setup(ctx) {
 			const ID = "ala-media-info";
@@ -7226,7 +7630,7 @@
 				const isStarting = (!prev.status || prev.status === "PLANNING") && progress > 0;
 				const status = finishNow ? "COMPLETED" : isStarting ? "CURRENT" : void 0;
 				saving = true;
-				ctx.debug.log("Saving media progress/score:", {
+				ctx.log.debug("Saving media progress/score:", {
 					mediaId: media.id,
 					score,
 					progress,
@@ -7241,11 +7645,10 @@
 					});
 					if (!entry) throw new Error("AniList did not return the updated entry");
 					info.mediaListEntry = entry;
-					ctx.debug.log("Save successful:", entry);
+					ctx.log.debug("Save successful:", entry);
 					return entry;
 				} catch (e) {
-					ctx.debug.log("Media list save failed:", e);
-					console.warn("[AL-Additions] Media list save failed:", e);
+					ctx.log.warn("Media list save failed:", e);
 					return false;
 				} finally {
 					saving = false;
@@ -7274,7 +7677,7 @@
 				const g = gen;
 				const stale = () => g !== gen || mediaRoute()?.id !== route.id;
 				rendering = true;
-				ctx.debug.log("Rendering media info panel for:", key);
+				ctx.log.debug("Rendering media info panel for:", key);
 				try {
 					let info = null;
 					let fmt = null;
@@ -7590,6 +7993,7 @@
 			if (this.persistKey && this.until > stored) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
 		}
 	};
+	var anilistLog = createCoreLogger("anilist");
 	function stripCommentsAndStrings(q) {
 		let out = "";
 		let i = 0;
@@ -7891,7 +8295,7 @@
 			try {
 				return fn();
 			} catch (e) {
-				logDebug("[ANILIST API] Cache bridge error:", e);
+				anilistLog.debug("Cache bridge error:", e);
 				return;
 			}
 		}
@@ -7955,14 +8359,62 @@
 				CoreHooks.setSessionClearing(false);
 			}
 		};
-		function syncFromPage() {
+		function readPageDoc() {
 			const win = pageWin();
-			const doc = win.document || document;
-			if (isLoggedOutNav(doc)) {
+			return {
+				win,
+				doc: win?.document || (typeof document !== "undefined" ? document : void 0)
+			};
+		}
+		function peek(opts) {
+			if (opts?.reconcile) syncFromPage();
+			const { win, doc } = readPageDoc();
+			if (doc && isLoggedOutNav(doc)) return {
+				userId: null,
+				username: null,
+				scoreFormat: null
+			};
+			const storedIdNum = Number(store$1.get("al_user_id", 0));
+			const storedId = storedIdNum > 0 ? storedIdNum : null;
+			const storedNameRaw = store$1.get("al_username", null);
+			const storedName = typeof storedNameRaw === "string" && storedNameRaw ? storedNameRaw : null;
+			const storedFmtRaw = store$1.get("al_score_format", null);
+			const storedFmt = typeof storedFmtRaw === "string" && storedFmtRaw ? storedFmtRaw : null;
+			const cachedViewer = entityCache.get("Viewer")?.data?.Viewer;
+			const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
+			const navName = doc ? navUserName(doc) || null : null;
+			if (nuxtUser?.id) {
+				const nuxtId = Number(nuxtUser.id);
+				const storedMismatch = storedId !== null && storedId !== nuxtId || storedId === null && storedName !== null && typeof nuxtUser.name === "string" && storedName.toLowerCase() !== nuxtUser.name.toLowerCase();
+				const cachedMatches = !!(cachedViewer?.id && Number(cachedViewer.id) === nuxtId);
+				return {
+					userId: nuxtId,
+					username: (nuxtUser.name ? String(nuxtUser.name) : null) || (cachedMatches && cachedViewer?.name ? String(cachedViewer.name) : null) || (!storedMismatch ? storedName : null) || navName || null,
+					scoreFormat: (cachedMatches ? cachedViewer?.mediaListOptions?.scoreFormat || null : null) || (!storedMismatch ? storedFmt : null)
+				};
+			}
+			if (navName) {
+				const storedMatches = storedName === null || storedName.toLowerCase() === navName.toLowerCase();
+				const cachedMatches = !!(cachedViewer?.name && String(cachedViewer.name).toLowerCase() === navName.toLowerCase());
+				return {
+					userId: (storedMatches ? storedId : null) || (cachedMatches && cachedViewer?.id ? Number(cachedViewer.id) : null),
+					username: storedMatches && storedName || navName,
+					scoreFormat: (storedMatches ? storedFmt : null) || (cachedMatches ? cachedViewer?.mediaListOptions?.scoreFormat || null : null)
+				};
+			}
+			return {
+				userId: storedId || (cachedViewer?.id ? Number(cachedViewer.id) : null),
+				username: storedName || (cachedViewer?.name ? String(cachedViewer.name) : null),
+				scoreFormat: storedFmt || cachedViewer?.mediaListOptions?.scoreFormat || null
+			};
+		}
+		function syncFromPage() {
+			const { win, doc } = readPageDoc();
+			if (doc && isLoggedOutNav(doc)) {
 				if (ANILIST_SESSION_KEYS.some((k) => store$1.get(k, void 0) !== void 0) || entityCache.has("Viewer")) clearViewer();
 				return;
 			}
-			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+			const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
 			if (nuxtUser?.id) {
 				const nuxtId = Number(nuxtUser.id);
 				const storedId = Number(store$1.get("al_user_id", 0));
@@ -7970,7 +8422,7 @@
 				if (storedId && storedId !== nuxtId || cachedViewerId && cachedViewerId !== nuxtId) clearViewer();
 				return;
 			}
-			const navName = navUserName(doc);
+			const navName = doc ? navUserName(doc) : "";
 			if (navName) {
 				const storedName = store$1.get("al_username", null);
 				const cachedViewerName = entityCache.get("Viewer")?.data?.Viewer?.name;
@@ -7978,22 +8430,45 @@
 			}
 		}
 		function isViewerMismatchedWithPage(v) {
-			const win = pageWin();
-			const doc = win.document || document;
-			if (isLoggedOutNav(doc)) return true;
-			const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-			if (nuxtUser?.id) return Boolean(v?.id && Number(v.id) !== Number(nuxtUser.id));
-			const navName = navUserName(doc);
-			if (navName) return Boolean(v?.name && String(v.name).toLowerCase() !== navName.toLowerCase());
+			const { win, doc } = readPageDoc();
+			if (doc && isLoggedOutNav(doc)) return true;
+			const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
+			if (nuxtUser?.id && v?.id != null && Number(v.id) > 0) {
+				if (Number(v.id) !== Number(nuxtUser.id)) return true;
+			}
+			const pageName = (nuxtUser?.name ? String(nuxtUser.name).trim() : "") || (doc ? navUserName(doc) : "");
+			if (pageName && v?.name) {
+				if (String(v.name).trim().toLowerCase() !== pageName.toLowerCase()) return true;
+			}
 			return false;
 		}
-		function isBrowserLoggedIn() {
-			const win = pageWin();
-			const doc = win.document || document;
+		function recordHint(hint) {
+			if (!hint || CoreHooks.isSessionClearing()) return;
+			const nextId = typeof hint.userId === "number" && Number.isFinite(hint.userId) && hint.userId > 0 ? Math.floor(hint.userId) : null;
+			const nextName = typeof hint.username === "string" && hint.username.trim() ? hint.username.trim() : null;
+			if (nextId === null && nextName === null) return;
 			syncFromPage();
-			if (isLoggedOutNav(doc)) return false;
-			if ((win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user)?.id) return true;
-			if (hasLoggedInNav(doc)) return true;
+			if (CoreHooks.isSessionClearing()) return;
+			if (isViewerMismatchedWithPage({
+				id: nextId,
+				name: nextName
+			})) return;
+			if (nextId !== null) {
+				const storedId = Number(store$1.get("al_user_id", 0));
+				if (storedId && storedId !== nextId) {
+					store$1.del("al_username");
+					store$1.del("al_score_format");
+				}
+				if (storedId !== nextId) store$1.set("al_user_id", nextId);
+			}
+			if (nextName !== null && store$1.get("al_username", null) !== nextName) store$1.set("al_username", nextName);
+		}
+		function isBrowserLoggedIn() {
+			const { win, doc } = readPageDoc();
+			syncFromPage();
+			if (doc && isLoggedOutNav(doc)) return false;
+			if ((win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user)?.id) return true;
+			if (doc && hasLoggedInNav(doc)) return true;
 			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
 		}
 		const header = (res, name) => {
@@ -8085,14 +8560,14 @@
 			if (!opts.forceFresh && meta) {
 				const cached = entityCache.get(meta.entityKey);
 				if (cached && now - cached.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, cached.fields)) {
-					logDebug("[ANILIST API] 🎯 Cache HIT via Subset matching:", meta.entityKey);
+					anilistLog.debug("🎯 Cache HIT via Subset matching:", meta.entityKey);
 					return cached.data;
 				}
 			}
 			if (meta && !opts.forceFresh) {
 				const flyingEntity = inflightEntities.get(meta.entityKey);
 				if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
-					logDebug("[ANILIST API] 🔗 Attached to in-flight Superset request:", meta.entityKey);
+					anilistLog.debug("🔗 Attached to in-flight Superset request:", meta.entityKey);
 					return flyingEntity.promise;
 				}
 			}
@@ -8260,7 +8735,7 @@
 			for (const k of entityKeys) {
 				const cached = entityCache.get(k);
 				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection && cached.data.MediaListCollection.hasNextChunk !== true) {
-					logDebug("[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:", k);
+					anilistLog.debug("🎯 Cache HIT for MediaListCollection via entityCache:", k);
 					return formatMediaListResult(cached.data.MediaListCollection);
 				}
 			}
@@ -8273,7 +8748,7 @@
 						const json = JSON.parse(raw);
 						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
 						if (mlc && Array.isArray(mlc.lists) && mlc.hasNextChunk !== true) {
-							logDebug(viaScan ? "[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):" : "[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
+							anilistLog.debug(viaScan ? "🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):" : "🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
 							return formatMediaListResult(mlc);
 						}
 					} catch (_) {}
@@ -8303,7 +8778,7 @@
 					try {
 						const result = parseRpcMediaList(cached.msg.result ?? cached.msg);
 						if (result && result.allEntries.length > 0) {
-							logDebug(viaScan ? "[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):" : "[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:", k);
+							anilistLog.debug(viaScan ? "🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):" : "🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:", k);
 							return result;
 						}
 					} catch (_) {}
@@ -8353,13 +8828,13 @@
 					if (!flight?.promise) return null;
 					let timer;
 					try {
-						logDebug("[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
+						anilistLog.debug("⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
 						const msg = await Promise.race([flight.promise, new Promise((_, reject) => {
 							timer = setTimeout(() => reject(new Error("timeout")), 5e3);
 						})]);
 						const parsed = parseRpcMediaList(msg?.result ?? msg);
 						if (parsed && parsed.allEntries.length > 0) {
-							logDebug("[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
+							anilistLog.debug("🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
 							return parsed;
 						}
 					} catch (_) {} finally {
@@ -8500,9 +8975,20 @@
 			hasAuth,
 			resumeAt,
 			session: {
+				peek,
+				get userId() {
+					return peek().userId;
+				},
+				get username() {
+					return peek().username;
+				},
+				get scoreFormat() {
+					return peek().scoreFormat;
+				},
 				hasAuth,
 				clear: clearViewer,
-				syncFromPage
+				syncFromPage,
+				recordHint
 			}
 		};
 	})();
@@ -8519,7 +9005,7 @@
 				}))?.Media || null;
 			} catch (e) {
 				if (opts?.throwAuth && e?.auth) throw e;
-				logDebug("[MEDIA DATA] fetch failed:", e?.message || e);
+				anilistLog.debug("MediaData fetch failed:", e?.message || e);
 				return null;
 			}
 		}
@@ -8547,6 +9033,7 @@
 		...AniList,
 		media: MediaData
 	};
+	var malLog$1 = createCoreLogger("mal");
 	var OVERRIDES_SETTING_KEY = "syncManualOverrides";
 	var MANUAL_OVERRIDES_ENABLED_KEY = "manualOverridesEnabled";
 	function isManualOverridesEnabled() {
@@ -8727,7 +9214,7 @@
 					}
 					if (changed) saveManualOverrides(current);
 				} catch (e) {
-					console.warn("[AL-Additions] Failed to refresh stale overrides batch:", e);
+					malLog$1.warn("Failed to refresh stale overrides batch:", e);
 					break;
 				}
 			}
@@ -8967,6 +9454,7 @@
 			ctx.ready(() => fixLinks([document.body]));
 		}
 	});
+	var malLog = createCoreLogger("mal");
 	var MAL_AUTH_URL = "https://myanimelist.net/v1/oauth2/authorize";
 	var MAL_TOKEN_URL = "https://myanimelist.net/v1/oauth2/token";
 	var MAL_API = "https://api.myanimelist.net/v2";
@@ -9005,7 +9493,7 @@
 				level
 			});
 		} catch (e) {
-			console.error("[AL→MAL Sync] uiSink.onLog failed:", e);
+			malLog.error("uiSink.onLog failed:", e);
 		}
 	}
 	function toast(msg, isError, closeTab) {
@@ -9016,7 +9504,7 @@
 				return;
 			}
 		} catch (e) {
-			console.error("[AL→MAL Sync] uiSink.onToast failed:", e);
+			malLog.error("uiSink.onToast failed:", e);
 		}
 		showToast(msg, {
 			type: isError ? "error" : "success",
@@ -9111,11 +9599,12 @@
 			}).catch((e) => toast("MAL connection failed: " + e.message, true));
 		}
 	}
+	var isMalConnected = () => !!store$1.get("mal_token", null);
 	registerAccountProvider({
 		id: "mal",
 		name: "MyAnimeList",
 		secretKeys: MAL_SECRET_KEYS,
-		isConnected: () => !!store$1.get("mal_token", null),
+		isConnected: () => isMalConnected(),
 		connect: () => malConnect(),
 		disconnect: () => clearMalAuth(),
 		onAuthCallback: () => captureCredentials()
@@ -9186,7 +9675,7 @@
 		await malLimiter.acquire(checkCancel ?? hooks.checkCancel);
 		const token = await malEnsureToken(failedToken);
 		onTokenResolved?.();
-		logDebug("[SYNC]", `MAL ${method} ${url}`, data ? { data } : "");
+		malLog.debug(`MAL ${method} ${url}`, data ? { data } : "");
 		const res = await gm.request(url, {
 			method,
 			data,
@@ -9196,7 +9685,7 @@
 				...headers
 			}
 		});
-		logDebug("[SYNC]", `MAL ${method} response: ${res.status} for ${url}`);
+		malLog.debug(`MAL ${method} response: ${res.status} for ${url}`);
 		if (looksLimited(res)) malLimiter.limit(parseRetryAfterMs(res.responseHeaders, res.status === 429 ? 5e3 : 6e4));
 		else if (res.status >= 500) malLimiter.limit(2e3);
 		else if (res.status >= 200 && res.status < 300) malLimiter.success();
@@ -9340,11 +9829,39 @@
 	}
 	var TYPES = MEDIA_TYPES;
 	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
+	var SYNC_STORAGE_PREFIX = "ala_mod_sync_";
+	var SYNC_KNOWN_KEYS = [
+		"schema",
+		"lock_heartbeat",
+		"sync_onboarded",
+		"sync_retry_at",
+		"sync_account",
+		"pending_deletes",
+		...TYPES.flatMap((t) => [
+			`last_sync_${t}`,
+			`last_run_${t}`,
+			`last_compare_${t}`
+		])
+	];
+	var syncStore = {
+		get: (k, d) => store$1.get(`${SYNC_STORAGE_PREFIX}${k}`, d),
+		set: (k, v) => store$1.set(`${SYNC_STORAGE_PREFIX}${k}`, v),
+		del: (k) => store$1.del(`${SYNC_STORAGE_PREFIX}${k}`),
+		jsonGet: (k, d) => jsonGet(`${SYNC_STORAGE_PREFIX}${k}`, d),
+		jsonSet: (k, v) => jsonSet(`${SYNC_STORAGE_PREFIX}${k}`, v),
+		clearKnown: () => {
+			for (const k of SYNC_KNOWN_KEYS) store$1.del(`${SYNC_STORAGE_PREFIX}${k}`);
+		}
+	};
+	var syncLog = null;
+	function setSyncLog(log) {
+		syncLog = log;
+	}
 	var SETTLED_TTL_MS = 3888e6;
 	var LOCK_STALE_MS = 45e3;
 	var LOCK_HEARTBEAT_MS = 1e4;
 	var TAB_ID = randomString(10);
-	var LOCK_KEY = "sync_lock_heartbeat";
+	var LOCK_KEY = "lock_heartbeat";
 	var progress = {
 		phase: "idle",
 		done: 0,
@@ -9400,8 +9917,8 @@
 		}
 	};
 	var makeStores = (t) => ({
-		ids: persistent(`sync_idmap_${t}`, pruneIds),
-		settled: persistent(`sync_settled_${t}`, pruneSettled)
+		ids: persistent(`${SYNC_STORAGE_PREFIX}idmap_${t}`, pruneIds),
+		settled: persistent(`${SYNC_STORAGE_PREFIX}settled_${t}`, pruneSettled)
 	});
 	var stores = {
 		ANIME: makeStores("ANIME"),
@@ -9411,17 +9928,18 @@
 		for (const k of Object.keys(c.data)) delete c.data[k];
 		c.save();
 	};
-	var PENDING_DELETES_KEY = "sync_pending_deletes";
+	var PENDING_DELETES_KEY = "pending_deletes";
 	function getPendingDeletes() {
-		return jsonGet(PENDING_DELETES_KEY, []);
+		return syncStore.jsonGet(PENDING_DELETES_KEY, []);
 	}
 	function addPendingDelete(del) {
 		const list = getPendingDeletes().filter((p) => !(p.mediaId === del.mediaId && p.type === del.type));
 		list.push(del);
-		jsonSet(PENDING_DELETES_KEY, list);
+		syncStore.jsonSet(PENDING_DELETES_KEY, list);
 	}
 	function removePendingDelete(mediaId, type) {
-		jsonSet(PENDING_DELETES_KEY, getPendingDeletes().filter((p) => !(p.mediaId === mediaId && p.type === type)));
+		const list = getPendingDeletes().filter((p) => !(p.mediaId === mediaId && p.type === type));
+		syncStore.jsonSet(PENDING_DELETES_KEY, list);
 	}
 	function resetAccountState() {
 		for (const t of TYPES) {
@@ -9429,30 +9947,30 @@
 				"last_sync",
 				"last_run",
 				"last_compare"
-			]) store$1.del(`${k}_${t}`);
+			]) syncStore.del(`${k}_${t}`);
 			clearCache(stores[t].settled);
 		}
-		store$1.del("sync_retry_at");
-		store$1.del(PENDING_DELETES_KEY);
+		syncStore.del("sync_retry_at");
+		syncStore.del(PENDING_DELETES_KEY);
 	}
 	var heartbeat = null;
 	async function acquireLock() {
-		const lock = jsonGet(LOCK_KEY, null);
+		const lock = syncStore.jsonGet(LOCK_KEY, null);
 		if (lock && lock.tab !== TAB_ID && Number.isFinite(lock.at) && Date.now() - lock.at < LOCK_STALE_MS) return false;
-		const beat = () => jsonSet(LOCK_KEY, {
+		const beat = () => syncStore.jsonSet(LOCK_KEY, {
 			at: Date.now(),
 			tab: TAB_ID
 		});
 		beat();
 		await sleep(250);
-		if (jsonGet(LOCK_KEY, null)?.tab !== TAB_ID) return false;
+		if (syncStore.jsonGet(LOCK_KEY, null)?.tab !== TAB_ID) return false;
 		heartbeat = setInterval(beat, LOCK_HEARTBEAT_MS);
 		return true;
 	}
 	function releaseLock() {
 		if (heartbeat) clearInterval(heartbeat);
 		heartbeat = null;
-		if (jsonGet(LOCK_KEY, null)?.tab === TAB_ID) store$1.del(LOCK_KEY);
+		if (syncStore.jsonGet(LOCK_KEY, null)?.tab === TAB_ID) syncStore.del(LOCK_KEY);
 	}
 	var STATUS_MAP = {
 		ANIME: {
@@ -9951,11 +10469,11 @@
 			transient: 0,
 			permanent: 0
 		};
-		const lastSync = Number(store$1.get(`last_sync_${type}`, 0)) || 0;
-		const fullPass = full || !lastSync || Date.now() - Number(store$1.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
+		const lastSync = Number(syncStore.get(`last_sync_${type}`, 0)) || 0;
+		const fullPass = full || !lastSync || Date.now() - Number(syncStore.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
 		const isExact = Settings.get("syncMode") === "exact";
 		log(`${label}: starting ${fullPass ? "full library comparison" : "incremental sync"} — fetching AniList entries and your current MAL list.`);
-		logDebug("[SYNC]", `${label}: starting sync pass:`, {
+		syncLog?.debug(`${label}: starting sync pass:`, {
 			fullPass,
 			lastSync,
 			isExact
@@ -9963,7 +10481,7 @@
 		const [entries, mal] = await Promise.all([fullPass ? alFetchAll(userId, type) : alFetchIncremental(userId, type, lastSync), malFetchList(type)]);
 		const newest = entries.reduce((m, e) => Math.max(m, e.updatedAt), 0);
 		log(`${label}: found ${entries.length} AniList entr${entries.length === 1 ? "y" : "ies"} to check and ${Object.keys(mal).length} entr${Object.keys(mal).length === 1 ? "y" : "ies"} on MAL.`);
-		logDebug("[SYNC]", `${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
+		syncLog?.debug(`${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
 		progress.total += entries.length;
 		progress.phase = "pushing";
 		notifyProgress(true);
@@ -10025,10 +10543,10 @@
 		const ok = c.transient === 0;
 		if (ok) {
 			if (fullPass) {
-				store$1.set(`last_compare_${type}`, Date.now());
-				store$1.set(`last_sync_${type}`, Math.max(1, newest));
-			} else if (newest) store$1.set(`last_sync_${type}`, Math.max(newest, lastSync));
-			store$1.set(`last_run_${type}`, Math.floor(Date.now() / 1e3));
+				syncStore.set(`last_compare_${type}`, Date.now());
+				syncStore.set(`last_sync_${type}`, Math.max(1, newest));
+			} else if (newest) syncStore.set(`last_sync_${type}`, Math.max(newest, lastSync));
+			syncStore.set(`last_run_${type}`, Math.floor(Date.now() / 1e3));
 		}
 		log(`${label}: finished — ${[
 			`${c.pushed} updated`,
@@ -10065,11 +10583,11 @@
 		log(`⚠ ${e.message}`);
 	}
 	async function runSync(types = [...TYPES], opts = {}) {
-		logDebug("[SYNC]", "runSync initiated for types:", types, "options:", opts);
+		syncLog?.debug("runSync initiated for types:", types, "options:", opts);
 		if (syncStatus.syncing) return log("Sync already running.");
 		if (!onAniList()) return log("Open AniList to run a sync — it needs your AniList login.", "warn");
 		if (!AniList.hasAuth()) return log("Log in to AniList first.");
-		if (!store$1.get("mal_token")) return log("Connect MyAnimeList first.");
+		if (!isMalConnected()) return log("Connect MyAnimeList first.");
 		if (navigator.onLine === false) return log("You appear to be offline; sync skipped.");
 		syncStatus.syncing = true;
 		syncStatus.cancelled = false;
@@ -10078,7 +10596,7 @@
 			return log("Another tab is already syncing, skipped.");
 		}
 		breaker.reset();
-		store$1.set("sync_onboarded", true);
+		syncStore.set("sync_onboarded", true);
 		Object.assign(progress, {
 			phase: "fetching",
 			done: 0,
@@ -10093,12 +10611,12 @@
 			if (!viewer) throw authError("AniList", "AniList is not logged in.");
 			const me = await malWhoAmI();
 			const account = `${viewer.id}:${me.id}`;
-			const prev = store$1.get("sync_account", null);
+			const prev = syncStore.get("sync_account", null);
 			if (prev && prev !== account) {
 				log("Connected account changed. Resetting sync watermarks and per-account suppression state.", "warn");
 				resetAccountState();
 			}
-			store$1.set("sync_account", account);
+			syncStore.set("sync_account", account);
 			if (opts.full) for (const t of types) clearCache(stores[t].settled);
 			const results = await Promise.allSettled(types.map((t) => syncType(t, viewer.id, !!opts.full)));
 			const fatal = results.find((r) => r.status === "rejected" && (r.reason?.auth || r.reason?.abort));
@@ -10114,13 +10632,13 @@
 			}
 			allOk = results.every((r) => r.status === "fulfilled" && r.value.ok);
 			if (allOk) {
-				store$1.del("sync_retry_at");
+				syncStore.del("sync_retry_at");
 				log(`Synced in ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
-			} else if (!syncStatus.cancelled) store$1.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
+			} else if (!syncStatus.cancelled) syncStore.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
 		} catch (e) {
 			if (e.auth) handleAuthFailure(e);
 			else log("Sync could not finish: " + (e.message || e), "error");
-			if (!e.auth && !syncStatus.cancelled) store$1.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
+			if (!e.auth && !syncStatus.cancelled) syncStore.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
 		} finally {
 			for (const t of types) {
 				stores[t].ids.save();
@@ -10137,27 +10655,27 @@
 		if (syncStatus.syncing) return;
 		const pageType = currentListType();
 		const types = pageType ? [pageType] : [...TYPES];
-		if (types.some((t) => !store$1.get(`last_sync_${t}`, 0)) && !await confirmDecimalScores()) return log("First sync cancelled.");
+		if (types.some((t) => !syncStore.get(`last_sync_${t}`, 0)) && !await confirmDecimalScores()) return log("First sync cancelled.");
 		runSync(types);
 	}
 	async function fullResync() {
 		if (syncStatus.syncing) return;
-		if (!store$1.get("sync_onboarded", false) && !await confirmDecimalScores()) return log("Full resync cancelled.");
+		if (!syncStore.get("sync_onboarded", false) && !await confirmDecimalScores()) return log("Full resync cancelled.");
 		for (const t of TYPES) clearCache(stores[t].ids);
 		log("Full Resync started: checking the entire AniList library and clearing cached match/suppression decisions.");
 		runSync([...TYPES], { full: true });
 	}
 	function maybeAutoSync() {
 		if (!onAniList() || !Settings.get("syncEnabled") || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
-		if (!AniList.hasAuth() || !store$1.get("mal_token")) return;
-		const retryAt = Number(store$1.get("sync_retry_at", 0)) || 0;
+		if (!AniList.hasAuth() || !isMalConnected()) return;
+		const retryAt = Number(syncStore.get("sync_retry_at", 0)) || 0;
 		if (retryAt > 0 && Date.now() < retryAt) return;
 		const dueTypes = [];
 		for (const t of TYPES) {
 			const isAnime = t === "ANIME";
 			if (!Settings.get(isAnime ? "syncAutoAnime" : "syncAutoManga")) continue;
 			const hours = Math.max(1, Number(Settings.get(isAnime ? "syncIntervalAnime" : "syncIntervalManga")) || 6);
-			const last = Number(store$1.get(`last_run_${t}`, 0)) || 0;
+			const last = Number(syncStore.get(`last_run_${t}`, 0)) || 0;
 			if (retryAt > 0 ? !last || Date.now() - last * 1e3 >= RETRY_AFTER_FAILURE_MS : !last || Date.now() - last * 1e3 >= hours * 36e5) dueTypes.push(t);
 		}
 		if (dueTypes.length > 0) {
@@ -10165,7 +10683,7 @@
 			log(retryAt > 0 ? `Auto-sync (${labels}): retrying after an earlier failure…` : `Auto-sync (${labels}): interval reached or initial sync…`);
 			syncStatus.autoSyncRetryAfter = Date.now() + 3e5;
 			runSync(dueTypes);
-		} else if (retryAt > 0 && Date.now() >= retryAt) store$1.del("sync_retry_at");
+		} else if (retryAt > 0 && Date.now() >= retryAt) syncStore.del("sync_retry_at");
 	}
 	var panelCtx = null;
 	var PANEL_CSS = `
@@ -10328,7 +10846,7 @@
 		}[tone]}">${chip("al", false, !alOk)}${ARROW}${chip("mal", false, !malOk)}</div></div>`;
 		if (ready) {
 			const t = currentListType();
-			const rows = (t ? [[t, "Last sync"]] : [["ANIME", "Anime sync"], ["MANGA", "Manga sync"]]).map(([type, label]) => `<div class="almal-meta-row">${label}: ${timeEl(store$1.get("last_run_" + type, 0))}</div>`).join("");
+			const rows = (t ? [[t, "Last sync"]] : [["ANIME", "Anime sync"], ["MANGA", "Manga sync"]]).map(([type, label]) => `<div class="almal-meta-row">${label}: ${timeEl(syncStore.get("last_run_" + type, 0))}</div>`).join("");
 			html += `<div class="almal-actions">
         ${syncStatus.syncing ? `<button class="almal-btn almal-btn--icon almal-btn--danger" data-act="stop" ${syncStatus.cancelled ? "disabled" : ""} aria-label="${syncStatus.cancelled ? "Stopping" : "Stop sync"}" title="${syncStatus.cancelled ? "Stopping…" : "Stop sync"}">${icon("stop", 16)}</button>` : `<button class="almal-btn almal-btn--icon" data-act="resync" aria-label="Full resync" title="Full resync">${icon("resync", 16)}</button>`}
         <button class="almal-btn almal-btn--primary almal-btn--grow" data-act="sync" ${syncStatus.syncing ? "disabled" : ""}><span>${syncStatus.syncing ? "Syncing…" : "Sync"}</span></button>
@@ -10405,12 +10923,12 @@
 		}
 	};
 	var lastMountTry = 0;
-	var retryTimer = 0;
+	var retryCancel = null;
 	var selfLookup = false;
 	function isOwnList() {
 		const owner = listRoute()?.owner || "";
 		if (!owner) return false;
-		const me = store$1.get("al_username", null) || navUserName();
+		const me = panelCtx?.session.username || "";
 		if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
 			selfLookup = true;
 			tryOr(() => panelCtx.api.viewer()).then(() => mountSoon());
@@ -10419,12 +10937,13 @@
 	}
 	var onListRoute = () => !!panelCtx?.get("syncEnabled") && LIST_PATH_RE.test(location.pathname) && isOwnList();
 	function mountPanel() {
-		clearTimeout(retryTimer);
+		retryCancel?.();
+		retryCancel = null;
 		if (!panelCtx || !onListRoute() || document.getElementById("almal-panel")) return;
 		lastMountTry = Date.now();
 		const anchor = findSyncPanelAnchor();
 		if (!anchor) {
-			retryTimer = setTimeout(mountSoon, 700);
+			retryCancel = panelCtx.timeout(mountSoon, 700);
 			return;
 		}
 		const panelEl = document.createElement("div");
@@ -10461,12 +10980,13 @@
 		}));
 		ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
 		ctx.onCleanup(onStateChange(renderPanel));
-		ctx.onCleanup(store$1.watch("mal_token", () => renderPanel()));
+		ctx.accounts.watch("mal", () => renderPanel());
 		ctx.onBodyMutation(() => {
 			if (!document.getElementById("almal-panel") && Date.now() - lastMountTry > 1e3 && onListRoute()) mountSoon();
 		});
 		ctx.onNav(() => {
-			clearTimeout(retryTimer);
+			retryCancel?.();
+			retryCancel = null;
 			document.getElementById("almal-panel")?.remove();
 			mountSoon();
 		});
@@ -10486,8 +11006,8 @@
 			maybeAutoSync();
 		}, 2e3);
 		ctx.onCleanup(() => {
-			clearTimeout(retryTimer);
-			retryTimer = 0;
+			retryCancel?.();
+			retryCancel = null;
 			selfLookup = false;
 			document.getElementById("almal-panel")?.remove();
 			if (panelCtx === ctx) panelCtx = null;
@@ -10632,7 +11152,7 @@
 		return qIdx === q.length;
 	}
 	var unmatchedMetaCache = new Map();
-	async function batchFetchUnmatchedMeta(ids) {
+	async function batchFetchUnmatchedMeta(ids, log) {
 		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
 		if (!needed.length) return;
 		for (let i = 0; i < needed.length; i += 50) {
@@ -10656,7 +11176,7 @@
 					});
 				}
 			} catch (e) {
-				console.warn("[AL-Additions] Failed to batch fetch unmatched metadata:", e);
+				log?.warn("Failed to batch fetch unmatched metadata:", e);
 				break;
 			}
 		}
@@ -11344,7 +11864,7 @@
 		function renderAudit() {
 			renderUnmatchedList();
 			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
-			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds).then(() => {
+			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds, ec?.log).then(() => {
 				renderUnmatchedList();
 			});
 			renderOrphansList();
@@ -11459,7 +11979,7 @@
 						}
 					}
 				} catch (e) {
-					console.warn(`[AL-Additions] Audit scan: failed to fetch AniList ${t}:`, e);
+					ec?.log?.warn(`Audit scan: failed to fetch AniList ${t}:`, e);
 				}
 				const foundOrphans = [];
 				for (const t of ["ANIME", "MANGA"]) try {
@@ -11473,7 +11993,7 @@
 						});
 					}
 				} catch (e) {
-					console.warn(`[AL-Additions] Audit scan: failed to fetch MAL ${t}:`, e);
+					ec?.log?.warn(`Audit scan: failed to fetch MAL ${t}:`, e);
 				}
 				scannedOrphans = foundOrphans;
 				renderOrphansList();
@@ -11598,7 +12118,7 @@
 			const queryStr = ev.query || ev.operationName || "";
 			if (!queryStr) return;
 			if (ev.phase === "request" && queryStr.includes("DeleteMediaListEntry")) {
-				ctx.debug.log("DeleteMediaListEntry intercepted for variables:", ev.variables);
+				ctx.log.debug("DeleteMediaListEntry intercepted for variables:", ev.variables);
 				if (ctx.get("syncMode") === "exact") {
 					const candidate = activeCandidate || extractDialogMedia(document.body);
 					if (candidate) {
@@ -11609,7 +12129,7 @@
 							title: candidate.title,
 							deletedAt: Date.now()
 						});
-						ctx.debug.log("Queued pending deletion for exact match:", candidate);
+						ctx.log.debug("Queued pending deletion for exact match:", candidate);
 						activeCandidate = null;
 						log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
 					}
@@ -11618,7 +12138,7 @@
 			}
 			if (ev.phase === "response" && queryStr.includes("SaveMediaListEntry") && ev.variables?.mediaId) {
 				const mediaId = Number(ev.variables.mediaId);
-				ctx.debug.log("SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
+				ctx.log.debug("SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
 				removePendingDelete(mediaId, "ANIME");
 				removePendingDelete(mediaId, "MANGA");
 			}
@@ -11662,20 +12182,6 @@
 			activeCandidate = null;
 		});
 	}
-	var SYNC_DATA_KEYS = [
-		...ANILIST_SESSION_KEYS,
-		"sync_schema",
-		"sync_lock_heartbeat",
-		"sync_onboarded",
-		"sync_retry_at",
-		"sync_account",
-		PENDING_DELETES_KEY,
-		...TYPES.flatMap((t) => [
-			`last_sync_${t}`,
-			`last_run_${t}`,
-			`last_compare_${t}`
-		])
-	];
 	defineModule({
 		id: "sync",
 		key: "syncEnabled",
@@ -11688,10 +12194,9 @@
 		title: "AniList → MyAnimeList Sync",
 		help: "Enable sync and show the list page sync panel",
 		debug: {
-			key: "debugSync",
+			label: "Sync",
 			title: "Sync Debug",
-			help: "Log MAL synchronization steps, queue processing, rate limits, and deletions.",
-			pattern: /^\[SYNC/i
+			help: "Log MAL synchronization steps, queue processing, rate limits, and deletions."
 		},
 		options: [
 			{
@@ -11765,26 +12270,63 @@
 				help: "<b>Update Only</b> (default) only adds and updates entries on MyAnimeList, keeping existing MAL entries intact if deleted on AniList. <b>Exact Match (Mirror)</b> automatically deletes entries from MyAnimeList when removed from AniList."
 			}
 		],
-		migrate() {
-			if (store$1.get("sync_schema", 0) < 2) safe(() => {
-				for (const k of [
-					"mal_mirror_ANIME",
-					"mal_mirror_MANGA",
-					"retry_queue_ANIME",
-					"retry_queue_MANGA",
-					"force_mirror_refresh",
-					"mal_idmap_ANIME",
-					"mal_idmap_MANGA",
-					"last_full_sync"
-				]) store$1.del(k);
-				for (const t of TYPES) if (!store$1.get(`last_run_${t}`, 0) && store$1.get(`last_sync_${t}`, 0)) store$1.set(`last_run_${t}`, store$1.get(`last_sync_${t}`, 0));
-				store$1.set("sync_schema", 2);
+		migrate(m) {
+			if ((m.storage.get("schema", 0) || 0) < 3) safe(() => {
+				if ((m.legacy.get("sync_schema", 0) || 0) < 2) {
+					for (const k of [
+						"mal_mirror_ANIME",
+						"mal_mirror_MANGA",
+						"retry_queue_ANIME",
+						"retry_queue_MANGA",
+						"force_mirror_refresh",
+						"mal_idmap_ANIME",
+						"mal_idmap_MANGA",
+						"last_full_sync"
+					]) m.legacy.del(k);
+					for (const t of TYPES) if (!m.legacy.get(`last_run_${t}`, 0) && m.legacy.get(`last_sync_${t}`, 0)) m.legacy.set(`last_run_${t}`, m.legacy.get(`last_sync_${t}`, 0));
+				}
+				const pairs = [
+					["sync_onboarded", "sync_onboarded"],
+					["sync_retry_at", "sync_retry_at"],
+					["sync_account", "sync_account"],
+					["sync_pending_deletes", "pending_deletes"],
+					...TYPES.flatMap((t) => [
+						[`last_sync_${t}`, `last_sync_${t}`],
+						[`last_run_${t}`, `last_run_${t}`],
+						[`last_compare_${t}`, `last_compare_${t}`],
+						[`sync_idmap_${t}`, `idmap_${t}`],
+						[`sync_settled_${t}`, `settled_${t}`]
+					])
+				];
+				for (const [oldKey, newKey] of pairs) {
+					const val = m.legacy.get(oldKey, void 0);
+					if (val !== void 0) {
+						if (m.storage.get(newKey, void 0) === void 0) m.storage.set(newKey, val);
+						m.legacy.del(oldKey);
+					}
+				}
+				for (const t of TYPES) {
+					const rawIds = m.storage.get(`idmap_${t}`, void 0);
+					if (rawIds !== void 0) try {
+						const parsed = typeof rawIds === "string" ? JSON.parse(rawIds) : rawIds;
+						if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stores[t].ids.data = parsed;
+					} catch {}
+					const rawSettled = m.storage.get(`settled_${t}`, void 0);
+					if (rawSettled !== void 0) try {
+						const parsed = typeof rawSettled === "string" ? JSON.parse(rawSettled) : rawSettled;
+						if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stores[t].settled.data = parsed;
+					} catch {}
+				}
+				m.storage.set("schema", 3);
+				m.legacy.del("sync_schema");
+				m.legacy.del("sync_lock_heartbeat");
 			}, "sync schema upgrade");
 		},
 		setup(ctx) {
+			setSyncLog(ctx.log);
 			initDeletionInterceptor(ctx);
 			ctx.menuCommand("🗑️ AL→MAL Sync: Reset all data", () => {
-				SYNC_DATA_KEYS.forEach((k) => store$1.del(k));
+				syncStore.clearKnown();
 				ctx.api.clearViewer();
 				ctx.accounts.clearSecrets("mal");
 				ctx.storage.clear();
@@ -11802,6 +12344,7 @@
 			});
 			if (location.hostname === "anilist.co") initSyncPanel(ctx);
 			ctx.onCleanup(() => {
+				setSyncLog(null);
 				if (syncStatus.syncing) syncStatus.cancelled = true;
 			});
 		}
@@ -11825,8 +12368,8 @@
 			validate: validateOverrides,
 			editor: openOverridesModal
 		}],
-		migrate() {
-			if (store$1.get("ala_setting_manualOverridesEnabled", void 0) === void 0 && Object.keys(getManualOverrides()).length > 0) store$1.set(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, true);
+		migrate(m) {
+			if (!m.settings.has("manualOverridesEnabled") && Object.keys(getManualOverrides()).length > 0) m.settings.set(MANUAL_OVERRIDES_ENABLED_KEY, true);
 		},
 		setup(ctx) {
 			ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
@@ -12267,16 +12810,23 @@
 		const check = validateTiers(Settings.get("tierLabels"));
 		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 	}
-	function migrateLegacyTierLabels() {
+	function migrateLegacyTierLabels(m) {
 		try {
 			const legacy = localStorage.getItem("anilistTierLabelsSettings");
 			if (legacy) {
 				const parsed = JSON.parse(legacy);
-				if (Array.isArray(parsed.tiers) && parsed.tiers.length && store$1.get("ala_setting_tierLabels", null) === null) {
+				if (Array.isArray(parsed.tiers) && parsed.tiers.length && !m.settings.has("tierLabels")) {
 					const check = validateTiers(parsed.tiers);
-					if (check.valid && check.tiers) store$1.set(SETTING_PREFIX + "tierLabels", check.tiers);
+					if (check.valid && check.tiers) m.settings.set("tierLabels", check.tiers);
 				}
-				if (typeof parsed.enableRatingTextColor === "boolean" && store$1.get("ala_setting_tierLabelsColorScore", null) === null) store$1.set(SETTING_PREFIX + "tierLabelsColorScore", parsed.enableRatingTextColor);
+				if (typeof parsed.enableRatingTextColor === "boolean" && !m.settings.has("tierLabelsColorScore")) m.settings.set("tierLabelsColorScore", parsed.enableRatingTextColor);
+			}
+		} catch (_) {}
+		try {
+			const legacySeen = m.legacy.get("ala_standalone_seen_tierLabels", null);
+			if (legacySeen !== null) {
+				if (m.storage.get("standalone_seen", null) === null) m.storage.set("standalone_seen", !!legacySeen);
+				m.legacy.del("ala_standalone_seen_tierLabels");
 			}
 		} catch (_) {}
 	}
@@ -12290,10 +12840,9 @@
 		title: "AniList Tier Labels",
 		help: "Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.",
 		debug: {
-			key: "debugTierLabels",
+			label: "Tier Labels",
 			title: "Tier Labels Debug",
-			help: "Log scoring system detection, tier matching, and badge rendering.",
-			pattern: /^\[TIER/i
+			help: "Log scoring system detection, tier matching, and badge rendering."
 		},
 		standalone: {
 			name: "AniList Tier Labels",
@@ -12326,7 +12875,6 @@
 		],
 		migrate: migrateLegacyTierLabels,
 		setup(ctx) {
-			migrateLegacyTierLabels();
 			ctx.addStyle("ala-tier-labels-css", `
       .ala-tier-badge {
         display: inline-block;
@@ -12367,7 +12915,7 @@
 				badge.style.color = tier.textColor;
 				return badge;
 			}
-			function getScoreSystem() {
+			function getScoreSystem(viewerScoreFormat) {
 				const container = document.querySelector(".content.container, .medialist");
 				if (container) {
 					if (container.querySelector(".medialist.table.POINT_100, .medialist.POINT_100")) return "POINT_100";
@@ -12376,23 +12924,19 @@
 					if (container.querySelector(".medialist.table.POINT_5, .medialist.POINT_5")) return "POINT_5";
 					if (container.querySelector(".medialist.table.POINT_3, .medialist.POINT_3")) return "POINT_3";
 				}
-				const viewerFmt = store$1.get("al_score_format", null);
-				if (viewerFmt) return viewerFmt;
+				if (viewerScoreFormat) return viewerScoreFormat;
 				return "UNKNOWN";
 			}
-			function getCompareColumnFormat(el) {
+			function getCompareColumnFormat(el, viewerScoreFormat) {
 				const compareRoot = el.closest(".compare");
 				if (!compareRoot) return "UNKNOWN";
 				const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
 				const sideKey = isAuthUser ? "auth" : "target";
 				if (!compareRoot._colFormats) compareRoot._colFormats = {};
 				if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
-				if (isAuthUser) {
-					const viewerFmt = store$1.get("al_score_format", null);
-					if (viewerFmt) {
-						compareRoot._colFormats[sideKey] = viewerFmt;
-						return viewerFmt;
-					}
+				if (isAuthUser && viewerScoreFormat) {
+					compareRoot._colFormats[sideKey] = viewerScoreFormat;
+					return viewerScoreFormat;
 				}
 				const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
 				const cells = compareRoot.querySelectorAll(colSelector);
@@ -12415,7 +12959,7 @@
 				else if (maxScore > 5) detected = "POINT_10";
 				else if (maxScore > 0) detected = "POINT_10";
 				compareRoot._colFormats[sideKey] = detected;
-				ctx.debug.log(`Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
+				ctx.log.debug(`Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
 					maxScore,
 					hasDecimal,
 					hasStarIcon
@@ -12434,7 +12978,7 @@
 					default: return score > 10 ? score : score * 10;
 				}
 			}
-			function processScoreElement(el, tiers, colorScore, isPercentage = false, isBlockView = false) {
+			function processScoreElement(el, tiers, colorScore, viewerScoreFormat, isPercentage = false, isBlockView = false) {
 				if (el.hasAttribute("data-ala-probe")) return;
 				if (el.dataset.tierModified) {
 					const attrNow = el.getAttribute("score");
@@ -12447,11 +12991,11 @@
 				if (!rawText || rawText === "-" || rawText === "0") return;
 				const num = parseFloat(rawText);
 				if (isNaN(num) || num <= 0) return;
-				const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el) : getScoreSystem(), isPercentage);
+				const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el, viewerScoreFormat) : getScoreSystem(viewerScoreFormat), isPercentage);
 				if (normalizedRating === null) return;
 				const tier = getTier(normalizedRating, tiers);
 				if (!tier) return;
-				ctx.debug.log("Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
+				ctx.log.debug("Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
 				el.dataset.tierModified = "true";
 				el.dataset.tierSource = attr ?? "";
 				const container = document.createElement("div");
@@ -12506,21 +13050,22 @@
 				const tiers = getValidTiers();
 				const colorScore = !!ctx.get("tierLabelsColorScore");
 				const showAverage = !!ctx.get("tierLabelsAverageScore");
+				const viewerScoreFormat = ctx.session.scoreFormat;
 				document.querySelectorAll(".score:not(.media-card .score):not(.entry-card .score)").forEach((el) => {
-					processScoreElement(el, tiers, colorScore, false, false);
+					processScoreElement(el, tiers, colorScore, viewerScoreFormat, false, false);
 				});
 				document.querySelectorAll(".entry-card .score").forEach((el) => {
-					processScoreElement(el, tiers, colorScore, false, true);
+					processScoreElement(el, tiers, colorScore, viewerScoreFormat, false, true);
 				});
 				if (showAverage) document.querySelectorAll(".data-set").forEach((dataSet) => {
 					const label = dataSet.querySelector(".type");
 					const value = dataSet.querySelector(".value");
-					if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, true, false);
+					if (label && value && (label.textContent || "").includes("Weighted Score")) processScoreElement(value, tiers, colorScore, viewerScoreFormat, true, false);
 				});
 				processTop100Elements(tiers, colorScore);
 			}
-			const HINT_KEY = "ala_standalone_seen_tierLabels";
-			let paused = !!store$1.get(HINT_KEY, false);
+			const HINT_KEY = "standalone_seen";
+			let paused = !!ctx.storage.get(HINT_KEY, false);
 			const runScan = () => {
 				if (!paused) applyTierLabels();
 			};
@@ -12542,31 +13087,79 @@
 					}, 100);
 				});
 				detectStandalone("tierLabels").then((found) => {
-					store$1.set(HINT_KEY, found);
+					ctx.storage.set(HINT_KEY, found);
 					const wasPaused = paused;
 					paused = found;
 					ctx.setStandalonePaused(found);
 					if (found) {
 						unsubNav();
 						unsubBody();
-						if (!wasPaused) console.warn("[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
+						if (!wasPaused) ctx.log.warn("Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
 					} else if (wasPaused) runScan();
 				});
 			});
 		}
 	});
+	var hasOwn$1 = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 	var DEV_MODE_DEF = {
 		id: "devMode",
 		key: "devModeEnabled",
+		debugKey: "debug",
 		section: "Advanced",
 		title: "Developer Mode",
 		help: "Enable developer diagnostics and verbose module logging in the browser console.",
-		generalDebug: {
-			key: "debugGeneral",
-			title: "Core & Observer Debug",
-			help: "Log DOM observer mutations, route changes, and general script lifecycle events."
-		}
+		coreDebug: CORE_DEBUG_MASTER,
+		coreChannels: CORE_DEBUG_CHANNELS
 	};
+	function getDefaultDebugSettings() {
+		const out = { [CORE_DEBUG_SCOPE]: {
+			enabled: false,
+			channels: Object.fromEntries(Object.values(CORE_DEBUG_CHANNELS).map((ch) => [ch.id, true]))
+		} };
+		const debugModules = features.filter((f) => Boolean(f.debug && f.debug.debug !== false)).sort((a, b) => a.id.localeCompare(b.id));
+		for (const f of debugModules) {
+			const debuggable = getDebuggableChannels(f.debug);
+			out[f.id] = debuggable.length ? {
+				enabled: false,
+				channels: Object.fromEntries([["general", true], ...debuggable.map(([chId]) => [chId, true])])
+			} : { enabled: false };
+		}
+		return out;
+	}
+	function normalizeDebugSettings(raw) {
+		const defaults = getDefaultDebugSettings();
+		const input = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+		const out = {};
+		for (const [scope, defEntry] of Object.entries(defaults)) {
+			const src = hasOwn$1(input, scope) ? input[scope] : void 0;
+			const enabled = src && typeof src === "object" ? parseToggle(src.enabled) : false;
+			if (defEntry.channels) {
+				const srcChannels = src && typeof src === "object" && src.channels && typeof src.channels === "object" ? src.channels : {};
+				const channels = {};
+				for (const [chId, defVal] of Object.entries(defEntry.channels)) channels[chId] = hasOwn$1(srcChannels, chId) ? parseToggle(srcChannels[chId]) : defVal;
+				out[scope] = {
+					enabled,
+					channels
+				};
+			} else out[scope] = { enabled };
+		}
+		for (const [scope, src] of Object.entries(input)) {
+			if (hasOwn$1(out, scope)) continue;
+			if (scope === "__proto__" || scope === "constructor" || scope === "prototype") continue;
+			if (!src || typeof src !== "object" || Array.isArray(src)) continue;
+			const entry = { enabled: parseToggle(src.enabled) };
+			if (src.channels && typeof src.channels === "object" && !Array.isArray(src.channels)) {
+				const channels = {};
+				for (const [chId, chVal] of Object.entries(src.channels)) {
+					if (chId === "__proto__" || chId === "constructor" || chId === "prototype") continue;
+					channels[chId] = parseToggle(chVal);
+				}
+				if (Object.keys(channels).length > 0) entry.channels = channels;
+			}
+			out[scope] = entry;
+		}
+		return out;
+	}
 	Settings.registerCoreSetting({
 		key: DEV_MODE_DEF.key,
 		type: "toggle",
@@ -12574,14 +13167,22 @@
 		title: DEV_MODE_DEF.title,
 		help: DEV_MODE_DEF.help
 	});
-	Settings.registerCoreSetting({
-		key: DEV_MODE_DEF.generalDebug.key,
-		type: "toggle",
-		def: false,
-		title: DEV_MODE_DEF.generalDebug.title,
-		help: DEV_MODE_DEF.generalDebug.help
+	var debugRow = Settings.registerCoreSetting({
+		key: DEV_MODE_DEF.debugKey,
+		type: "json",
+		def: {},
+		title: "Debug Channels",
+		help: "Per-subsystem and per-module debug channel configuration.",
+		validate: (val) => ({
+			valid: true,
+			value: normalizeDebugSettings(val)
+		})
 	});
-	registerDebugChannel("general", `${SETTING_PREFIX}${DEV_MODE_DEF.generalDebug.key}`, false, /^\[(?:CORE|OBSERVER)/i);
+	Object.defineProperty(debugRow, "def", {
+		get: () => getDefaultDebugSettings(),
+		enumerable: true,
+		configurable: true
+	});
 	var CREDITS = [
 		{
 			name: "Daiya",
@@ -12904,6 +13505,7 @@
 			}, 50);
 		});
 	}
+	var settingsLog$1 = createCoreLogger("settings");
 	var BACKUP_FILENAME = "al-additions.settings";
 	var MAGIC_PLAIN = new Uint8Array([
 		65,
@@ -13009,14 +13611,14 @@
 			out.set(salt, 5);
 			out.set(iv, 21);
 			out.set(ciphertext, 33);
-			logDebug("[CORE]", `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			settingsLog$1.debug(`Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
 			return out;
 		} else {
 			const out = new Uint8Array(5 + compressedBytes.length);
 			out.set(MAGIC_PLAIN, 0);
 			out[4] = 1;
 			out.set(compressedBytes, 5);
-			logDebug("[CORE]", `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+			settingsLog$1.debug(`Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
 			return out;
 		}
 	}
@@ -13166,7 +13768,7 @@
 			} catch {
 				throw new Error("Decrypted content is not valid JSON.");
 			}
-			logDebug("[CORE]", "Imported encrypted binary backup successfully.");
+			settingsLog$1.debug("Imported encrypted binary backup successfully.");
 			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
 		}
 		if (matchesMagic(bytes, MAGIC_PLAIN)) {
@@ -13185,7 +13787,7 @@
 			} catch {
 				throw new Error("Corrupted backup file: invalid JSON content.");
 			}
-			logDebug("[CORE]", "Imported plain binary backup successfully.");
+			settingsLog$1.debug("Imported plain binary backup successfully.");
 			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
 		}
 		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
@@ -13195,7 +13797,7 @@
 			} catch {
 				throw new Error("Corrupted or invalid GZIP backup file.");
 			}
-			logDebug("[CORE]", "Imported legacy GZIP backup.");
+			settingsLog$1.debug("Imported legacy GZIP backup.");
 			return handleLegacyJsonBackup(jsonText, promptPassword);
 		}
 		let jsonText;
@@ -13204,7 +13806,7 @@
 		} catch {
 			throw new Error("Failed to decode backup file as UTF-8 text.");
 		}
-		logDebug("[CORE]", "Imported legacy JSON/text backup.");
+		settingsLog$1.debug("Imported legacy JSON/text backup.");
 		return handleLegacyJsonBackup(jsonText, promptPassword);
 	}
 	async function readFileAsBytes(file) {
@@ -13216,6 +13818,7 @@
 			reader.readAsArrayBuffer(file);
 		});
 	}
+	var settingsLog = createCoreLogger("settings");
 	var getRow = (key) => key && Object.prototype.hasOwnProperty.call(ROWS, key) ? ROWS[key] : void 0;
 	var PINNED_FIRST = ["Sync", "General"];
 	var PINNED_LAST = ["Advanced"];
@@ -13339,15 +13942,32 @@
   @media (prefers-reduced-motion:reduce){.ala-slider,.ala-slider:before,.ala-collapsible,.ala-chevron{transition:none!important}}`;
 	var onSettingsPage = () => /^\/settings(\/|$)/.test(location.pathname);
 	var rowText = (title, help) => `<span class="ala-text"><span class="ala-title">${title}</span><span class="ala-help">${help}</span></span>`;
-	var optionHtml = (r) => {
+	var optionRowHtml = (r) => {
 		const tag = r.type === "json" ? "div" : "label";
-		const rowHtml = `<${tag} class="ala-row">${rowText(r.title, r.help)}${TYPES$1[r.type].html(r, Settings.get(r.key))}</${tag}>`;
+		return `<${tag} class="ala-row">${rowText(r.title, r.help)}${TYPES$1[r.type].html(r, Settings.get(r.key))}</${tag}>`;
+	};
+	var optionHtml = (r) => {
+		const rowHtml = optionRowHtml(r);
 		if (r.childOf) return `<div class="ala-collapsible ala-child-option ${!!Settings.get(r.childOf) ? "is-open" : ""}" data-child-for="${r.childOf}">
       <div class="ala-collapsible-inner">
         ${rowHtml}
       </div>
     </div>`;
 		return rowHtml;
+	};
+	var debugToggleRowHtml = (title, help, scope, checked, channel) => {
+		const chAttr = channel ? ` data-debug-channel="${esc(channel)}"` : "";
+		return `<label class="ala-row">${rowText(title, help)}<span class="ala-switch"><input type="checkbox" data-debug-scope="${esc(scope)}"${chAttr} ${checked ? "checked" : ""}><span class="ala-slider"></span></span></label>`;
+	};
+	var debugGroupHtml = (scope, masterTitle, masterHelp, masterOn, childHtmls) => {
+		const masterHtml = debugToggleRowHtml(masterTitle, masterHelp, scope, masterOn);
+		if (!childHtmls.length) return masterHtml;
+		return `${masterHtml}
+    <div class="ala-collapsible ala-child-option ${masterOn ? "is-open" : ""}" data-debug-children="${esc(scope)}">
+      <div class="ala-collapsible-inner">
+        ${childHtmls.join("")}
+      </div>
+    </div>`;
 	};
 	var featureHtml = (f) => {
 		if (f.toggle.type === "json") return `<div class="ala-feature" data-feature="${esc(f.id)}">
@@ -13429,18 +14049,24 @@
 	}
 	function devModeCardHtml() {
 		const devRow = getRow(DEV_MODE_DEF.key);
-		const generalRow = getRow(DEV_MODE_DEF.generalDebug.key);
 		if (!devRow) return "";
 		const isDevOn = !!Settings.get(DEV_MODE_DEF.key);
-		const debugRowsHtml = [...features.filter((f) => f.debug && getRow(f.debug.key)).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id)).map((f) => {
-			const row = getRow(f.debug.key);
+		const debugState = Settings.get(DEV_MODE_DEF.debugKey);
+		const coreScope = DEV_MODE_DEF.coreDebug.scope;
+		const coreEntry = debugState[coreScope];
+		const coreChildHtmls = Object.values(DEV_MODE_DEF.coreChannels).map((ch) => debugToggleRowHtml(ch.title, ch.help, coreScope, coreEntry?.channels?.[ch.id] !== false, ch.id));
+		const debugRowsHtml = [debugGroupHtml(coreScope, DEV_MODE_DEF.coreDebug.title, DEV_MODE_DEF.coreDebug.help, !!coreEntry?.enabled, coreChildHtmls), ...features.filter((f) => Boolean(f.debug && f.debug.debug !== false)).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id)).map((f) => {
+			const debuggable = getDebuggableChannels(f.debug);
+			const modEntry = debugState[f.id];
+			const childHtmls = debuggable.length ? [debugToggleRowHtml("General", `Log general ${f.title} debug events.`, f.id, modEntry?.channels?.general !== false, "general"), ...debuggable.map(([chId, ch]) => debugToggleRowHtml(ch.title || ch.label, ch.help || `Log ${ch.label} debug events for ${f.title}.`, f.id, modEntry?.channels?.[chId] !== false, chId))] : [];
 			return `<div class="ala-collapsible ${!!Settings.get(f.toggle.key) ? "is-open" : ""}" data-debug-for="${esc(f.toggle.key)}">
         <div class="ala-collapsible-inner">
-          ${optionHtml(row)}
+          ${debugGroupHtml(f.id, f.debug.title, f.debug.help, !!modEntry?.enabled, childHtmls)}
         </div>
       </div>`;
-		}), generalRow ? optionHtml(generalRow) : ""].join("");
+		})].join("");
 		return `<div class="ala-feature ${isDevOn ? "" : "is-off"}" data-feature="${esc(DEV_MODE_DEF.id)}">
+    <input type="hidden" data-key="${esc(DEV_MODE_DEF.debugKey)}" value="${esc(JSON.stringify(debugState))}">
     <label class="ala-row ala-row--main">${rowText(DEV_MODE_DEF.title, DEV_MODE_DEF.help)}${TYPES$1.toggle.html(devRow, isDevOn)}</label>
     <div class="ala-collapsible ala-options-collapsible ${isDevOn ? "is-open" : ""}">
       <div class="ala-collapsible-inner">
@@ -13712,6 +14338,7 @@
 			const optionsCollapsible = card.querySelector(":scope > .ala-options-collapsible");
 			if (optionsCollapsible) optionsCollapsible.classList.toggle("is-open", effectiveOn);
 			card.querySelectorAll(".ala-child-option").forEach((childWrap) => {
+				if (childWrap.closest("[data-debug-for]") || childWrap.dataset.debugChildren) return;
 				const parentKey = childWrap.dataset.childFor;
 				const parentInput = parentKey ? card.querySelector(`[data-key="${parentKey}"]`) : null;
 				const childOpen = effectiveOn && !!parentInput?.checked;
@@ -13726,6 +14353,34 @@
 			});
 			return effectiveOn;
 		};
+		const syncDebugHiddenFromCheckboxes = () => {
+			const hidden = panel.querySelector(`input[data-key="${DEV_MODE_DEF.debugKey}"]`);
+			if (!hidden) return;
+			const next = {};
+			panel.querySelectorAll("input[data-debug-scope]").forEach((cb) => {
+				const scope = cb.dataset.debugScope;
+				const ch = cb.dataset.debugChannel;
+				if (!next[scope]) next[scope] = { enabled: false };
+				if (ch) {
+					if (!next[scope].channels) next[scope].channels = {};
+					next[scope].channels[ch] = cb.checked;
+				} else next[scope].enabled = cb.checked;
+			});
+			const row = getRow(DEV_MODE_DEF.debugKey);
+			TYPES$1.json.write(hidden, row ? TYPES$1.json.normalize(next, row) : next);
+		};
+		const syncDebugCheckboxesFromHidden = () => {
+			const hidden = panel.querySelector(`input[data-key="${DEV_MODE_DEF.debugKey}"]`);
+			if (!hidden) return;
+			const row = getRow(DEV_MODE_DEF.debugKey);
+			const state = (row ? TYPES$1.json.normalize(TYPES$1.json.read(hidden), row) : TYPES$1.json.read(hidden)) || {};
+			panel.querySelectorAll("input[data-debug-scope]").forEach((cb) => {
+				const scope = cb.dataset.debugScope;
+				const ch = cb.dataset.debugChannel;
+				const entry = state[scope];
+				cb.checked = ch ? entry?.channels?.[ch] !== false : !!entry?.enabled;
+			});
+		};
 		const syncAll = () => {
 			reconcileStandaloneLocks();
 			const plan = computeSavePlan();
@@ -13737,13 +14392,32 @@
 			});
 			const devToggle = panel.querySelector(`input[data-key="${DEV_MODE_DEF.key}"]`);
 			const isDevOn = devToggle ? devToggle.checked : !!Settings.get(DEV_MODE_DEF.key);
+			const coreScope = DEV_MODE_DEF.coreDebug.scope;
+			const coreMaster = panel.querySelector(`input[data-debug-scope="${coreScope}"]:not([data-debug-channel])`);
+			if (coreMaster) coreMaster.disabled = !isDevOn;
+			const coreChildWrap = panel.querySelector(`.ala-child-option[data-debug-children="${coreScope}"]`);
+			if (coreChildWrap) {
+				const coreOpen = isDevOn && !!coreMaster?.checked;
+				coreChildWrap.classList.toggle("is-open", coreOpen);
+				coreChildWrap.querySelectorAll("input[data-debug-channel]").forEach((el) => {
+					el.disabled = !coreOpen;
+				});
+			}
 			panel.querySelectorAll("[data-debug-for]").forEach((wrap) => {
 				const modKey = wrap.dataset.debugFor;
 				const modOn = activeMap.get(modKey) ?? !!Settings.get(modKey);
 				wrap.classList.toggle("is-open", modOn);
-				wrap.querySelectorAll("[data-key]").forEach((el) => {
-					el.disabled = !(isDevOn && modOn);
-				});
+				const modMaster = wrap.querySelector("input[data-debug-scope]:not([data-debug-channel])");
+				if (modMaster) modMaster.disabled = !(isDevOn && modOn);
+				const childWrap = wrap.querySelector(".ala-child-option[data-debug-children]");
+				if (childWrap) {
+					const childOpen = modOn && !!modMaster?.checked;
+					const childEnabled = isDevOn && childOpen;
+					childWrap.classList.toggle("is-open", childOpen);
+					childWrap.querySelectorAll("input[data-debug-channel]").forEach((el) => {
+						el.disabled = !childEnabled;
+					});
+				}
 			});
 			const devRow = panel.querySelector("#ala-row-export-raw");
 			if (devRow) devRow.style.display = isDevOn ? "" : "none";
@@ -13794,7 +14468,9 @@
 			}).catch(() => {});
 		}
 		panel.addEventListener("change", (e) => {
-			if (e.target?.id === "ala-import-file") return;
+			const target = e.target;
+			if (target?.id === "ala-import-file") return;
+			if (target?.hasAttribute("data-debug-scope")) syncDebugHiddenFromCheckboxes();
 			syncAll();
 		});
 		panel.querySelectorAll(".ala-btn--edit-json").forEach((btn) => {
@@ -13824,7 +14500,8 @@
 							const plan = syncAll();
 							setStatus(`Updated. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply.`);
 						},
-						addStyle: trackedAddStyle
+						addStyle: trackedAddStyle,
+						log: settingsLog
 					});
 				} finally {
 					for (const child of Array.from(document.body.children)) if (!beforeBodyChildren.has(child) && child instanceof HTMLElement && child !== backdrop) editorOverlays.add(child);
@@ -13851,6 +14528,7 @@
 				if (el.dataset.standaloneLocked) return;
 				TYPES$1[r.type].write(el, r.def);
 			});
+			syncDebugCheckboxesFromHidden();
 			const plan = syncAll();
 			setStatus(`Defaults restored. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply them.`);
 		});

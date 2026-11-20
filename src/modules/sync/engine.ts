@@ -7,10 +7,11 @@ import {
   malLimiter,
   breaker,
   log,
-  clearMalAuth
+  clearMalAuth,
+  isMalConnected
 } from '../../api/mal';
 import { hooks } from '../../api/mal';
-import { store, tryOr, authError, logDebug } from '../../utils/helpers';
+import { tryOr, authError } from '../../utils/helpers';
 import { strictTitle } from '../../utils/matching';
 import { Settings } from '../../settings/settings';
 import {
@@ -26,6 +27,8 @@ import {
 import {
   progress,
   syncStatus,
+  syncStore,
+  syncLog,
   stores,
   markDone,
   checkCancel,
@@ -240,19 +243,19 @@ export function planJobs(
 export async function syncType(type: SyncMediaType, userId: number, full: boolean): Promise<{ ok: boolean }> {
   const label = typeLabel(type);
   const c: SyncCounters = { pushed: 0, deleted: 0, unchanged: 0, settled: 0, skipped: 0, unmatched: 0, conflicts: 0, transient: 0, permanent: 0 };
-  const lastSync = Number(store.get(`last_sync_${type}`, 0)) || 0;
-  const fullPass = full || !lastSync || Date.now() - Number(store.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
+  const lastSync = Number(syncStore.get(`last_sync_${type}`, 0)) || 0;
+  const fullPass = full || !lastSync || Date.now() - Number(syncStore.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
   const isExact = Settings.get('syncMode') === 'exact';
 
   log(`${label}: starting ${fullPass ? 'full library comparison' : 'incremental sync'} — fetching AniList entries and your current MAL list.`);
-  logDebug('[SYNC]', `${label}: starting sync pass:`, { fullPass, lastSync, isExact });
+  syncLog?.debug(`${label}: starting sync pass:`, { fullPass, lastSync, isExact });
   const [entries, mal] = await Promise.all([
     fullPass ? alFetchAll(userId, type) : alFetchIncremental(userId, type, lastSync),
     malFetchList(type)
   ]);
   const newest = entries.reduce((m, e) => Math.max(m, e.updatedAt), 0);
   log(`${label}: found ${entries.length} AniList entr${entries.length === 1 ? 'y' : 'ies'} to check and ${Object.keys(mal).length} entr${Object.keys(mal).length === 1 ? 'y' : 'ies'} on MAL.`);
-  logDebug('[SYNC]', `${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
+  syncLog?.debug(`${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
   progress.total += entries.length;
   progress.phase = 'pushing';
   notifyProgress(true);
@@ -341,10 +344,10 @@ export async function syncType(type: SyncMediaType, userId: number, full: boolea
   const ok = c.transient === 0;
   if (ok) {
     if (fullPass) {
-      store.set(`last_compare_${type}`, Date.now());
-      store.set(`last_sync_${type}`, Math.max(1, newest));
-    } else if (newest) store.set(`last_sync_${type}`, Math.max(newest, lastSync));
-    store.set(`last_run_${type}`, Math.floor(Date.now() / 1000));
+      syncStore.set(`last_compare_${type}`, Date.now());
+      syncStore.set(`last_sync_${type}`, Math.max(1, newest));
+    } else if (newest) syncStore.set(`last_sync_${type}`, Math.max(newest, lastSync));
+    syncStore.set(`last_run_${type}`, Math.floor(Date.now() / 1000));
   }
   const parts = [
     `${c.pushed} updated`,
@@ -394,11 +397,11 @@ function handleAuthFailure(e: any): void {
 }
 
 export async function runSync(types: SyncMediaType[] = [...TYPES], opts: { full?: boolean } = {}): Promise<void> {
-  logDebug('[SYNC]', 'runSync initiated for types:', types, 'options:', opts);
+  syncLog?.debug('runSync initiated for types:', types, 'options:', opts);
   if (syncStatus.syncing) return log('Sync already running.');
   if (!onAniList()) return log('Open AniList to run a sync — it needs your AniList login.', 'warn');
   if (!AniList.hasAuth()) return log('Log in to AniList first.');
-  if (!store.get('mal_token')) return log('Connect MyAnimeList first.');
+  if (!isMalConnected()) return log('Connect MyAnimeList first.');
   if (navigator.onLine === false) return log('You appear to be offline; sync skipped.');
   syncStatus.syncing = true;
   syncStatus.cancelled = false;
@@ -407,7 +410,7 @@ export async function runSync(types: SyncMediaType[] = [...TYPES], opts: { full?
     return log('Another tab is already syncing, skipped.');
   }
   breaker.reset();
-  store.set('sync_onboarded', true);
+  syncStore.set('sync_onboarded', true);
   Object.assign(progress, { phase: 'fetching', done: 0, total: 0, changed: 0 });
   notifyState();
   const startedAt = Date.now();
@@ -417,12 +420,12 @@ export async function runSync(types: SyncMediaType[] = [...TYPES], opts: { full?
     if (!viewer) throw authError('AniList', 'AniList is not logged in.');
     const me = await malWhoAmI();
     const account = `${viewer.id}:${me.id}`;
-    const prev = store.get<string | null>('sync_account', null);
+    const prev = syncStore.get<string | null>('sync_account', null);
     if (prev && prev !== account) {
       log('Connected account changed. Resetting sync watermarks and per-account suppression state.', 'warn');
       resetAccountState();
     }
-    store.set('sync_account', account);
+    syncStore.set('sync_account', account);
 
     if (opts.full) for (const t of types) clearCache(stores[t].settled);
     const results = await Promise.allSettled(types.map((t) => syncType(t, viewer.id, !!opts.full)));
@@ -441,13 +444,13 @@ export async function runSync(types: SyncMediaType[] = [...TYPES], opts: { full?
     }
     allOk = results.every((r) => r.status === 'fulfilled' && (r as any).value.ok);
     if (allOk) {
-      store.del('sync_retry_at');
+      syncStore.del('sync_retry_at');
       log(`Synced in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
-    } else if (!syncStatus.cancelled) store.set('sync_retry_at', Date.now() + RETRY_AFTER_FAILURE_MS);
+    } else if (!syncStatus.cancelled) syncStore.set('sync_retry_at', Date.now() + RETRY_AFTER_FAILURE_MS);
   } catch (e: any) {
     if (e.auth) handleAuthFailure(e);
     else log('Sync could not finish: ' + (e.message || e), 'error');
-    if (!e.auth && !syncStatus.cancelled) store.set('sync_retry_at', Date.now() + RETRY_AFTER_FAILURE_MS);
+    if (!e.auth && !syncStatus.cancelled) syncStore.set('sync_retry_at', Date.now() + RETRY_AFTER_FAILURE_MS);
   } finally {
     for (const t of types) {
       stores[t].ids.save();
@@ -465,14 +468,14 @@ export async function startManualSync(): Promise<void> {
   if (syncStatus.syncing) return;
   const pageType = currentListType();
   const types = pageType ? [pageType] : [...TYPES];
-  if (types.some((t) => !store.get(`last_sync_${t}`, 0)) && !(await confirmDecimalScores()))
+  if (types.some((t) => !syncStore.get(`last_sync_${t}`, 0)) && !(await confirmDecimalScores()))
     return log('First sync cancelled.');
   runSync(types);
 }
 
 export async function fullResync(): Promise<void> {
   if (syncStatus.syncing) return;
-  if (!store.get('sync_onboarded', false) && !(await confirmDecimalScores())) return log('Full resync cancelled.');
+  if (!syncStore.get('sync_onboarded', false) && !(await confirmDecimalScores())) return log('Full resync cancelled.');
   for (const t of TYPES) clearCache(stores[t].ids);
   log('Full Resync started: checking the entire AniList library and clearing cached match/suppression decisions.');
   runSync([...TYPES], { full: true });
@@ -480,9 +483,9 @@ export async function fullResync(): Promise<void> {
 
 export function maybeAutoSync(): void {
   if (!onAniList() || !Settings.get('syncEnabled') || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
-  if (!AniList.hasAuth() || !store.get('mal_token')) return;
+  if (!AniList.hasAuth() || !isMalConnected()) return;
 
-  const retryAt = Number(store.get('sync_retry_at', 0)) || 0;
+  const retryAt = Number(syncStore.get('sync_retry_at', 0)) || 0;
   if (retryAt > 0 && Date.now() < retryAt) return;
 
   const dueTypes: SyncMediaType[] = [];
@@ -492,7 +495,7 @@ export function maybeAutoSync(): void {
     if (!enabled) continue;
 
     const hours = Math.max(1, Number(Settings.get(isAnime ? 'syncIntervalAnime' : 'syncIntervalManga')) || 6);
-    const last = Number(store.get(`last_run_${t}`, 0)) || 0;
+    const last = Number(syncStore.get(`last_run_${t}`, 0)) || 0;
     const isDue = retryAt > 0
       ? (!last || Date.now() - last * 1000 >= RETRY_AFTER_FAILURE_MS)
       : (!last || Date.now() - last * 1000 >= hours * 3600e3);
@@ -510,6 +513,6 @@ export function maybeAutoSync(): void {
     syncStatus.autoSyncRetryAfter = Date.now() + 5 * 60e3;
     runSync(dueTypes);
   } else if (retryAt > 0 && Date.now() >= retryAt) {
-    store.del('sync_retry_at');
+    syncStore.del('sync_retry_at');
   }
 }

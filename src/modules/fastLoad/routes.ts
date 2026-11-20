@@ -2,6 +2,9 @@ import {
   win,
   doc,
   coreHooks,
+  coreSession,
+  fastLoadLog,
+  fastLoadRpcLog,
   userMap,
   pausedUntil,
   getViewerFromWindow,
@@ -11,7 +14,6 @@ import { CFG, stats, attempt } from './config';
 import { isGraphQL } from './graphql';
 import { isMutation, isVolatile } from './helpers';
 import { lastAuth, prefetchWorkerList } from './worker';
-import { store as gmStore, logDebug } from '../../utils/helpers';
 
 const sameId = (a: any, b: any) =>
   a === b || (typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase());
@@ -101,6 +103,7 @@ export const persistRoutes = () => {
 
 export function loadRoutes() {
   attempt(() => {
+    // @migration(from: "v0.9.1", kind: "cleanup", sunset: "2-3 releases")
     win.localStorage?.removeItem('alfl:routes:v1');
     win.localStorage?.removeItem('alfl:routes:v2');
     win.localStorage?.removeItem('alfl:routes:v3');
@@ -194,9 +197,7 @@ export function rememberQuery(desc: any, parsed: any) {
 
 function getReplayAuthToken(): string | null {
   if (lastAuth) return lastAuth.replace(/^Bearer\s+/i, '').trim();
-  const stored = gmStore.get<string | null>('al_token', null);
-  if (stored) return stored;
-  const storedHeader = gmStore.get<string | null>('al_token_auth', null);
+  const storedHeader = coreHooks?.getAuthHeader();
   if (storedHeader) return storedHeader.replace(/^Bearer\s+/i, '').trim();
   return null;
 }
@@ -228,7 +229,7 @@ export function replayRoute(known: any, route: any, yielded: () => boolean) {
     stamps.push(Date.now());
     sent++;
     attempt(() => {
-      logDebug('[FASTLOAD] Replay/Prefetch dispatching for:', route.shape, 'vars:', parsed.variables);
+      fastLoadLog?.debug('Replay/Prefetch dispatching for:', route.shape, 'vars:', parsed.variables);
       win
         .fetch(request.url, {
           method: 'POST',
@@ -273,8 +274,9 @@ export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
   if (listMatch) {
     const targetUser = listMatch[1] || getLocalUsername();
     const listType = listMatch[2].toLowerCase() === 'mangalist' ? 'MANGA' : 'ANIME';
+    const myId = coreSession?.peek().userId || 0;
     const userId = targetUser
-      ? (userMap.get(targetUser.toLowerCase()) || (targetUser.toLowerCase() === getLocalUsername()?.toLowerCase() ? Number(gmStore.get('al_user_id', 0)) : 0))
+      ? (userMap.get(targetUser.toLowerCase()) || (targetUser.toLowerCase() === getLocalUsername()?.toLowerCase() ? myId : 0))
       : 0;
     if (userId || targetUser) {
       prefetchWorkerList(listType, userId, targetUser || undefined);
@@ -313,7 +315,7 @@ export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
   if (sent) {
     prefetched.set(key, now);
     stats.prefetched += sent;
-    logDebug('[FASTLOAD] Prefetch sent for:', route.shape, route.id);
+    fastLoadLog?.debug('Prefetch sent for:', route.shape, route.id);
   }
 }
 
@@ -337,8 +339,8 @@ export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
     return;
   }
   const viewer = getViewerFromWindow();
-  const myId = viewer.id || Number(gmStore.get('al_user_id', 0));
-  const myName = viewer.name || gmStore.get<string | null>('al_username', null);
+  const myId = viewer.id;
+  const myName = viewer.name || null;
 
   const userMatch = path.match(/^\/user\/([^/]+)(?:\/([^/]+))?/i);
   let isAnotherUserPage = false;
@@ -361,7 +363,7 @@ export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
   }
 
   if (isAnotherUserPage) {
-    logDebug('[FASTLOAD RPC] Auto-prefetching for target user:', otherUser, 'subRoute:', subRoute);
+    fastLoadRpcLog?.debug('Auto-prefetching for target user:', otherUser, 'subRoute:', subRoute);
     if (subRoute !== 'animelist') {
       setTimeout(() => {
         prefetchWorkerList('ANIME', otherUserId, otherUser);

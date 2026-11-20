@@ -1331,3 +1331,113 @@ describe('AniList API — B3-02: Strict MediaListCollection type & userId/userNa
     expect(fetchMock).toHaveBeenCalledTimes(9);
   });
 });
+
+describe('AniList API — Session peek(), getters, recordHint() & document-start safety', () => {
+  it('reads session purely via peek() and live getters without triggering bridge.clear() or clearing storage', async () => {
+    const { bus, helpers, anilist } = await loadFreshAniList();
+    const clearSpy = vi.fn();
+    const clearAuthSpy = vi.fn();
+
+    bus.CoreHooks.registerCacheBridge({
+      getGqlStore: () => undefined,
+      getRpcCache: () => undefined,
+      getRpcInflight: () => undefined,
+      getUserMap: () => undefined,
+      getIdMap: () => undefined,
+      clear: clearSpy,
+      clearAuth: clearAuthSpy
+    });
+
+    helpers.store.set('al_user_id', 100);
+    helpers.store.set('al_username', 'Alice');
+    helpers.store.set('al_score_format', 'POINT_10');
+
+    expect(anilist.AniList.session.peek()).toEqual({
+      userId: 100,
+      username: 'Alice',
+      scoreFormat: 'POINT_10'
+    });
+    expect(anilist.AniList.session.userId).toBe(100);
+    expect(anilist.AniList.session.username).toBe('Alice');
+    expect(anilist.AniList.session.scoreFormat).toBe('POINT_10');
+
+    document.body.innerHTML = '<nav><a href="/login">Login</a></nav>';
+    expect(anilist.AniList.session.peek()).toEqual({
+      userId: null,
+      username: null,
+      scoreFormat: null
+    });
+    expect(clearSpy).toHaveBeenCalledTimes(0);
+    expect(helpers.store.get('al_user_id', null)).toBe(100);
+
+    expect(anilist.AniList.session.peek({ reconcile: true })).toEqual({
+      userId: null,
+      username: null,
+      scoreFormat: null
+    });
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+    expect(clearAuthSpy).toHaveBeenCalledTimes(1);
+    expect(helpers.store.get('al_user_id', null)).toBeNull();
+  });
+
+  it('preserves stored al_username when nuxtUser.id matches before nuxtUser.name hydrates, and survives null document.body', async () => {
+    const { helpers, anilist } = await loadFreshAniList();
+
+    helpers.store.set('al_user_id', 555);
+    helpers.store.set('al_username', 'MatiX');
+    helpers.store.set('al_score_format', 'POINT_10_DECIMAL');
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 555 } } } };
+
+    expect(anilist.AniList.session.peek()).toEqual({
+      userId: 555,
+      username: 'MatiX',
+      scoreFormat: 'POINT_10_DECIMAL'
+    });
+
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 999, name: 'Other' } } } };
+    expect(anilist.AniList.session.peek()).toEqual({
+      userId: 999,
+      username: 'Other',
+      scoreFormat: null
+    });
+
+    const origBody = document.body;
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      expect(() => anilist.AniList.session.peek()).not.toThrow();
+      expect(anilist.AniList.session.userId).toBe(999);
+    } finally {
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+  });
+
+  it('guards recordHint() against logged-out pages, page-user mismatches, and isSessionClearing()', async () => {
+    const { bus, helpers, anilist } = await loadFreshAniList();
+
+    document.body.innerHTML = '<nav><a href="/login">Login</a></nav>';
+    anilist.AniList.session.recordHint({ userId: 100, username: 'Alice' });
+    expect(helpers.store.get('al_user_id', null)).toBeNull();
+    expect(helpers.store.get('al_username', null)).toBeNull();
+
+    document.body.innerHTML = '';
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 100, name: 'Alice' } } } };
+    anilist.AniList.session.recordHint({ username: 'Bob' });
+    expect(helpers.store.get('al_username', null)).toBeNull();
+
+    anilist.AniList.session.recordHint({ userId: 200, username: 'Alice' });
+    expect(helpers.store.get('al_user_id', null)).toBeNull();
+
+    bus.CoreHooks.setSessionClearing(true);
+    try {
+      anilist.AniList.session.recordHint({ userId: 100, username: 'Alice' });
+      expect(helpers.store.get('al_user_id', null)).toBeNull();
+    } finally {
+      bus.CoreHooks.setSessionClearing(false);
+    }
+
+    anilist.AniList.session.recordHint({ userId: 100, username: 'Alice' });
+    expect(helpers.store.get('al_user_id', null)).toBe(100);
+    expect(helpers.store.get('al_username', null)).toBe('Alice');
+  });
+});

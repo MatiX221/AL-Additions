@@ -120,6 +120,7 @@ Lower-level runtime hooks (`src/types.ts` -> `CoreHooksApi`) let intercept/prelo
 - **`ctx.hooks.setPrefetchPaused(true)`**: Temporarily pauses background navigation/hover prefetching during heavy user actions (returns release function).
 - **`ctx.hooks.registerCacheBridge(bridge)` / `getCacheBridge()`**: Exposes shared runtime caches cleanly across `fastLoad`, `api/anilist.ts`, and `compareView` without page-window globals.
 - **`ctx.hooks.setSessionClearing(active)` / `isSessionClearing()` / `clearAuth()`**: Coordinates safe session wipes during logout or backup restores so in-flight requests do not re-persist stale auth headers.
+- **`ctx.hooks.getAuthHeader()` / `setAuthHeader(header | null)`**: Scoped access to the captured AniList `Authorization: Bearer ...` header. Validates non-empty Bearer tokens, respects `isSessionClearing()`, clears automatically on `clearAuth()`, and no-ops after module context disposal.
 
 ---
 
@@ -168,9 +169,14 @@ describe('mediaIdBadge lifecycle', () => {
 ```
 
 ### Architecture & Guard Checks Already Covering You
-Running `npm test` automatically runs `__tests__/layering.test.ts` on your new module directory to guarantee:
+Running `npm test` automatically runs both `__tests__/layering.test.ts` and `__tests__/conventions.test.ts` across `src/` to guarantee:
 1. No forbidden cross-layer or cross-module imports exist.
 2. Dynamically importing `src/modules/<yourModule>/index.ts` triggers **zero** `GM_*`, DOM, style, or global listener side effects at import time.
+3. Feature modules never bypass kernel abstractions: raw session/auth keys (`al_user_id`, `al_username`, `al_score_format`, `al_token_auth`, `al_token`, `mal_token`), `ctx.api.session`, `ANILIST_SESSION_KEYS`, hardcoded `ala_setting_`/`ala_mod_` prefixes, raw `GM_*` calls, legacy debug helpers (`ctx.debug`, `logDebug`, `isDebug`, `registerDebugChannel`), and `createCoreLogger` are all rejected in `src/modules/**`.
+4. Raw `console.log`/`debug`/`warn`/`error` calls are forbidden across `src/core/**`, `src/settings/**`, `src/api/**`, and `src/modules/**` — use `ctx.log` in modules and `createCoreLogger(...)` in core/settings/API layers.
+5. Every `migrate` hook/helper carries a valid `// @migration(from: "...", kind: "storage" | "import" | "cleanup", sunset: "...")` annotation.
+
+*(Documented exceptions — such as `fastLoad`'s standalone `alfl:*` / `__ALFL_*` interop keys and `sync/state.ts`'s `SYNC_STORAGE_PREFIX` for post-dispose lock release — are explicitly allowlisted in `__tests__/conventions.test.ts`.)*
 
 Always finish with the full verification suite before committing:
 

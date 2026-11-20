@@ -1,6 +1,6 @@
 import { defineModule } from '../../core/registry';
-import { Settings, PREFIX } from '../../settings/settings';
-import { store } from '../../utils/helpers';
+import { Settings } from '../../settings/settings';
+import type { MigrateContext } from '../../types';
 import { detectStandalone } from '../../utils/standalone';
 import { PROBE_ATTR, DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from './tiers';
 import { openTierEditor } from './tierModal';
@@ -13,23 +13,32 @@ export function getValidTiers(): TierConfig[] {
   return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 }
 
-function migrateLegacyTierLabels(): void {
+function migrateLegacyTierLabels(m: MigrateContext): void {
   try {
+    // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
     const legacy = localStorage.getItem('anilistTierLabelsSettings');
     if (legacy) {
       const parsed = JSON.parse(legacy);
-      if (Array.isArray(parsed.tiers) && parsed.tiers.length && store.get(PREFIX + 'tierLabels', null) === null) {
+      if (Array.isArray(parsed.tiers) && parsed.tiers.length && !m.settings.has('tierLabels')) {
         const check = validateTiers(parsed.tiers);
         if (check.valid && check.tiers) {
-          store.set(PREFIX + 'tierLabels', check.tiers);
+          m.settings.set('tierLabels', check.tiers);
         }
       }
-      if (
-        typeof parsed.enableRatingTextColor === 'boolean' &&
-        store.get(PREFIX + 'tierLabelsColorScore', null) === null
-      ) {
-        store.set(PREFIX + 'tierLabelsColorScore', parsed.enableRatingTextColor);
+      if (typeof parsed.enableRatingTextColor === 'boolean' && !m.settings.has('tierLabelsColorScore')) {
+        m.settings.set('tierLabelsColorScore', parsed.enableRatingTextColor);
       }
+    }
+  } catch (_) {}
+
+  try {
+    // @migration(from: "v0.9.1", kind: "storage", sunset: "2-3 releases")
+    const legacySeen = m.legacy.get<boolean | null>('ala_standalone_seen_tierLabels', null);
+    if (legacySeen !== null) {
+      if (m.storage.get<boolean | null>('standalone_seen', null) === null) {
+        m.storage.set('standalone_seen', !!legacySeen);
+      }
+      m.legacy.del('ala_standalone_seen_tierLabels');
     }
   } catch (_) {}
 }
@@ -44,10 +53,9 @@ defineModule({
   title: 'AniList Tier Labels',
   help: 'Adds customizable tier badges (S+, S, A, etc.) next to ratings across list, card, browse, and compare views.',
   debug: {
-    key: 'debugTierLabels',
+    label: 'Tier Labels',
     title: 'Tier Labels Debug',
-    help: 'Log scoring system detection, tier matching, and badge rendering.',
-    pattern: /^\[TIER/i
+    help: 'Log scoring system detection, tier matching, and badge rendering.'
   },
   standalone: {
     name: 'AniList Tier Labels',
@@ -80,8 +88,6 @@ defineModule({
   ],
   migrate: migrateLegacyTierLabels,
   setup(ctx) {
-    migrateLegacyTierLabels();
-
     ctx.addStyle(
       'ala-tier-labels-css',
       `
@@ -127,7 +133,7 @@ defineModule({
       return badge;
     }
 
-    function getScoreSystem(): string {
+    function getScoreSystem(viewerScoreFormat: string | null): string {
       const container = document.querySelector('.content.container, .medialist');
       if (container) {
         if (container.querySelector('.medialist.table.POINT_100, .medialist.POINT_100')) return 'POINT_100';
@@ -138,12 +144,11 @@ defineModule({
         if (container.querySelector('.medialist.table.POINT_5, .medialist.POINT_5')) return 'POINT_5';
         if (container.querySelector('.medialist.table.POINT_3, .medialist.POINT_3')) return 'POINT_3';
       }
-      const viewerFmt = store.get<string | null>('al_score_format', null);
-      if (viewerFmt) return viewerFmt;
+      if (viewerScoreFormat) return viewerScoreFormat;
       return 'UNKNOWN';
     }
 
-    function getCompareColumnFormat(el: HTMLElement): string {
+    function getCompareColumnFormat(el: HTMLElement, viewerScoreFormat: string | null): string {
       const compareRoot = el.closest('.compare') as (HTMLElement & { _colFormats?: Record<string, string> }) | null;
       if (!compareRoot) return 'UNKNOWN';
 
@@ -155,12 +160,9 @@ defineModule({
       if (!compareRoot._colFormats) compareRoot._colFormats = {};
       if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
 
-      if (isAuthUser) {
-        const viewerFmt = store.get<string | null>('al_score_format', null);
-        if (viewerFmt) {
-          compareRoot._colFormats[sideKey] = viewerFmt;
-          return viewerFmt;
-        }
+      if (isAuthUser && viewerScoreFormat) {
+        compareRoot._colFormats[sideKey] = viewerScoreFormat;
+        return viewerScoreFormat;
       }
 
       const colSelector = isAuthUser
@@ -190,7 +192,7 @@ defineModule({
       else if (maxScore > 0) detected = 'POINT_10';
 
       compareRoot._colFormats[sideKey] = detected;
-      ctx.debug.log(`Detected score system for ${isAuthUser ? 'viewer' : 'other'}:`, detected, { maxScore, hasDecimal, hasStarIcon });
+      ctx.log.debug(`Detected score system for ${isAuthUser ? 'viewer' : 'other'}:`, detected, { maxScore, hasDecimal, hasStarIcon });
       return detected;
     }
 
@@ -217,6 +219,7 @@ defineModule({
       el: HTMLElement,
       tiers: TierConfig[],
       colorScore: boolean,
+      viewerScoreFormat: string | null,
       isPercentage = false,
       isBlockView = false
     ): void {
@@ -236,13 +239,15 @@ defineModule({
       const num = parseFloat(rawText);
       if (isNaN(num) || num <= 0) return;
 
-      const scoreSystem = el.closest('.compare') ? getCompareColumnFormat(el) : getScoreSystem();
+      const scoreSystem = el.closest('.compare')
+        ? getCompareColumnFormat(el, viewerScoreFormat)
+        : getScoreSystem(viewerScoreFormat);
       const normalizedRating = normalizeScore(num, scoreSystem, isPercentage);
       if (normalizedRating === null) return;
 
       const tier = getTier(normalizedRating, tiers);
       if (!tier) return;
-      ctx.debug.log('Applied tier badge:', tier.label, 'to raw score:', rawText, 'normalized:', normalizedRating);
+      ctx.log.debug('Applied tier badge:', tier.label, 'to raw score:', rawText, 'normalized:', normalizedRating);
 
       el.dataset.tierModified = 'true';
       el.dataset.tierSource = attr ?? '';
@@ -323,17 +328,18 @@ defineModule({
       const tiers: TierConfig[] = getValidTiers();
       const colorScore: boolean = !!ctx.get('tierLabelsColorScore');
       const showAverage: boolean = !!ctx.get('tierLabelsAverageScore');
+      const viewerScoreFormat: string | null = ctx.session.scoreFormat;
 
       // 1. List view & Compare view
       document
         .querySelectorAll<HTMLElement>('.score:not(.media-card .score):not(.entry-card .score)')
         .forEach((el) => {
-          processScoreElement(el, tiers, colorScore, false, false);
+          processScoreElement(el, tiers, colorScore, viewerScoreFormat, false, false);
         });
 
       // 2. Block / Card view
       document.querySelectorAll<HTMLElement>('.entry-card .score').forEach((el) => {
-        processScoreElement(el, tiers, colorScore, false, true);
+        processScoreElement(el, tiers, colorScore, viewerScoreFormat, false, true);
       });
 
       // 3. Weighted Score in data-sets (AniList replaced the average score with it)
@@ -342,7 +348,7 @@ defineModule({
           const label = dataSet.querySelector<HTMLElement>('.type');
           const value = dataSet.querySelector<HTMLElement>('.value');
           if (label && value && (label.textContent || '').includes('Weighted Score')) {
-            processScoreElement(value, tiers, colorScore, true, false);
+            processScoreElement(value, tiers, colorScore, viewerScoreFormat, true, false);
           }
         });
       }
@@ -353,8 +359,8 @@ defineModule({
 
     // Yield to the standalone AniList Tier Labels script when it is installed.
     // The last probe result is remembered so a normal page load never waits on the probe.
-    const HINT_KEY = 'ala_standalone_seen_tierLabels';
-    let paused = !!store.get<boolean>(HINT_KEY, false);
+    const HINT_KEY = 'standalone_seen';
+    let paused = !!ctx.storage.get<boolean>(HINT_KEY, false);
     const runScan = (): void => {
       if (!paused) applyTierLabels();
     };
@@ -379,7 +385,7 @@ defineModule({
       });
 
       void detectStandalone('tierLabels').then((found) => {
-        store.set(HINT_KEY, found);
+        ctx.storage.set(HINT_KEY, found);
         const wasPaused = paused;
         paused = found;
         ctx.setStandalonePaused(found);
@@ -387,8 +393,8 @@ defineModule({
           unsubNav();
           unsubBody();
           if (!wasPaused) {
-            console.warn(
-              '[AL-Additions] Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.'
+            ctx.log.warn(
+              'Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.'
             );
           }
         } else if (wasPaused) {

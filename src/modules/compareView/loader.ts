@@ -1,6 +1,6 @@
 import type { FeatureContext } from '../../types';
 import type { MediaListEntryItem } from '../../api/anilist';
-import { store, esc } from '../../utils/helpers';
+import { esc } from '../../utils/helpers';
 import { compareRoute } from '../../utils/anilistDom';
 import {
   compareEntries,
@@ -38,7 +38,7 @@ export function createCompareRpcBlocker(state: CompareState) {
     (/\bcompareWithAuthList\b/i.test(q || '') || Boolean(vars?.compareWithAuthList));
 }
 
-async function resolveCompareUsers(ctx: FeatureContext): Promise<{
+async function resolveCompareUsers(ctx: FeatureContext<true>): Promise<{
   viewerId?: number;
   viewerName?: string;
   otherId?: number;
@@ -75,9 +75,9 @@ async function resolveCompareUsers(ctx: FeatureContext): Promise<{
     idMap?.set(otherId, otherName);
   }
 
-  ctx.api.session.syncFromPage?.();
-  let viewerId = Number(store.get('al_user_id', 0)) || undefined;
-  let viewerName = store.get<string | null>('al_username', null) || undefined;
+  const snap = ctx.session.peek({ reconcile: true });
+  let viewerId = snap.userId || undefined;
+  let viewerName = snap.username || undefined;
 
   if (!viewerId || !viewerName) {
     const viewer = await ctx.api.viewer();
@@ -223,7 +223,7 @@ function mountCompareTable(
 }
 
 export async function loadAllEntriesViaMediaList(
-  ctx: FeatureContext,
+  ctx: FeatureContext<true>,
   state: CompareState,
   compareRoot: HTMLElement,
   sidebar: HTMLElement
@@ -249,7 +249,7 @@ export async function loadAllEntriesViaMediaList(
     const otherTarget = otherId || otherName;
 
     if (!viewerTarget || !otherTarget) {
-      ctx.debug.log('Missing viewer or other user for getMediaList, keeping fallback');
+      ctx.log.debug('Missing viewer or other user for getMediaList, keeping fallback');
       state.loadFailed = true;
       return;
     }
@@ -289,7 +289,7 @@ export async function loadAllEntriesViaMediaList(
       matchedNodes.push(buildCompareRow(otherEntry, myEntry, type, safeOtherName, scopeAttr));
     }
 
-    ctx.debug.log('Matched entries via MediaListCollection:', matchedNodes.length);
+    ctx.log.debug('Matched entries via MediaListCollection:', matchedNodes.length);
 
     const customTable = mountCompareTable(state, compareRoot, type, safeOtherName, scopeAttr, matchedNodes);
     if (!customTable) return;
@@ -304,7 +304,7 @@ export async function loadAllEntriesViaMediaList(
     applyFilter(state, customTable, matchedNodes);
   } catch (err) {
     state.loadFailed = true;
-    console.error('[AL-Additions] CompareView getMediaList error:', err);
+    ctx.log.error('CompareView getMediaList error:', err);
   } finally {
     state.isLoadingAll = false;
     state.loadAbortState = null;

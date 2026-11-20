@@ -1,8 +1,7 @@
-import { GM_download } from 'vite-plugin-monkey/dist/client';
 import { defineModule } from '../../core/registry';
 import { findBannerElement, mediaRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
-import { openTab, debounce } from '../../utils/helpers';
+import { debounce } from '../../utils/helpers';
 
 defineModule({
   id: 'banner',
@@ -49,23 +48,13 @@ defineModule({
     const bannerAllowed = (): boolean =>
       !!mediaRoute() || (/^\/user\//.test(location.pathname) && !!ctx.get('bannerProfiles'));
 
-    function download(onSaved?: () => void): void {
+    async function download(): Promise<'download' | 'tab' | null> {
       const banner = findBannerElement();
       const url = banner && bannerAllowed() && bannerUrl(banner);
-      if (!url) return;
+      if (!url) return null;
       const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || 'jpg').toLowerCase();
       const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split('/')[2] || 'anilist'}.${ext}`;
-      const fallback = (): void => {
-        openTab(url);
-        onSaved?.();
-      };
-      if (typeof GM_download === 'function') {
-        try {
-          GM_download({ url, name, saveAs: false, onload: () => onSaved?.(), onerror: fallback });
-          return;
-        } catch (_) {}
-      }
-      fallback();
+      return ctx.http.download(url, name);
     }
 
     function createButton(): HTMLButtonElement {
@@ -80,16 +69,19 @@ defineModule({
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        download(() => {
-          btn.classList.add('is-done');
-          ico.innerHTML = icon('check', 18);
-          lbl.textContent = 'Saved';
-          ctx.timeout(() => {
-            btn.classList.remove('is-done');
-            ico.innerHTML = icon('download', 18);
-            lbl.textContent = 'Download banner';
-          }, 1600);
-        });
+        void download()
+          .then((outcome) => {
+            if (!outcome) return;
+            btn.classList.add('is-done');
+            ico.innerHTML = icon('check', 18);
+            lbl.textContent = outcome === 'tab' ? 'Opened' : 'Saved';
+            ctx.timeout(() => {
+              btn.classList.remove('is-done');
+              ico.innerHTML = icon('download', 18);
+              lbl.textContent = 'Download banner';
+            }, 1600);
+          })
+          .catch(() => {});
       });
       return btn;
     }

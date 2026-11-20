@@ -2,8 +2,10 @@ import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import { CoreHooks } from '../core/bus';
 import { ANILIST_SESSION_KEYS, type AniListClient, type AniListSession } from '../types';
 import { hasLoggedInNav, isLoggedOutNav, navUserName } from '../utils/anilistDom';
-import { authError, logDebug, sleep, store } from '../utils/helpers';
+import { authError, createCoreLogger, sleep, store } from '../utils/helpers';
 import { RateLimiter } from '../utils/limiter';
+
+const anilistLog = createCoreLogger('anilist');
 
 export type { AniListClient, AniListSession };
 
@@ -493,7 +495,7 @@ export const AniList = (() => {
     try {
       return fn();
     } catch (e) {
-      logDebug('[ANILIST API] Cache bridge error:', e);
+      anilistLog.debug('Cache bridge error:', e);
       return undefined;
     }
   }
@@ -580,18 +582,85 @@ export const AniList = (() => {
     }
   };
 
-  function syncFromPage(): void {
+  function readPageDoc(): { win: any; doc: Document | undefined } {
     const win = pageWin();
-    const doc = (win.document || document) as Document;
+    const doc = (win?.document || (typeof document !== 'undefined' ? document : undefined)) as Document | undefined;
+    return { win, doc };
+  }
 
-    if (isLoggedOutNav(doc)) {
+  function peek(opts?: { reconcile?: boolean }): import('../types').AniListSessionSnapshot {
+    if (opts?.reconcile) syncFromPage();
+    const { win, doc } = readPageDoc();
+    if (doc && isLoggedOutNav(doc)) {
+      return { userId: null, username: null, scoreFormat: null };
+    }
+
+    const storedIdNum = Number(store.get('al_user_id', 0));
+    const storedId = storedIdNum > 0 ? storedIdNum : null;
+    const storedNameRaw = store.get<string | null>('al_username', null);
+    const storedName = typeof storedNameRaw === 'string' && storedNameRaw ? storedNameRaw : null;
+    const storedFmtRaw = store.get<string | null>('al_score_format', null);
+    const storedFmt = typeof storedFmtRaw === 'string' && storedFmtRaw ? storedFmtRaw : null;
+
+    const cachedViewer = entityCache.get('Viewer')?.data?.Viewer as
+      | { id?: number; name?: string; mediaListOptions?: { scoreFormat?: string } }
+      | undefined;
+    const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
+    const navName = doc ? navUserName(doc) || null : null;
+
+    if (nuxtUser?.id) {
+      const nuxtId = Number(nuxtUser.id);
+      const storedMismatch =
+        (storedId !== null && storedId !== nuxtId) ||
+        (storedId === null &&
+          storedName !== null &&
+          typeof nuxtUser.name === 'string' &&
+          storedName.toLowerCase() !== nuxtUser.name.toLowerCase());
+      const cachedMatches = !!(cachedViewer?.id && Number(cachedViewer.id) === nuxtId);
+      const username =
+        (nuxtUser.name ? String(nuxtUser.name) : null) ||
+        (cachedMatches && cachedViewer?.name ? String(cachedViewer.name) : null) ||
+        (!storedMismatch ? storedName : null) ||
+        navName ||
+        null;
+      const scoreFormat =
+        (cachedMatches ? cachedViewer?.mediaListOptions?.scoreFormat || null : null) ||
+        (!storedMismatch ? storedFmt : null);
+      return { userId: nuxtId, username, scoreFormat };
+    }
+
+    if (navName) {
+      const storedMatches = storedName === null || storedName.toLowerCase() === navName.toLowerCase();
+      const cachedMatches = !!(cachedViewer?.name && String(cachedViewer.name).toLowerCase() === navName.toLowerCase());
+      return {
+        userId:
+          (storedMatches ? storedId : null) ||
+          (cachedMatches && cachedViewer?.id ? Number(cachedViewer.id) : null),
+        username: (storedMatches && storedName) || navName,
+        scoreFormat:
+          (storedMatches ? storedFmt : null) ||
+          (cachedMatches ? cachedViewer?.mediaListOptions?.scoreFormat || null : null)
+      };
+    }
+
+    return {
+      userId: storedId || (cachedViewer?.id ? Number(cachedViewer.id) : null),
+      username: storedName || (cachedViewer?.name ? String(cachedViewer.name) : null),
+      scoreFormat: storedFmt || cachedViewer?.mediaListOptions?.scoreFormat || null
+    };
+  }
+
+  function syncFromPage(): void {
+    const { win, doc } = readPageDoc();
+
+    if (doc && isLoggedOutNav(doc)) {
       const hasStoredSession = ANILIST_SESSION_KEYS.some((k) => store.get(k, undefined) !== undefined);
       if (hasStoredSession || entityCache.has('Viewer')) {
         clearViewer();
       }
       return;
     }
-    const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+    const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
     if (nuxtUser?.id) {
       const nuxtId = Number(nuxtUser.id);
       const storedId = Number(store.get('al_user_id', 0));
@@ -602,7 +671,7 @@ export const AniList = (() => {
       return;
     }
 
-    const navName = navUserName(doc);
+    const navName = doc ? navUserName(doc) : '';
     if (navName) {
       const storedName = store.get<string | null>('al_username', null);
       const cachedViewerName = entityCache.get('Viewer')?.data?.Viewer?.name;
@@ -617,32 +686,57 @@ export const AniList = (() => {
     }
   }
 
-  function isViewerMismatchedWithPage(v?: { id?: number; name?: string } | null): boolean {
-    const win = pageWin();
-    const doc = (win.document || document) as Document;
-    if (isLoggedOutNav(doc)) return true;
+  function isViewerMismatchedWithPage(v?: { id?: number | null; name?: string | null } | null): boolean {
+    const { win, doc } = readPageDoc();
+    if (doc && isLoggedOutNav(doc)) return true;
 
-    const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
-    if (nuxtUser?.id) {
-      return Boolean(v?.id && Number(v.id) !== Number(nuxtUser.id));
+    const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
+    if (nuxtUser?.id && v?.id != null && Number(v.id) > 0) {
+      if (Number(v.id) !== Number(nuxtUser.id)) return true;
     }
 
-    const navName = navUserName(doc);
-    if (navName) {
-      return Boolean(v?.name && String(v.name).toLowerCase() !== navName.toLowerCase());
+    const pageName =
+      (nuxtUser?.name ? String(nuxtUser.name).trim() : '') || (doc ? navUserName(doc) : '');
+    if (pageName && v?.name) {
+      if (String(v.name).trim().toLowerCase() !== pageName.toLowerCase()) return true;
     }
 
     return false;
   }
 
-  function isBrowserLoggedIn(): boolean {
-    const win = pageWin();
-    const doc = (win.document || document) as Document;
+  function recordHint(hint: import('../types').AniListViewerHint): void {
+    if (!hint || CoreHooks.isSessionClearing()) return;
+    const nextId =
+      typeof hint.userId === 'number' && Number.isFinite(hint.userId) && hint.userId > 0
+        ? Math.floor(hint.userId)
+        : null;
+    const nextName = typeof hint.username === 'string' && hint.username.trim() ? hint.username.trim() : null;
+    if (nextId === null && nextName === null) return;
     syncFromPage();
-    if (isLoggedOutNav(doc)) return false;
-    const nuxtUser = win.__NUXT__?.state?.auth?.user || win.__NUXT__?.state?.user;
+    if (CoreHooks.isSessionClearing()) return;
+    if (isViewerMismatchedWithPage({ id: nextId, name: nextName })) return;
+    if (nextId !== null) {
+      const storedId = Number(store.get('al_user_id', 0));
+      if (storedId && storedId !== nextId) {
+        store.del('al_username');
+        store.del('al_score_format');
+      }
+      if (storedId !== nextId) {
+        store.set('al_user_id', nextId);
+      }
+    }
+    if (nextName !== null && store.get<string | null>('al_username', null) !== nextName) {
+      store.set('al_username', nextName);
+    }
+  }
+
+  function isBrowserLoggedIn(): boolean {
+    const { win, doc } = readPageDoc();
+    syncFromPage();
+    if (doc && isLoggedOutNav(doc)) return false;
+    const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
     if (nuxtUser?.id) return true;
-    if (hasLoggedInNav(doc)) return true;
+    if (doc && hasLoggedInNav(doc)) return true;
     return Boolean(Number(store.get('al_user_id', 0)) > 0 && store.get('al_username', null));
   }
 
@@ -767,7 +861,7 @@ export const AniList = (() => {
     if (!opts.forceFresh && meta) {
       const cached = entityCache.get(meta.entityKey);
       if (cached && now - cached.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, cached.fields)) {
-        logDebug('[ANILIST API] 🎯 Cache HIT via Subset matching:', meta.entityKey);
+        anilistLog.debug('🎯 Cache HIT via Subset matching:', meta.entityKey);
         return cached.data as T;
       }
     }
@@ -775,7 +869,7 @@ export const AniList = (() => {
     if (meta && !opts.forceFresh) {
       const flyingEntity = inflightEntities.get(meta.entityKey);
       if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
-        logDebug('[ANILIST API] 🔗 Attached to in-flight Superset request:', meta.entityKey);
+        anilistLog.debug('🔗 Attached to in-flight Superset request:', meta.entityKey);
         return flyingEntity.promise as Promise<T>;
       }
     }
@@ -1016,7 +1110,7 @@ export const AniList = (() => {
         cached.data?.MediaListCollection &&
         cached.data.MediaListCollection.hasNextChunk !== true
       ) {
-        logDebug('[ANILIST API] 🎯 Cache HIT for MediaListCollection via entityCache:', k);
+        anilistLog.debug('🎯 Cache HIT for MediaListCollection via entityCache:', k);
         return formatMediaListResult(cached.data.MediaListCollection);
       }
     }
@@ -1032,10 +1126,10 @@ export const AniList = (() => {
           const json = JSON.parse(raw);
           const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
           if (mlc && Array.isArray(mlc.lists) && mlc.hasNextChunk !== true) {
-            logDebug(
+            anilistLog.debug(
               viaScan
-                ? '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):'
-                : '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad GQL store:',
+                ? '🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):'
+                : '🎯 Cache HIT for MediaListCollection via FastLoad GQL store:',
               k
             );
             return formatMediaListResult(mlc);
@@ -1075,10 +1169,10 @@ export const AniList = (() => {
           const payload = cached.msg.result ?? cached.msg;
           const result = parseRpcMediaList(payload);
           if (result && result.allEntries.length > 0) {
-            logDebug(
+            anilistLog.debug(
               viaScan
-                ? '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):'
-                : '[ANILIST API] 🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:',
+                ? '🎯 Cache HIT for MediaListCollection via FastLoad RPC cache (scan):'
+                : '🎯 Cache HIT for MediaListCollection via FastLoad RPC cache:',
               k
             );
             return result;
@@ -1153,7 +1247,7 @@ export const AniList = (() => {
         if (!flight?.promise) return null;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          logDebug('[ANILIST API] ⏳ Awaiting in-flight FastLoad RPC prefetch:', k);
+          anilistLog.debug('⏳ Awaiting in-flight FastLoad RPC prefetch:', k);
           const msg = await Promise.race([
             flight.promise,
             new Promise((_, reject) => {
@@ -1163,7 +1257,7 @@ export const AniList = (() => {
           const payload = msg?.result ?? msg;
           const parsed = parseRpcMediaList(payload);
           if (parsed && parsed.allEntries.length > 0) {
-            logDebug('[ANILIST API] 🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:', k);
+            anilistLog.debug('🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:', k);
             return parsed;
           }
         } catch (_) {
@@ -1346,9 +1440,20 @@ export const AniList = (() => {
   const resumeAt = (): number => limiter.resumeAt;
 
   const session: AniListSession = {
+    peek,
+    get userId() {
+      return peek().userId;
+    },
+    get username() {
+      return peek().username;
+    },
+    get scoreFormat() {
+      return peek().scoreFormat;
+    },
     hasAuth,
     clear: clearViewer,
-    syncFromPage
+    syncFromPage,
+    recordHint
   };
 
   return {
@@ -1382,7 +1487,7 @@ export const MediaData = (() => {
       return data?.Media || null;
     } catch (e: any) {
       if (opts?.throwAuth && e?.auth) throw e;
-      logDebug('[MEDIA DATA] fetch failed:', e?.message || e);
+      anilistLog.debug('MediaData fetch failed:', e?.message || e);
       return null;
     }
   }

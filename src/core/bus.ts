@@ -10,6 +10,9 @@ import type {
   RpcBlocker,
   ServiceMap
 } from '../types';
+import { createCoreLogger, store } from '../utils/helpers';
+
+const coreLog = createCoreLogger('core');
 
 interface ServiceRecord {
   impl: unknown;
@@ -110,14 +113,14 @@ class ServiceRegistryImpl {
           try {
             res();
           } catch (e) {
-            console.error('[AL-Additions] Service subscriber cleanup failed:', e);
+            coreLog.error('Service subscriber cleanup failed:', e);
           }
         }
       } else if (entry.gen === myGen) {
         entry.cleanup = null;
       }
     } catch (e) {
-      console.error(`[AL-Additions] Service watcher for "${key}" failed:`, e);
+      coreLog.error(`Service watcher for "${key}" failed:`, e);
     }
   }
 
@@ -128,7 +131,7 @@ class ServiceRegistryImpl {
     try {
       fn();
     } catch (e) {
-      console.error('[AL-Additions] Service subscriber cleanup failed:', e);
+      coreLog.error('Service subscriber cleanup failed:', e);
     }
   }
 }
@@ -150,7 +153,7 @@ class EventBusImpl {
       try {
         entry.cb(payload);
       } catch (e) {
-        console.error(`[AL-Additions] Event listener for "${key}" failed:`, e);
+        coreLog.error(`Event listener for "${key}" failed:`, e);
       }
     }
   }
@@ -199,7 +202,7 @@ class EventBusImpl {
       try {
         cb(entry.payload as EventMap[K]);
       } catch (e) {
-        console.error(`[AL-Additions] Retained event listener for "${key}" failed:`, e);
+        coreLog.error(`Retained event listener for "${key}" failed:`, e);
       }
     }
     return unsub;
@@ -454,7 +457,7 @@ export const CoreHooks: CoreHooksApi = (() => {
       try {
         entry.cb(normalizedEvent);
       } catch (e) {
-        console.error('[AL-Additions] onGqlFetch listener failed:', e);
+        coreLog.error('onGqlFetch listener failed:', e);
       }
     }
   }
@@ -467,11 +470,35 @@ export const CoreHooks: CoreHooksApi = (() => {
     isSessionClearing(): boolean {
       return clearingDepth > 0;
     },
+    getAuthHeader(): string | null {
+      const val = store.get<unknown>('al_token_auth', null);
+      if (typeof val !== 'string') return null;
+      const trimmed = val.trim();
+      const stripped = trimmed.replace(/^Bearer(?:\s+|$)/i, '').trim();
+      return stripped ? trimmed : null;
+    },
+    setAuthHeader(header: string | null): void {
+      if (clearingDepth > 0) return;
+      if (header == null) {
+        store.del('al_token_auth');
+        return;
+      }
+      if (typeof header !== 'string') return;
+      const trimmed = header.trim();
+      const stripped = trimmed.replace(/^Bearer(?:\s+|$)/i, '').trim();
+      if (!stripped) return;
+      store.set('al_token_auth', trimmed);
+    },
     clearAuth(): void {
+      try {
+        store.del('al_token_auth');
+      } catch (e) {
+        coreLog.error('Failed to clear stored auth header:', e);
+      }
       try {
         cacheBridge?.clearAuth();
       } catch (e) {
-        console.error('[AL-Additions] cacheBridge.clearAuth failed:', e);
+        coreLog.error('cacheBridge.clearAuth failed:', e);
       }
     },
     registerCacheBridge(bridge: FastLoadCacheBridge): CleanupFn {
@@ -538,7 +565,7 @@ export const CoreHooks: CoreHooksApi = (() => {
         try {
           if (entry.cb(normalizedQuery, normalizedVars)) return true;
         } catch (e) {
-          console.error('[AL-Additions] RPC blocker failed:', e);
+          coreLog.error('RPC blocker failed:', e);
         }
       }
       return false;

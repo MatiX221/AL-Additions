@@ -769,6 +769,10 @@ defineModule({
   legacy: ['aniSongsEnabled', 'animeThemeSongsEnabled', 'anisongsEnabled'],
   title: 'Anime Opening & Ending Songs',
   help: 'Show OP/ED theme songs on anime pages.',
+  debug: {
+    debug: false,
+    label: 'AniSongs'
+  },
   options: [
     {
       key: 'aniSongsProviders',
@@ -976,7 +980,7 @@ defineModule({
         const overview = await ctx.waitForSelector('.overview', 10000);
         if (cur === mine && overview && animeId() === id) mount(mine as { id: string; themes: ThemesGroup }, overview);
       } catch (err) {
-        console.error('[AL-Additions] Anisongs sync error:', err);
+        ctx.log.error('Anisongs sync error:', err);
         if (cur === mine) {
           cur = null;
           backoff = { id, until: Date.now() + 30000 };
@@ -996,7 +1000,7 @@ defineModule({
           try {
             mount(cur as { id: string; themes: ThemesGroup }, overview);
           } catch (err) {
-            console.error('[AL-Additions] Anisongs repair error:', err);
+            ctx.log.error('Anisongs repair error:', err);
           }
         }
       }

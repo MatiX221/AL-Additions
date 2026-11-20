@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
 import { bootModuleForTest } from '../src/core/registry';
+import { CoreHooks } from '../src/core/bus';
+import { Settings } from '../src/settings/settings';
 import { store as gmStore } from '../src/utils/helpers';
 import { AniList } from '../src/api/anilist';
 import { learned, loadRoutes } from '../src/modules/fastLoad/routes';
-import { hookWorker } from '../src/modules/fastLoad/worker';
+import { hookWorker, extractUsersFromRpcResult } from '../src/modules/fastLoad/worker';
+import '../src/settings/devMode';
 import '../src/modules/fastLoad';
 
 describe('FastLoad: GraphQL Performance & Cache Engine', () => {
@@ -615,6 +618,53 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
       } finally {
         (window as any).Worker = origWorker;
         vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('CoreHooks authHeader, Viewer-only recordHint & 2-tier RPC logging', () => {
+    it('stores Bearer header via CoreHooks.setAuthHeader and ignores non-Viewer users in extractUsersFromRpcResult', async () => {
+      CoreHooks.clearAuth();
+      mockNativeFetch.mockResolvedValueOnce(createJsonResponse({ data: { Viewer: { id: 1, name: 'Me' } } }));
+
+      await window.fetch('https://graphql.anilist.co', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fl_test_tok' },
+        body: JSON.stringify({ query: 'query { Viewer { id name } }' })
+      });
+      expect(CoreHooks.getAuthHeader()).toBe('Bearer fl_test_tok');
+
+      gmStore.del('al_user_id');
+      gmStore.del('al_username');
+      extractUsersFromRpcResult({ User: { id: 999, name: 'Stranger', avatar: { medium: 'x' } } });
+      expect(gmStore.get('al_user_id', null)).toBeNull();
+      expect(gmStore.get('al_username', null)).toBeNull();
+
+      extractUsersFromRpcResult({ Viewer: { id: 123, name: 'RealViewer' } });
+      expect(gmStore.get('al_user_id', null)).toBe(123);
+      expect(gmStore.get('al_username', null)).toBe('RealViewer');
+    });
+
+    it('routes main Fast Load logs to [Fast Load] and RPC logs to [Fast Load (RPC)] independently', async () => {
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+      Settings.set('devModeEnabled', true);
+      Settings.set('debug', {
+        fastLoad: { enabled: true, channels: { general: true, rpc: false } }
+      });
+
+      try {
+        mockNativeFetch.mockResolvedValueOnce(createJsonResponse({ data: { Media: { id: 777 } } }));
+        await window.fetch('https://graphql.anilist.co', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: 'query { Media(id: 777) { id } }' })
+        });
+        await flushAsync();
+
+        expect(debugSpy.mock.calls.some((c) => c[0] === '[Fast Load]')).toBe(true);
+        expect(debugSpy.mock.calls.some((c) => c[0] === '[Fast Load (RPC)]')).toBe(false);
+      } finally {
+        debugSpy.mockRestore();
       }
     });
   });

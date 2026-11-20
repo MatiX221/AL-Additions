@@ -19,6 +19,10 @@ defineModule({
   legacy: ['behindDotsEnabled', 'airingProgressIndicatorEnabled'],
   title: 'Airing Progress Indicator',
   help: 'Show an orange indicator when your watched episode count is behind the number of aired episodes.',
+  debug: {
+    debug: false,
+    label: 'Airing Dots'
+  },
   setup(ctx) {
     const CLASS = 'daiya-behind-dot';
     const ORANGE = 'rgb(255, 152, 0)';
@@ -204,7 +208,7 @@ defineModule({
         }
         running++;
         updateBatch(batch)
-          .catch((e) => console.error('[AL-Additions] airing batch', e))
+          .catch((e) => ctx.log.error('airing batch', e))
           .finally(() => {
             batch.forEach((id) => active.delete(id));
             running--;

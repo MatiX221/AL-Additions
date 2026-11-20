@@ -10,6 +10,8 @@ import {
 } from '../src/modules/tierLabels/tiers';
 import { getValidTiers } from '../src/modules/tierLabels';
 import { Settings } from '../src/settings/settings';
+import { runMigrations, bootModuleForTest, disposeFeature } from '../src/core/registry';
+import { store } from '../src/utils/helpers';
 
 function expectTiersMatch(actual: TierConfig[], expected: TierConfig[]) {
   expect(actual.length).toBe(expected.length);
@@ -171,5 +173,40 @@ describe('Tier Labels: Settings Integration (getValidTiers)', () => {
     const tiers = getValidTiers();
 
     expectTiersMatch(tiers, DEFAULT_TIERS);
+  });
+});
+describe('Tier Labels: Migration & Session Score Format', () => {
+  it('migrates legacy localStorage settings and standalone_seen key into ala_mod_tierLabels_* via runMigrations()', () => {
+    localStorage.setItem(
+      'anilistTierLabelsSettings',
+      JSON.stringify({
+        tiers: [{ min: 0, max: 100, label: 'ALL', color: '#112233', textColor: '#ffffff' }],
+        enableRatingTextColor: false
+      })
+    );
+    store.set('ala_standalone_seen_tierLabels', true);
+
+    runMigrations();
+
+    expect(Settings.get('tierLabels')[0].label).toBe('ALL');
+    expect(Settings.get('tierLabelsColorScore')).toBe(false);
+    expect(store.get('ala_mod_tierLabels_standalone_seen', null)).toBe(true);
+    expect(store.get('ala_standalone_seen_tierLabels', null)).toBeNull();
+    localStorage.removeItem('anilistTierLabelsSettings');
+  });
+
+  it('reads viewer scoreFormat from ctx.session.scoreFormat during scan passes', async () => {
+    Settings.set('tierLabels', DEFAULT_TIERS);
+    Settings.set('tierLabelsEnabled', true);
+    store.set('ala_mod_tierLabels_standalone_seen', false);
+    store.set('al_score_format', 'POINT_5');
+
+    document.body.innerHTML = '<div class="score" score="5">5</div>';
+    await bootModuleForTest('tierLabels');
+
+    const scoreEl = document.querySelector<HTMLElement>('.score')!;
+    expect(scoreEl.dataset.tierModified).toBe('true');
+    expect(scoreEl.textContent).toContain('S+');
+    disposeFeature('tierLabels');
   });
 });

@@ -1,15 +1,18 @@
 import { GM_xmlhttpRequest } from 'vite-plugin-monkey/dist/client';
 import { Settings } from '../settings/settings';
 import {
-  SETTING_PREFIX,
   type AccountProvider,
   type AniListClient,
   type AniListSession,
+  type ChannelLogger,
   type CleanupFn,
   type CoreHooksApi,
   type FeatureContext,
   type FeatureLayer,
+  type HttpDownloadOptions,
   type HttpRequestOptions,
+  type MigrateContext,
+  type ModuleDebugDef,
   type ModuleDef,
   type ModuleDisableReason,
   type ModuleHost,
@@ -18,19 +21,31 @@ import {
   type ModuleStatus,
   type MountSpec,
   type RouteContext,
-  type ServiceMap
+  type ServiceMap,
+  type StorageScope
 } from '../types';
-import { isDebug, logDebug, persistent, registerDebugChannel, store } from '../utils/helpers';
+import {
+  createCoreLogger,
+  createLogger,
+  downloadFile,
+  getDebuggableChannels,
+  isDebugEnabled,
+  persistent,
+  store
+} from '../utils/helpers';
 import {
   clearAccountSecrets,
   getAccountProvider,
-  registerAccountProvider
+  registerAccountProvider,
+  watchAccountProvider
 } from './accounts';
 import { CoreHooks, EventBus, ServiceRegistry } from './bus';
 import { registerMenuCommand } from './menu';
 import { Core } from './observer';
 import { addStyle } from './styles';
 import { showToast, toastError, toastSuccess } from './toast';
+
+const coreLog = createCoreLogger('core');
 
 export const modules: ModuleDef[] = [];
 
@@ -71,6 +86,8 @@ function getCoreSession(): AniListSession {
 
 interface ModuleRecord {
   id: string;
+  title: string;
+  help: string;
   setting: string | null;
   hosts: string[];
   layer: ModuleLayer;
@@ -78,10 +95,10 @@ interface ModuleRecord {
   requiresReload: boolean;
   dependsOn: string[];
   after: string[];
-  debugChannel?: string;
+  debug?: ModuleDebugDef;
   standalone?: ModuleMeta['standalone'];
-  migrate?: () => void;
-  setup: (ctx: FeatureContext) => void | Promise<void>;
+  migrate?: (m: MigrateContext) => void;
+  setup: (ctx: FeatureContext<any>) => void | Promise<void>;
   legacyInit?: () => void | Promise<void>;
   invalidId: boolean;
   idCollision: boolean;
@@ -122,7 +139,7 @@ function emitStatusChange(id: string, status: ModuleStatus): void {
       try {
         cb(id, status);
       } catch (e) {
-        console.error('[AL-Additions] Module status listener failed:', e);
+        coreLog.error('Module status listener failed:', e);
       }
     }
   }
@@ -341,18 +358,50 @@ function syncAllLiveStatuses(statuses: Record<string, ModuleStatus>): void {
   }
 }
 
+function createScopedStorage(
+  storagePrefix: string,
+  isDisposed: () => boolean,
+  wrapWatch: (fn: () => CleanupFn) => CleanupFn = (fn) => fn(),
+  guardClear = false
+): StorageScope {
+  return {
+    get: <T>(k: string, d?: T) => store.get<T>(`${storagePrefix}${k}`, d),
+    set: <T>(k: string, v: T) => {
+      if (!isDisposed()) store.set(`${storagePrefix}${k}`, v);
+    },
+    del: (k: string) => {
+      if (!isDisposed()) store.del(`${storagePrefix}${k}`);
+    },
+    watch: (k, cb) => {
+      if (isDisposed()) return () => {};
+      return wrapWatch(() =>
+        store.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => {
+          if (isDisposed()) return;
+          cb(k, oldV, newV, remote);
+        })
+      );
+    },
+    clear: () => {
+      if (guardClear && isDisposed()) return;
+      for (const k of store.list()) {
+        if (k.startsWith(storagePrefix)) store.del(k);
+      }
+    }
+  };
+}
+
 function runCleanupsReverse(id: string, cleanups: CleanupFn[]): void {
   for (let i = cleanups.length - 1; i >= 0; i--) {
     try {
       cleanups[i]();
     } catch (e) {
-      console.error(`[AL-Additions] Module "${id}" failed during cleanup:`, e);
+      coreLog.error(`Module "${id}" failed during cleanup:`, e);
     }
   }
   cleanups.length = 0;
 }
 
-function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: AbortController): FeatureContext {
+function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: AbortController): FeatureContext<any> {
   let disposed = false;
   let localClearingDepth = 0;
   const noop: CleanupFn = () => {};
@@ -570,13 +619,13 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
               },
               (err) => {
                 if (!localAc.signal.aborted) {
-                  console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+                  coreLog.error(`Module "${rec.id}" route handler failed:`, err);
                 }
               }
             );
           }
         } catch (err) {
-          console.error(`[AL-Additions] Module "${rec.id}" route handler failed:`, err);
+          coreLog.error(`Module "${rec.id}" route handler failed:`, err);
         }
       };
 
@@ -633,6 +682,45 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     });
   };
 
+  const httpDownload = (url: string, name: string, opts: HttpDownloadOptions = {}): Promise<'download' | 'tab'> => {
+    if (disposed || ac.signal.aborted) {
+      return Promise.reject(new Error('Download aborted'));
+    }
+    return new Promise((resolve, reject) => {
+      const entry: { abort?: () => void; reject?: (e: Error) => void } = { reject };
+      activeRequests.add(entry);
+      const settle = (fn: () => void) => {
+        if (!activeRequests.has(entry)) return;
+        activeRequests.delete(entry);
+        fn();
+      };
+      let settled = false;
+      const handle = downloadFile(url, name, {
+        saveAs: opts.saveAs,
+        openTabOnError: () => !disposed && !ac.signal.aborted && opts.openTabOnError !== false,
+        onComplete: (outcome) => {
+          settled = true;
+          settle(() => resolve(outcome));
+        },
+        onAbort: () => {
+          settled = true;
+          settle(() => reject(new Error('Download aborted')));
+        },
+        onError: (err) => {
+          settled = true;
+          settle(() => reject(err instanceof Error ? err : new Error(String(err || 'Download failed'))));
+        }
+      });
+      if (!settled) {
+        entry.abort = () => {
+          try {
+            handle?.abort?.();
+          } catch {}
+        };
+      }
+    });
+  };
+
   const trackedHooks: CoreHooksApi = {
     setSessionClearing: (active) => {
       if (disposed) return;
@@ -645,6 +733,10 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       }
     },
     isSessionClearing: () => CoreHooks.isSessionClearing(),
+    getAuthHeader: () => CoreHooks.getAuthHeader(),
+    setAuthHeader: (header) => {
+      if (!disposed) CoreHooks.setAuthHeader(header);
+    },
     clearAuth: () => {
       if (!disposed) CoreHooks.clearAuth();
     },
@@ -664,35 +756,126 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
     isPrefetchSuppressed: () => CoreHooks.isPrefetchSuppressed()
   };
 
-  const debugChannel = rec.debugChannel || rec.id;
+  const debugDef = rec.debug;
+  const hasModuleDebug = Boolean(debugDef && debugDef.debug !== false);
+  const debugLabel = debugDef?.label || rec.title || rec.id;
+  const debugTitle = hasModuleDebug ? (debugDef as { title?: string }).title || rec.title : rec.title;
+  const debugHelp = hasModuleDebug ? (debugDef as { help?: string }).help ?? rec.help : rec.help;
+  const hasDebuggableChannels = getDebuggableChannels(debugDef).length > 0;
+  const rootLogger = createLogger<boolean>(
+    `[${debugLabel}]`,
+    hasModuleDebug
+      ? () => !disposed && isDebugEnabled(rec.id, hasDebuggableChannels ? 'general' : undefined)
+      : () => false,
+    {
+      label: debugLabel,
+      title: debugTitle,
+      help: debugHelp,
+      canDebug: hasModuleDebug
+    }
+  );
+  const channelLoggers = new Map<string, ChannelLogger<boolean>>();
+  const getChannelLogger = (chId: string): ChannelLogger<boolean> => {
+    const cached = channelLoggers.get(chId);
+    if (cached) return cached;
+    const chDef =
+      debugDef?.channels && Object.prototype.hasOwnProperty.call(debugDef.channels, chId)
+        ? debugDef.channels[chId]
+        : undefined;
+    if (!chDef) {
+      const fallback = Object.freeze({
+        id: chId,
+        ...createLogger<false>(`[${debugLabel} (${chId})]`, () => false, {
+          label: chId,
+          title: chId,
+          canDebug: false
+        })
+      }) as ChannelLogger<false>;
+      channelLoggers.set(chId, fallback);
+      return fallback;
+    }
+    const canDebug = hasModuleDebug && chDef.debug === true;
+    const chLogger = Object.freeze({
+      id: chId,
+      ...createLogger<boolean>(
+        `[${debugLabel} (${chDef.label})]`,
+        canDebug ? () => !disposed && isDebugEnabled(rec.id, chId) : () => false,
+        {
+          label: chDef.label,
+          title: chDef.title || chDef.label,
+          help: chDef.help,
+          canDebug
+        }
+      )
+    }) as ChannelLogger<boolean>;
+    channelLoggers.set(chId, chLogger);
+    return chLogger;
+  };
+  const ctxLog = Object.freeze({
+    ...rootLogger,
+    channel: (chId: string) => getChannelLogger(String(chId))
+  });
+
+  let sessionWrapper: AniListSession | null = null;
+  let apiWrapper: AniListClient | null = null;
+  const getSessionWrapper = (): AniListSession => {
+    if (!sessionWrapper) {
+      sessionWrapper = {
+        peek: (opts) =>
+          getCoreSession().peek(disposed && opts?.reconcile ? { ...opts, reconcile: false } : opts),
+        get userId() {
+          return getCoreSession().userId;
+        },
+        get username() {
+          return getCoreSession().username;
+        },
+        get scoreFormat() {
+          return getCoreSession().scoreFormat;
+        },
+        hasAuth: () => getCoreSession().hasAuth(),
+        clear: () => {
+          if (!disposed) getCoreSession().clear();
+        },
+        syncFromPage: () => {
+          if (!disposed) getCoreSession().syncFromPage?.();
+        },
+        recordHint: (hint) => {
+          if (!disposed) getCoreSession().recordHint(hint);
+        }
+      };
+    }
+    return sessionWrapper;
+  };
+  const getApiWrapper = (): AniListClient => {
+    if (!apiWrapper) {
+      apiWrapper = {
+        query: (...args) => getCoreApi().query(...args),
+        getMediaList: (...args) => getCoreApi().getMediaList(...args),
+        viewer: (...args) => getCoreApi().viewer(...args),
+        clearViewer: () => getCoreApi().clearViewer(),
+        invalidate: (...args) => getCoreApi().invalidate(...args),
+        invalidateMediaList: (...args) => getCoreApi().invalidateMediaList(...args),
+        hasAuth: () => getCoreApi().hasAuth(),
+        resumeAt: () => getCoreApi().resumeAt(),
+        media: getCoreApi().media,
+        get session() {
+          return getSessionWrapper();
+        }
+      };
+    }
+    return apiWrapper;
+  };
+
   const eventOwner = Symbol(`events:${rec.id}`);
   let retainedTracked = false;
 
-  const ctx: FeatureContext = {
+  const ctx: FeatureContext<any> = {
     id: rec.id,
+    title: rec.title,
+    help: rec.help,
     get: (key) => Settings.get(key),
     set: (key, val) => Settings.set(key, val),
-    storage: {
-      get: <T>(k: string, d?: T) => store.get<T>(`${storagePrefix}${k}`, d),
-      set: <T>(k: string, v: T) => {
-        if (!disposed) store.set(`${storagePrefix}${k}`, v);
-      },
-      del: (k: string) => {
-        if (!disposed) store.del(`${storagePrefix}${k}`);
-      },
-      watch: (k, cb) =>
-        whenAlive(() =>
-          store.watch(`${storagePrefix}${k}`, (_fullKey, oldV, newV, remote) => {
-            if (disposed) return;
-            cb(k, oldV, newV, remote);
-          })
-        ),
-      clear: () => {
-        for (const k of store.list()) {
-          if (k.startsWith(storagePrefix)) store.del(k);
-        }
-      }
-    },
+    storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
     persistent: (key, prune) => persistent(key, prune),
     ready: (cb) => whenAlive(() => Core.ready(cb)),
     onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
@@ -724,20 +907,23 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
         const r = await httpRequest(url, opts);
         if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
         return JSON.parse(r.responseText || '') as T;
-      }
+      },
+      download: httpDownload
     },
     get api(): AniListClient {
-      return getCoreApi();
+      return getApiWrapper();
     },
     get session(): AniListSession {
-      return getCoreSession();
+      return getSessionWrapper();
     },
     accounts: {
       get: (id: string): AccountProvider | undefined => getAccountProvider(id),
       isConnected: (id: string): boolean => !!getAccountProvider(id)?.isConnected(),
       connect: (id: string) => getAccountProvider(id)?.connect(),
       disconnect: (id: string) => getAccountProvider(id)?.disconnect(),
-      clearSecrets: (providerId?: string) => clearAccountSecrets(providerId)
+      clearSecrets: (providerId?: string) => clearAccountSecrets(providerId),
+      watch: (id: string, cb: (connected: boolean) => void): CleanupFn =>
+        whenAlive(() => watchAccountProvider(id, cb))
     },
     toast: {
       show: showToast,
@@ -767,12 +953,7 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       onRetained: (event, cb) => whenAlive(() => EventBus.onRetained(event, cb))
     },
     hooks: trackedHooks,
-    debug: {
-      enabled: () => isDebug(debugChannel),
-      log: (...args: any[]) => {
-        if (isDebug(debugChannel)) console.debug(`[${debugChannel.toUpperCase()}]`, ...args);
-      }
-    },
+    log: ctxLog as any,
     setStandalonePaused: (paused: boolean) => {
       if (disposed) return;
       const next = !!paused;
@@ -870,12 +1051,12 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
   rec.booted = true;
 
   const ctx = createContextForRecord(rec, cleanups, ac);
-  logDebug('[CORE]', `Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
+  coreLog.debug(`Initializing module "${rec.id}" (layer=${rec.layer}, early=${rec.early})`);
 
   const handleFailure = (err: unknown) => {
     if (rec.bootSeq !== seq) return;
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[AL-Additions] Module "${rec.id}" failed during setup:`, err);
+    coreLog.error(`Module "${rec.id}" failed during setup:`, err);
     cascadeDispose([rec.id]);
     rec.runtimeError = msg;
     const graph = resolveAllStates();
@@ -925,9 +1106,12 @@ function registerRecord(rec: ModuleRecord): void {
   });
 }
 
-export function defineModule<const TId extends string>(meta: ModuleMeta<TId>): void {
+export function defineModule<
+  TId extends string = string,
+  const TDebug extends ModuleDebugDef<any> | undefined = undefined
+>(meta: ModuleMeta<TId, TDebug>): void {
   if (!ID_RE.test(meta.id)) {
-    console.error(`[AL-Additions] Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+    coreLog.error(`Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
     invalidIds.set(meta.id, { active: false, reason: 'invalid-id' });
     emitStatusChange(meta.id, { active: false, reason: 'invalid-id' });
     return;
@@ -935,7 +1119,7 @@ export function defineModule<const TId extends string>(meta: ModuleMeta<TId>): v
 
   const existing = recordsById.get(meta.id);
   if (existing) {
-    console.error(`[AL-Additions] Duplicate module ID "${meta.id}" ignored.`);
+    coreLog.error(`Duplicate module ID "${meta.id}" ignored.`);
     existing.idCollision = true;
     emitStatusChange(meta.id, { active: false, reason: 'id-collision' });
     return;
@@ -966,13 +1150,10 @@ export function defineModule<const TId extends string>(meta: ModuleMeta<TId>): v
     standalone: meta.standalone
   });
 
-  if (meta.debug) {
-    const channel = meta.debug.channel || meta.id;
-    registerDebugChannel(channel, `${SETTING_PREFIX}${meta.debug.key}`, false, meta.debug.pattern);
-  }
-
   registerRecord({
     id: meta.id,
+    title: meta.title,
+    help: meta.help,
     setting: meta.key,
     hosts,
     layer,
@@ -980,10 +1161,10 @@ export function defineModule<const TId extends string>(meta: ModuleMeta<TId>): v
     requiresReload: !!meta.requiresReload,
     dependsOn,
     after,
-    debugChannel: meta.debug?.channel || meta.id,
+    debug: meta.debug,
     standalone: meta.standalone,
     migrate: meta.migrate,
-    setup: meta.setup as (ctx: FeatureContext) => void | Promise<void>,
+    setup: meta.setup as (ctx: FeatureContext<any>) => void | Promise<void>,
     invalidId: false,
     idCollision: false,
     standalonePaused: false,
@@ -1000,7 +1181,7 @@ export function registerShellModule(
   hosts: string[] = ['anilist.co']
 ): void {
   if (!ID_RE.test(name)) {
-    console.error(`[AL-Additions] Invalid shell module ID "${name}". Must match ${ID_RE}.`);
+    coreLog.error(`Invalid shell module ID "${name}". Must match ${ID_RE}.`);
     invalidIds.set(name, { active: false, reason: 'invalid-id' });
     emitStatusChange(name, { active: false, reason: 'invalid-id' });
     return;
@@ -1008,7 +1189,7 @@ export function registerShellModule(
 
   const existing = recordsById.get(name);
   if (existing) {
-    console.error(`[AL-Additions] Duplicate module ID "${name}" ignored.`);
+    coreLog.error(`Duplicate module ID "${name}" ignored.`);
     existing.idCollision = true;
     emitStatusChange(name, { active: false, reason: 'id-collision' });
     return;
@@ -1016,6 +1197,8 @@ export function registerShellModule(
 
   registerRecord({
     id: name,
+    title: name,
+    help: '',
     setting: null,
     hosts: hosts.slice(),
     layer: 'shell',
@@ -1045,10 +1228,33 @@ export function runMigrations(): void {
       .sort((a, b) => a.id.localeCompare(b.id));
     for (const rec of layerRecs) {
       if (!rec.migrate) continue;
+      let migrateDone = false;
+      const migrationCtx: MigrateContext = {
+        id: rec.id,
+        storage: createScopedStorage(`ala_mod_${rec.id}_`, () => migrateDone, undefined, true),
+        settings: {
+          has: (key) => Settings.has(key),
+          get: (key) => Settings.get(key),
+          set: (key, val) => {
+            if (!migrateDone) Settings.set(key, val);
+          }
+        },
+        legacy: {
+          get: <T>(key: string, def?: T) => store.get<T>(key, def),
+          set: <T>(key: string, val: T) => {
+            if (!migrateDone) store.set(key, val);
+          },
+          del: (key) => {
+            if (!migrateDone) store.del(key);
+          }
+        }
+      };
       try {
-        rec.migrate();
+        rec.migrate(migrationCtx);
       } catch (e) {
-        console.error(`[AL-Additions] Module "${rec.id}" failed during migrate:`, e);
+        coreLog.error(`Module "${rec.id}" failed during migrate:`, e);
+      } finally {
+        migrateDone = true;
       }
     }
   }

@@ -6,9 +6,17 @@ import {
   GM_addValueChangeListener,
   GM_removeValueChangeListener,
   GM_xmlhttpRequest,
+  GM_download,
   unsafeWindow
 } from 'vite-plugin-monkey/dist/client';
-import { SETTING_PREFIX } from '../types';
+import {
+  SETTING_PREFIX,
+  type HttpDownloadOptions,
+  type Logger,
+  type LoggerMeta,
+  type ModuleDebugChannelEnabledDef,
+  type ModuleDebugDef
+} from '../types';
 
 export const HOST = location.hostname;
 
@@ -105,7 +113,7 @@ export function openTab(url: string): void {
 }
 
 function resolveGm<T extends (...args: any[]) => any>(
-  name: 'GM_listValues' | 'GM_addValueChangeListener' | 'GM_removeValueChangeListener',
+  name: 'GM_listValues' | 'GM_addValueChangeListener' | 'GM_removeValueChangeListener' | 'GM_download',
   imported: T | undefined
 ): T | null {
   const g = globalThis as any;
@@ -117,6 +125,95 @@ function resolveGm<T extends (...args: any[]) => any>(
     return typeof w[name] === 'function' ? w[name] : null;
   }
   return typeof imported === 'function' ? imported : null;
+}
+
+export interface DownloadFileOptions extends Omit<HttpDownloadOptions, 'openTabOnError'> {
+  openTabOnError?: boolean | (() => boolean);
+  onComplete?: (method: 'download' | 'tab') => void;
+  onError?: (err: unknown) => void;
+  onAbort?: () => void;
+}
+
+export function downloadFile(
+  url: string,
+  name: string,
+  opts: DownloadFileOptions = {}
+): { abort: () => void } | null {
+  let settled = false;
+  const shouldOpenTabOnError = (): boolean =>
+    typeof opts.openTabOnError === 'function' ? !!opts.openTabOnError() : opts.openTabOnError !== false;
+  const triggerTabFallback = (): void => {
+    if (settled) return;
+    settled = true;
+    openTab(url);
+    opts.onComplete?.('tab');
+  };
+
+  const gmDownload = resolveGm('GM_download', GM_download) as
+    | ((details: Record<string, any>) => { abort?: () => void } | undefined)
+    | null;
+  if (gmDownload) {
+    try {
+      const handle = gmDownload({
+        url,
+        name,
+        saveAs: !!opts.saveAs,
+        onload: () => {
+          if (settled) return;
+          settled = true;
+          opts.onComplete?.('download');
+        },
+        onerror: (err: any) => {
+          if (settled) return;
+          if (err?.error === 'aborted') {
+            settled = true;
+            opts.onAbort?.();
+            return;
+          }
+          if (shouldOpenTabOnError()) {
+            triggerTabFallback();
+          } else {
+            settled = true;
+            opts.onError?.(err);
+          }
+        },
+        ontimeout: () => {
+          if (settled) return;
+          if (shouldOpenTabOnError()) {
+            triggerTabFallback();
+          } else {
+            settled = true;
+            opts.onError?.(new Error('Download timed out'));
+          }
+        },
+        onabort: () => {
+          if (settled) return;
+          settled = true;
+          opts.onAbort?.();
+        }
+      });
+      if (handle && typeof handle.abort === 'function') {
+        return { abort: () => handle.abort?.() };
+      }
+      return null;
+    } catch (err) {
+      if (shouldOpenTabOnError()) {
+        triggerTabFallback();
+      } else if (!settled) {
+        settled = true;
+        opts.onError?.(err);
+      }
+      return null;
+    }
+  }
+
+  if (shouldOpenTabOnError()) {
+    triggerTabFallback();
+  } else {
+    settled = true;
+    opts.onError?.(new Error('GM_download unavailable'));
+  }
+  return null;
 }
 
 export type StoreWatchCallback = (key: string, oldVal: any, newVal: any, remote: boolean) => void;
@@ -157,33 +254,65 @@ export const store = {
   }
 };
 
-export type DebugModule = 'fastLoad' | 'sync' | 'compareView' | 'mediaInfo' | 'tierLabels' | 'general';
+export const CORE_DEBUG_SCOPE = 'core';
 
-interface DebugChannelEntry {
-  settingKey: string;
-  def: boolean;
-  pattern?: RegExp;
+export const CORE_DEBUG_MASTER = {
+  scope: CORE_DEBUG_SCOPE,
+  title: 'Core / Kernel Debug',
+  help: 'Enable verbose debug logging across core subsystems, settings, and API clients.'
+} as const;
+
+export const CORE_DEBUG_CHANNELS = {
+  core: {
+    id: 'general',
+    label: 'Core',
+    title: 'Core & Observer',
+    help: 'Log DOM observer mutations, route changes, module lifecycle, and core bus events.'
+  },
+  settings: {
+    id: 'settings',
+    label: 'Settings',
+    title: 'Settings & Backup',
+    help: 'Log settings migrations, backup creation, and restore imports.'
+  },
+  anilist: {
+    id: 'anilist',
+    label: 'AniList',
+    title: 'AniList API',
+    help: 'Log AniList GraphQL caching, subset matching, and API requests.'
+  },
+  mal: {
+    id: 'mal',
+    label: 'MAL',
+    title: 'MyAnimeList API',
+    help: 'Log MyAnimeList API requests, responses, and override cache refreshes.'
+  }
+} as const;
+
+export type CoreDebugChannelId = keyof typeof CORE_DEBUG_CHANNELS;
+
+export interface CoreLoggerOptions {
+  scope: string;
+  channel?: string;
+  label: string;
+  title?: string;
+  help?: string;
 }
 
-const debugChannels = new Map<string, DebugChannelEntry>();
-
-export function registerDebugChannel(
-  channel: string,
-  settingKey: string,
-  def = false,
-  prefixPattern?: RegExp
-): void {
-  const existing = debugChannels.get(channel);
-  const escapedChannel = channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const defaultPattern = channel ? new RegExp(`^\\[${escapedChannel}(?=$|[\\]:\\s])`, 'i') : undefined;
-  debugChannels.set(channel, {
-    settingKey,
-    def,
-    pattern: prefixPattern ?? existing?.pattern ?? defaultPattern
-  });
+export function getDebuggableChannels(
+  debug?: ModuleDebugDef
+): Array<[string, ModuleDebugChannelEnabledDef]> {
+  if (!debug || debug.debug === false || !debug.channels) return [];
+  const out: Array<[string, ModuleDebugChannelEnabledDef]> = [];
+  for (const [id, ch] of Object.entries(debug.channels)) {
+    if (ch && ch.debug === true) {
+      out.push([id, ch]);
+    }
+  }
+  return out;
 }
 
-export function isDebug(module?: DebugModule | string): boolean {
+export function isDebugEnabled(scope: string, channel?: string): boolean {
   try {
     const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
     if (win.__ALA_DEBUG__ || win.__ALFL_DEBUG__) return true;
@@ -191,35 +320,89 @@ export function isDebug(module?: DebugModule | string): boolean {
     const devMode = parseToggle(store.get(`${SETTING_PREFIX}devModeEnabled`, false));
     if (!devMode) return false;
 
-    if (!module) return true;
-
-    const channel = debugChannels.get(module);
-    if (channel) {
-      return parseToggle(store.get(channel.settingKey, channel.def));
+    const raw = store.get<unknown>(`${SETTING_PREFIX}debug`, null);
+    let map: Record<string, any> | null = null;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      map = raw as Record<string, any>;
+    } else if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          map = parsed;
+        }
+      } catch {}
     }
+    if (!map) return false;
 
-    return true;
+    const entry = Object.prototype.hasOwnProperty.call(map, scope) ? map[scope] : undefined;
+    if (!entry || typeof entry !== 'object') return false;
+    if (!parseToggle(entry.enabled)) return false;
+
+    if (!channel) return true;
+    const channels = entry.channels;
+    if (!channels || typeof channels !== 'object') return true;
+    if (!Object.prototype.hasOwnProperty.call(channels, channel)) return true;
+    return parseToggle(channels[channel]);
   } catch {
     return false;
   }
 }
 
-export function logDebug(moduleOrTag: string, ...args: any[]): void {
-  let mod: string | undefined;
-  for (const [channel, entry] of debugChannels) {
-    if (entry.pattern) {
-      if (entry.pattern.global || entry.pattern.sticky) {
-        entry.pattern.lastIndex = 0;
+export function createLogger<TCanDebug extends boolean = true>(
+  prefix: string,
+  isEnabled: () => boolean,
+  meta: LoggerMeta
+): Logger<TCanDebug> {
+  const logger = {
+    label: meta.label,
+    title: meta.title,
+    help: meta.help,
+    canDebug: meta.canDebug,
+    enabled: (): boolean => {
+      try {
+        return !!meta.canDebug && !!isEnabled();
+      } catch {
+        return false;
       }
-      if (entry.pattern.test(moduleOrTag)) {
-        mod = channel;
-        break;
-      }
+    },
+    debug: ((...args: any[]): void => {
+      if (!logger.enabled()) return;
+      console.debug(prefix, ...args);
+    }) as any,
+    warn: (...args: any[]): void => {
+      console.warn(prefix, ...args);
+    },
+    error: (...args: any[]): void => {
+      console.error(prefix, ...args);
     }
-  }
+  };
+  return Object.freeze(logger) as Logger<TCanDebug>;
+}
 
-  if (!isDebug(mod)) return;
-  console.debug(moduleOrTag, ...args);
+export function createCoreLogger(channelOrOpts: CoreDebugChannelId | CoreLoggerOptions): Logger<true> {
+  if (typeof channelOrOpts === 'string') {
+    const def = CORE_DEBUG_CHANNELS[channelOrOpts];
+    return createLogger<true>(
+      `[${def.label}]`,
+      () => isDebugEnabled(CORE_DEBUG_SCOPE, def.id),
+      {
+        label: def.label,
+        title: def.title,
+        help: def.help,
+        canDebug: true
+      }
+    );
+  }
+  return createLogger<true>(
+    `[${channelOrOpts.label}]`,
+    () => isDebugEnabled(channelOrOpts.scope, channelOrOpts.channel),
+    {
+      label: channelOrOpts.label,
+      title: channelOrOpts.title ?? channelOrOpts.label,
+      help: channelOrOpts.help,
+      canDebug: true
+    }
+  );
 }
 
 export function jsonGet<T>(key: string, fallback: T): T {

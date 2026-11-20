@@ -1,6 +1,7 @@
 import {
   win,
   coreHooks,
+  fastLoadLog,
   store,
   inflight,
   bytes,
@@ -26,7 +27,6 @@ import {
 } from './helpers';
 import { extractUsersFromRpcResult } from './worker';
 import { rememberQuery } from './routes';
-import { logDebug, store as gmStore } from '../../utils/helpers';
 
 export const isGraphQL = (u: any): boolean => {
   try {
@@ -227,11 +227,8 @@ export async function classify(input: any, init?: RequestInit) {
   };
 
   const authHeader = desc.headers.get('authorization');
-  if (authHeader && authHeader.startsWith('Bearer ') && !coreHooks?.isSessionClearing()) {
-    const token = authHeader.slice(7).trim();
-    if (token) {
-      gmStore.set('al_token_auth', authHeader);
-    }
+  if (authHeader && /^Bearer\s+/i.test(authHeader) && !coreHooks?.isSessionClearing()) {
+    coreHooks?.setAuthHeader(authHeader);
   }
   const mediaList = isMediaListQuery(parsed);
   const bypass = noStore(desc) || (!mediaList && isVolatile(parsed));
@@ -255,7 +252,7 @@ export function cachedFetch(
     coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) ||
     (typeof blocker === 'function' && blocker(parsed?.query, parsed?.variables));
   if (isBlocked) {
-    logDebug('[FASTLOAD] Blocked GQL fetch:', JSON.stringify(parsed?.variables));
+    fastLoadLog?.debug('Blocked GQL fetch:', JSON.stringify(parsed?.variables));
     const dummy = {
       data: {
         Page: {
@@ -289,7 +286,7 @@ export function cachedFetch(
     const storedTax = loadStoredTaxonomy();
     if (storedTax && now - storedTax.time < TAXONOMY_TTL) {
       stats.cacheHits++;
-      logDebug('[FASTLOAD] Cache HIT (24h localStorage): GenreCollection & MediaTagCollection');
+      fastLoadLog?.debug('Cache HIT (24h localStorage): GenreCollection & MediaTagCollection');
       const HeadersCtor = win.Headers || Headers;
       const ResponseCtor = win.Response || Response;
       return Promise.resolve(
@@ -304,8 +301,8 @@ export function cachedFetch(
 
   if (cached && cached.time >= freshFloor && now - cached.time < ttl) {
     stats.cacheHits++;
-    logDebug(
-      '[FASTLOAD] Cache HIT (RAM):',
+    fastLoadLog?.debug(
+      'Cache HIT (RAM):',
       isMediaListQuery(parsed) ? 'MediaListCollection' : 'GraphQL query',
       `${Math.round((now - cached.time) / 1000)}s old`
     );
@@ -315,8 +312,8 @@ export function cachedFetch(
   const flying = inflight.get(key);
   if (flying) {
     stats.deduped++;
-    logDebug(
-      '[FASTLOAD] Attached to in-flight request:',
+    fastLoadLog?.debug(
+      'Attached to in-flight request:',
       isMediaListQuery(parsed) ? 'MediaListCollection' : 'GraphQL query'
     );
     return abortable(
@@ -331,8 +328,8 @@ export function cachedFetch(
   const myEpoch = epoch;
   const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
   const opName = parsed.operationName || (isMediaListQuery(parsed) ? 'MediaListCollection' : 'query');
-  logDebug(
-    alflMode === 'replay' ? '[FASTLOAD] Cache MISS (prefetch fetch):' : '[FASTLOAD] Cache MISS (network fetch):',
+  fastLoadLog?.debug(
+    alflMode === 'replay' ? 'Cache MISS (prefetch fetch):' : 'Cache MISS (network fetch):',
     opName,
     'key:',
     key
@@ -342,13 +339,13 @@ export function cachedFetch(
   const snapshot = original.then(async (res: Response) => {
     note429(res);
     if (res.status !== 200 || res.bodyUsed || typeof res.clone !== 'function') {
-      logDebug('[FASTLOAD] Response not cacheable:', res.status, opName);
+      fastLoadLog?.debug('Response not cacheable:', res.status, opName);
       throw new Error('not cacheable');
     }
     const copy = res.clone();
     const buf = await copy.arrayBuffer();
     if (hasGraphQLErrors(buf)) {
-      logDebug('[FASTLOAD] Response had GraphQL errors:', opName);
+      fastLoadLog?.debug('Response had GraphQL errors:', opName);
       throw new Error('graphql errors');
     }
     return {
@@ -367,7 +364,7 @@ export function cachedFetch(
       if (inflight.get(key) === snapshot) inflight.delete(key);
       if (epoch === myEpoch) {
         put(key, snap);
-        logDebug('[FASTLOAD] Cached in RAM:', opName, `${Math.round(snap.buf.byteLength / 1024)} KB`);
+        fastLoadLog?.debug('Cached in RAM:', opName, `${Math.round(snap.buf.byteLength / 1024)} KB`);
       }
       attempt(() => {
         if (isViewerQuery(parsed)) {

@@ -1,6 +1,8 @@
-import { safe, logDebug } from '../utils/helpers';
+import { safe, createCoreLogger } from '../utils/helpers';
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import type { CleanupFn } from '../types';
+
+const coreLog = createCoreLogger('core');
 
 interface ObserverEntry<T> {
   cb: T;
@@ -31,7 +33,7 @@ export const Core = (() => {
   function notifyNav(): void {
     if (muted || location.href === lastHref) return;
     lastHref = location.href;
-    logDebug('[CORE]', 'Navigation detected:', location.pathname + location.search);
+    coreLog.debug('Navigation detected:', location.pathname + location.search);
     fire(navCbs);
   }
 
@@ -123,7 +125,7 @@ export const Core = (() => {
           flushTimer = 0;
           const batch = queued;
           queued = [];
-          logDebug('[OBSERVER]', `Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
+          coreLog.debug(`Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
           fire(bodyCbs, batch);
         }, 50);
       }

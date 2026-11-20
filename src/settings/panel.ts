@@ -4,11 +4,20 @@ import { creditsHtml } from './credits';
 import { addStyle } from '../core/styles';
 import { listAccountProviders } from '../core/accounts';
 import { findExactText, icon } from '../utils/dom';
-import { debounce, esc } from '../utils/helpers';
+import { debounce, esc, createCoreLogger, getDebuggableChannels } from '../utils/helpers';
 import { Core } from '../core/observer';
 import { createBackup, createRawBackup, downloadBackupFile, importBackup, readFileAsBytes } from './backup';
 import { promptPasswordModal, closePasswordModal } from './passwordModal';
-import type { SettingRow, RegisteredFeature, ModuleHost, ModuleStatus } from '../types';
+import type {
+  DebugSettingsMap,
+  SettingRow,
+  RegisteredFeature,
+  ModuleDebugEnabledDef,
+  ModuleHost,
+  ModuleStatus
+} from '../types';
+
+const settingsLog = createCoreLogger('settings');
 
 const getRow = (key?: string): SettingRow | undefined =>
   key && Object.prototype.hasOwnProperty.call(ROWS, key) ? ROWS[key] : undefined;
@@ -140,9 +149,13 @@ const onSettingsPage = (): boolean => /^\/settings(\/|$)/.test(location.pathname
 const rowText = (title: string, help: string): string =>
   `<span class="ala-text"><span class="ala-title">${title}</span><span class="ala-help">${help}</span></span>`;
 
-const optionHtml = (r: SettingRow): string => {
+const optionRowHtml = (r: SettingRow): string => {
   const tag = r.type === 'json' ? 'div' : 'label';
-  const rowHtml = `<${tag} class="ala-row">${rowText(r.title, r.help)}${TYPES[r.type].html(r, Settings.get(r.key))}</${tag}>`;
+  return `<${tag} class="ala-row">${rowText(r.title, r.help)}${TYPES[r.type].html(r, Settings.get(r.key))}</${tag}>`;
+};
+
+const optionHtml = (r: SettingRow): string => {
+  const rowHtml = optionRowHtml(r);
   if (r.childOf) {
     const parentVal = !!Settings.get(r.childOf);
     return `<div class="ala-collapsible ala-child-option ${parentVal ? 'is-open' : ''}" data-child-for="${r.childOf}">
@@ -152,6 +165,34 @@ const optionHtml = (r: SettingRow): string => {
     </div>`;
   }
   return rowHtml;
+};
+
+const debugToggleRowHtml = (
+  title: string,
+  help: string,
+  scope: string,
+  checked: boolean,
+  channel?: string
+): string => {
+  const chAttr = channel ? ` data-debug-channel="${esc(channel)}"` : '';
+  return `<label class="ala-row">${rowText(title, help)}<span class="ala-switch"><input type="checkbox" data-debug-scope="${esc(scope)}"${chAttr} ${checked ? 'checked' : ''}><span class="ala-slider"></span></span></label>`;
+};
+
+const debugGroupHtml = (
+  scope: string,
+  masterTitle: string,
+  masterHelp: string,
+  masterOn: boolean,
+  childHtmls: string[]
+): string => {
+  const masterHtml = debugToggleRowHtml(masterTitle, masterHelp, scope, masterOn);
+  if (!childHtmls.length) return masterHtml;
+  return `${masterHtml}
+    <div class="ala-collapsible ala-child-option ${masterOn ? 'is-open' : ''}" data-debug-children="${esc(scope)}">
+      <div class="ala-collapsible-inner">
+        ${childHtmls.join('')}
+      </div>
+    </div>`;
 };
 
 const featureHtml = (f: RegisteredFeature): string => {
@@ -244,28 +285,65 @@ function backupRestoreHtml(): string {
 
 function devModeCardHtml(): string {
   const devRow = getRow(DEV_MODE_DEF.key);
-  const generalRow = getRow(DEV_MODE_DEF.generalDebug.key);
   if (!devRow) return '';
 
   const isDevOn = !!Settings.get(DEV_MODE_DEF.key);
+  const debugState = Settings.get(DEV_MODE_DEF.debugKey) as DebugSettingsMap;
+  const coreScope = DEV_MODE_DEF.coreDebug.scope;
+  const coreEntry = debugState[coreScope];
+  const coreChildHtmls = Object.values(DEV_MODE_DEF.coreChannels).map((ch) =>
+    debugToggleRowHtml(ch.title, ch.help, coreScope, coreEntry?.channels?.[ch.id] !== false, ch.id)
+  );
+  const coreDebugHtml = debugGroupHtml(
+    coreScope,
+    DEV_MODE_DEF.coreDebug.title,
+    DEV_MODE_DEF.coreDebug.help,
+    !!coreEntry?.enabled,
+    coreChildHtmls
+  );
+
   const debugModules = features
-    .filter((f) => f.debug && getRow(f.debug.key))
+    .filter((f): f is RegisteredFeature & { debug: ModuleDebugEnabledDef } =>
+      Boolean(f.debug && f.debug.debug !== false)
+    )
     .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
 
   const debugRowsHtml = [
+    coreDebugHtml,
     ...debugModules.map((f) => {
-      const row = getRow(f.debug!.key)!;
+      const debuggable = getDebuggableChannels(f.debug);
+      const modEntry = debugState[f.id];
+      const childHtmls = debuggable.length
+        ? [
+            debugToggleRowHtml(
+              'General',
+              `Log general ${f.title} debug events.`,
+              f.id,
+              modEntry?.channels?.general !== false,
+              'general'
+            ),
+            ...debuggable.map(([chId, ch]) =>
+              debugToggleRowHtml(
+                ch.title || ch.label,
+                ch.help || `Log ${ch.label} debug events for ${f.title}.`,
+                f.id,
+                modEntry?.channels?.[chId] !== false,
+                chId
+              )
+            )
+          ]
+        : [];
       const modOn = !!Settings.get(f.toggle.key);
       return `<div class="ala-collapsible ${modOn ? 'is-open' : ''}" data-debug-for="${esc(f.toggle.key)}">
         <div class="ala-collapsible-inner">
-          ${optionHtml(row)}
+          ${debugGroupHtml(f.id, f.debug.title, f.debug.help, !!modEntry?.enabled, childHtmls)}
         </div>
       </div>`;
-    }),
-    generalRow ? optionHtml(generalRow) : ''
+    })
   ].join('');
 
   return `<div class="ala-feature ${isDevOn ? '' : 'is-off'}" data-feature="${esc(DEV_MODE_DEF.id)}">
+    <input type="hidden" data-key="${esc(DEV_MODE_DEF.debugKey)}" value="${esc(JSON.stringify(debugState))}">
     <label class="ala-row ala-row--main">${rowText(DEV_MODE_DEF.title, DEV_MODE_DEF.help)}${TYPES.toggle.html(devRow, isDevOn)}</label>
     <div class="ala-collapsible ala-options-collapsible ${isDevOn ? 'is-open' : ''}">
       <div class="ala-collapsible-inner">
@@ -626,6 +704,9 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     }
 
     card.querySelectorAll<HTMLElement>('.ala-child-option').forEach((childWrap) => {
+      if (childWrap.closest('[data-debug-for]') || childWrap.dataset.debugChildren) {
+        return;
+      }
       const parentKey = childWrap.dataset.childFor;
       const parentInput = parentKey ? card.querySelector<HTMLInputElement>(`[data-key="${parentKey}"]`) : null;
       const childOpen = effectiveOn && !!parentInput?.checked;
@@ -643,6 +724,38 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     return effectiveOn;
   };
 
+  const syncDebugHiddenFromCheckboxes = () => {
+    const hidden = panel.querySelector<HTMLInputElement>(`input[data-key="${DEV_MODE_DEF.debugKey}"]`);
+    if (!hidden) return;
+    const next: DebugSettingsMap = {};
+    panel.querySelectorAll<HTMLInputElement>('input[data-debug-scope]').forEach((cb) => {
+      const scope = cb.dataset.debugScope!;
+      const ch = cb.dataset.debugChannel;
+      if (!next[scope]) next[scope] = { enabled: false };
+      if (ch) {
+        if (!next[scope].channels) next[scope].channels = {};
+        next[scope].channels![ch] = cb.checked;
+      } else {
+        next[scope].enabled = cb.checked;
+      }
+    });
+    const row = getRow(DEV_MODE_DEF.debugKey);
+    TYPES.json.write(hidden, row ? TYPES.json.normalize(next, row) : next);
+  };
+
+  const syncDebugCheckboxesFromHidden = () => {
+    const hidden = panel.querySelector<HTMLInputElement>(`input[data-key="${DEV_MODE_DEF.debugKey}"]`);
+    if (!hidden) return;
+    const row = getRow(DEV_MODE_DEF.debugKey);
+    const state = (row ? TYPES.json.normalize(TYPES.json.read(hidden), row) : TYPES.json.read(hidden)) || {};
+    panel.querySelectorAll<HTMLInputElement>('input[data-debug-scope]').forEach((cb) => {
+      const scope = cb.dataset.debugScope!;
+      const ch = cb.dataset.debugChannel;
+      const entry = state[scope];
+      cb.checked = ch ? entry?.channels?.[ch] !== false : !!entry?.enabled;
+    });
+  };
+
   const syncAll = () => {
     reconcileStandaloneLocks();
     const plan = computeSavePlan();
@@ -656,13 +769,39 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     const devToggle = panel.querySelector<HTMLInputElement>(`input[data-key="${DEV_MODE_DEF.key}"]`);
     const isDevOn = devToggle ? devToggle.checked : !!Settings.get(DEV_MODE_DEF.key);
 
+    const coreScope = DEV_MODE_DEF.coreDebug.scope;
+    const coreMaster = panel.querySelector<HTMLInputElement>(
+      `input[data-debug-scope="${coreScope}"]:not([data-debug-channel])`
+    );
+    if (coreMaster) coreMaster.disabled = !isDevOn;
+    const coreChildWrap = panel.querySelector<HTMLElement>(
+      `.ala-child-option[data-debug-children="${coreScope}"]`
+    );
+    if (coreChildWrap) {
+      const coreOpen = isDevOn && !!coreMaster?.checked;
+      coreChildWrap.classList.toggle('is-open', coreOpen);
+      coreChildWrap.querySelectorAll<HTMLInputElement>('input[data-debug-channel]').forEach((el) => {
+        el.disabled = !coreOpen;
+      });
+    }
+
     panel.querySelectorAll<HTMLElement>('[data-debug-for]').forEach((wrap) => {
       const modKey = wrap.dataset.debugFor!;
       const modOn = activeMap.get(modKey) ?? !!Settings.get(modKey);
       wrap.classList.toggle('is-open', modOn);
-      wrap.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]').forEach((el) => {
-        el.disabled = !(isDevOn && modOn);
-      });
+
+      const modMaster = wrap.querySelector<HTMLInputElement>('input[data-debug-scope]:not([data-debug-channel])');
+      if (modMaster) modMaster.disabled = !(isDevOn && modOn);
+
+      const childWrap = wrap.querySelector<HTMLElement>('.ala-child-option[data-debug-children]');
+      if (childWrap) {
+        const childOpen = modOn && !!modMaster?.checked;
+        const childEnabled = isDevOn && childOpen;
+        childWrap.classList.toggle('is-open', childOpen);
+        childWrap.querySelectorAll<HTMLInputElement>('input[data-debug-channel]').forEach((el) => {
+          el.disabled = !childEnabled;
+        });
+      }
     });
 
     const devRow = panel.querySelector<HTMLElement>('#ala-row-export-raw');
@@ -731,7 +870,9 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   }
 
   panel.addEventListener('change', (e) => {
-    if ((e.target as HTMLElement)?.id === 'ala-import-file') return;
+    const target = e.target as HTMLElement | null;
+    if (target?.id === 'ala-import-file') return;
+    if (target?.hasAttribute('data-debug-scope')) syncDebugHiddenFromCheckboxes();
     syncAll();
   });
 
@@ -771,7 +912,8 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
             const plan = syncAll();
             setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
           },
-          addStyle: trackedAddStyle
+          addStyle: trackedAddStyle,
+          log: settingsLog
         });
       } finally {
         for (const child of Array.from(document.body.children)) {
@@ -808,6 +950,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       if (el.dataset.standaloneLocked) return;
       TYPES[r.type].write(el, r.def);
     });
+    syncDebugCheckboxesFromHidden();
     const plan = syncAll();
     setStatus(`Defaults restored. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply them.`);
   });

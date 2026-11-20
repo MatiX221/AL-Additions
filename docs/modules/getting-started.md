@@ -40,7 +40,7 @@ defineModule({
   title: 'Media ID Badge',
   help: 'Display the numeric AniList media ID in the sidebar on anime and manga pages.',
   debug: {
-    key: 'debugMediaIdBadge',
+    label: 'Media ID Badge',
     title: 'Media ID Badge Debug',
     help: 'Log route detection and badge mounting in Developer Mode.'
   },
@@ -81,7 +81,7 @@ defineModule({
       if (!route) return;
 
       const format = ctx.get<string>('mediaIdBadgeFormat');
-      ctx.debug.log('Mounting badge for', route.type, route.id, 'format:', format);
+      ctx.log.debug('Mounting badge for', route.type, route.id, 'format:', format);
 
       // 4. Use rc.mount() so Vue re-renders automatically re-attach the element
       //    and navigating away or disabling the module automatically removes it.
@@ -128,8 +128,10 @@ npm test
 npm run build
 ```
 
-Notice what `__tests__/layering.test.ts` automatically verifies for your new folder:
+Notice what `__tests__/layering.test.ts` and `__tests__/conventions.test.ts` automatically verify for your new folder:
 1. All imports inside `src/modules/yourModule/` obey the layering DAG rules.
 2. Dynamically importing `src/modules/yourModule/index.ts` executes zero `GM_*`, DOM, `<style>`, or global listener side effects at import time.
+3. No raw session/auth keys, hardcoded prefixes, raw `GM_*` calls, `ctx.api.session` bypasses, or raw `console.*` calls exist inside `src/modules/yourModule/`.
+4. Any `migrate(m)` hook includes a valid `// @migration(from: "...", kind: "...", sunset: "...")` annotation.
 
 Add unit tests in `__tests__/myFeature.test.ts` importing your pure helpers or testing full lifecycle via `bootModuleForTest('<id>')` (see [Architecture & Testing](./architecture-and-communication.md#testing-your-module)).

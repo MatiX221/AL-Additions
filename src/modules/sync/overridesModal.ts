@@ -178,7 +178,10 @@ interface UnmatchedMediaMeta {
 
 const unmatchedMetaCache = new Map<number, UnmatchedMediaMeta>();
 
-async function batchFetchUnmatchedMeta(ids: number[]): Promise<void> {
+async function batchFetchUnmatchedMeta(
+  ids: number[],
+  log?: JsonEditorContext['log']
+): Promise<void> {
   const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
   if (!needed.length) return;
 
@@ -204,7 +207,7 @@ async function batchFetchUnmatchedMeta(ids: number[]): Promise<void> {
         });
       }
     } catch (e) {
-      console.warn('[AL-Additions] Failed to batch fetch unmatched metadata:', e);
+      log?.warn('Failed to batch fetch unmatched metadata:', e);
       break;
     }
   }
@@ -1037,7 +1040,7 @@ export function openOverridesModal(
     const raw = getRawUnmatched();
     const missingMetaIds = raw.map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
     if (missingMetaIds.length > 0) {
-      batchFetchUnmatchedMeta(missingMetaIds).then(() => {
+      batchFetchUnmatchedMeta(missingMetaIds, ec?.log).then(() => {
         renderUnmatchedList();
       });
     }
@@ -1181,7 +1184,7 @@ export function openOverridesModal(
             }
           }
         } catch (e: any) {
-          console.warn(`[AL-Additions] Audit scan: failed to fetch AniList ${t}:`, e);
+          ec?.log?.warn(`Audit scan: failed to fetch AniList ${t}:`, e);
         }
       }
 
@@ -1200,7 +1203,7 @@ export function openOverridesModal(
             }
           }
         } catch (e: any) {
-          console.warn(`[AL-Additions] Audit scan: failed to fetch MAL ${t}:`, e);
+          ec?.log?.warn(`Audit scan: failed to fetch MAL ${t}:`, e);
         }
       }
 

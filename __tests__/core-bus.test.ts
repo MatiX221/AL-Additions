@@ -798,3 +798,82 @@ describe('B1-03: CoreHooks.isRpcBlocked & emitGqlFetch contract normalization', 
     }
   });
 });
+
+describe('CoreHooks authHeader & AccountProvider transition watching', () => {
+  it('validates Bearer tokens in getAuthHeader/setAuthHeader, respects isSessionClearing(), and clears on clearAuth()', async () => {
+    const { CoreHooks } = await loadFreshBus();
+    const { store } = await import('../src/utils/helpers');
+
+    expect(CoreHooks.getAuthHeader()).toBeNull();
+
+    CoreHooks.setAuthHeader('Bearer valid_jwt_123');
+    expect(CoreHooks.getAuthHeader()).toBe('Bearer valid_jwt_123');
+
+    CoreHooks.setAuthHeader('Bearer ');
+    CoreHooks.setAuthHeader('Bearer   ');
+    CoreHooks.setAuthHeader('   ');
+    expect(CoreHooks.getAuthHeader()).toBe('Bearer valid_jwt_123');
+
+    CoreHooks.setSessionClearing(true);
+    try {
+      CoreHooks.setAuthHeader('Bearer ignored_during_clear');
+      expect(CoreHooks.getAuthHeader()).toBe('Bearer valid_jwt_123');
+    } finally {
+      CoreHooks.setSessionClearing(false);
+    }
+
+    CoreHooks.setAuthHeader(null);
+    expect(CoreHooks.getAuthHeader()).toBeNull();
+    expect(store.get('al_token_auth', null)).toBeNull();
+
+    CoreHooks.setAuthHeader('Bearer to_clear');
+    CoreHooks.clearAuth();
+    expect(CoreHooks.getAuthHeader()).toBeNull();
+  });
+
+  it('notifies watchAccountProvider only on isConnected() transitions and supports deferred registration', async () => {
+    vi.resetModules();
+    const [accounts, helpers] = await Promise.all([
+      import('../src/core/accounts'),
+      import('../src/utils/helpers')
+    ]);
+
+    const transitions: boolean[] = [];
+    const unsub = accounts.watchAccountProvider('deferredSvc', (connected) => {
+      transitions.push(connected);
+    });
+
+    const unregister = accounts.registerAccountProvider({
+      id: 'deferredSvc',
+      name: 'Deferred Service',
+      secretKeys: ['def_verifier', 'def_token', 'def_refresh'],
+      isConnected: () => !!helpers.store.get('def_token', null),
+      connect: () => {},
+      disconnect: () => {
+        helpers.store.del('def_token');
+        helpers.store.del('def_refresh');
+      }
+    });
+
+    helpers.store.set('def_verifier', 'abc123');
+    expect(transitions).toEqual([]);
+
+    helpers.store.set('def_token', 'tok_1');
+    expect(transitions).toEqual([true]);
+
+    helpers.store.set('def_token', 'tok_2');
+    helpers.store.set('def_refresh', 'ref_2');
+    expect(transitions).toEqual([true]);
+
+    helpers.store.del('def_token');
+    helpers.store.del('def_refresh');
+    expect(transitions).toEqual([true, false]);
+
+    helpers.store.set('def_token', 'tok_3');
+    expect(transitions).toEqual([true, false, true]);
+    unregister();
+    expect(transitions).toEqual([true, false, true, false]);
+
+    unsub();
+  });
+});

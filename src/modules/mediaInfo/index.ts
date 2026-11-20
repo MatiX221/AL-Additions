@@ -14,10 +14,9 @@ defineModule({
   title: 'List Score & Progress Editor',
   help: 'Show your score and episode/chapter progress controls on anime and manga pages.',
   debug: {
-    key: 'debugMediaInfo',
+    label: 'Media Info',
     title: 'Media Info Debug',
-    help: 'Log media info sidebar updates, progress steppers, and save requests.',
-    pattern: /^\[MEDIAINFO/i
+    help: 'Log media info sidebar updates, progress steppers, and save requests.'
   },
   setup(ctx) {
     const ID = 'ala-media-info';
@@ -156,7 +155,7 @@ defineModule({
       const isStarting = (!prev.status || prev.status === 'PLANNING') && progress > 0;
       const status = finishNow ? 'COMPLETED' : isStarting ? 'CURRENT' : undefined;
       saving = true;
-      ctx.debug.log('Saving media progress/score:', { mediaId: media.id, score, progress, status });
+      ctx.log.debug('Saving media progress/score:', { mediaId: media.id, score, progress, status });
       try {
         const entry = await ctx.api.media.save(media.id, media.type, {
           score,
@@ -166,11 +165,10 @@ defineModule({
         });
         if (!entry) throw new Error('AniList did not return the updated entry');
         info.mediaListEntry = entry;
-        ctx.debug.log('Save successful:', entry);
+        ctx.log.debug('Save successful:', entry);
         return entry;
       } catch (e) {
-        ctx.debug.log('Media list save failed:', e);
-        console.warn('[AL-Additions] Media list save failed:', e);
+        ctx.log.warn('Media list save failed:', e);
         return false;
       } finally {
         saving = false;
@@ -202,7 +200,7 @@ defineModule({
       const g = gen;
       const stale = (): boolean => g !== gen || mediaRoute()?.id !== route.id;
       rendering = true;
-      ctx.debug.log('Rendering media info panel for:', key);
+      ctx.log.debug('Rendering media info panel for:', key);
       try {
         let info: any = null;
         let fmt: string | null = null;

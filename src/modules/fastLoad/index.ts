@@ -1,11 +1,12 @@
 import { defineModule } from '../../core/registry';
 import { isBuiltInRunning, markBuiltIn } from '../../utils/standalone';
-import { store as gmStore } from '../../utils/helpers';
 import { CFG, GQL_ORIGIN, MEDIA_ORIGIN, attempt } from './config';
 import {
   win,
   doc,
   setCoreHooks,
+  setCoreSession,
+  setFastLoadLogs,
   initUserMap,
   registerGlobalBridges,
   getViewerFromWindow,
@@ -35,10 +36,17 @@ defineModule({
   title: 'AniList Fast Load',
   help: 'Performance optimizer: lazy media, off-screen row skipping, observer coalescing, safe GraphQL cache/de-duplication with stale fallback, navigation prefetch and early request start.',
   debug: {
-    key: 'debugFastLoad',
+    label: 'Fast Load',
     title: 'Fast Load Debug',
-    help: 'Log Web Worker RPC requests, cache hits/misses, deduplication, and prefetch activity.',
-    pattern: /^\[(?:FASTLOAD|ALFL)/i
+    help: 'Log GraphQL caching, prefetching, deduplication, and Web Worker RPC activity.',
+    channels: {
+      rpc: {
+        label: 'RPC',
+        title: 'Web Worker RPC',
+        debug: true,
+        help: 'Log Web Worker RPC requests, cache hits/misses, and prefetches.'
+      }
+    }
   },
   standalone: {
     name: 'AniList Fast Load',
@@ -48,8 +56,8 @@ defineModule({
     if (win.top !== win.self) return;
     if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
       ctx.setStandalonePaused(true);
-      console.warn(
-        '[AL-Additions] Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.'
+      ctx.log.warn(
+        'Built-in Fast Load skipped: the standalone AniList Fast Load script is already running. Uninstall it to use the built-in version.'
       );
       return;
     }
@@ -57,6 +65,8 @@ defineModule({
     win.__ALA_FAST_LOAD__ = '0.4.3';
     markBuiltIn('fastLoad');
     setCoreHooks(ctx.hooks);
+    setCoreSession(ctx.session);
+    setFastLoadLogs(ctx.log, ctx.log.channel('rpc'));
 
     ctx.hooks.registerCacheBridge({
       getGqlStore: () => gqlStore,
@@ -75,8 +85,8 @@ defineModule({
         yieldedToStandalone = true;
         ctx.hooks.markFetchOwner(false);
         ctx.setStandalonePaused(true);
-        console.warn(
-          '[AL-Additions] Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.'
+        ctx.log.warn(
+          'Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.'
         );
       }
       return yieldedToStandalone;
@@ -109,10 +119,9 @@ defineModule({
       const viewer = getViewerFromWindow();
       if (viewer.name && viewer.id) {
         rememberUser(viewer.name, viewer.id);
-        gmStore.set('al_user_id', viewer.id);
-        gmStore.set('al_username', viewer.name);
+        ctx.session.recordHint({ userId: viewer.id, username: viewer.name });
       } else if (viewer.name) {
-        gmStore.set('al_username', viewer.name);
+        ctx.session.recordHint({ username: viewer.name });
       }
     });
 
@@ -158,6 +167,8 @@ defineModule({
 
     ctx.onCleanup(() => {
       navListeners.length = 0;
+      setFastLoadLogs(null, null);
+      setCoreSession(null);
       setCoreHooks(null);
     });
   }

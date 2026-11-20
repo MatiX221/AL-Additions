@@ -14,7 +14,11 @@ import '../src/modules/sync';
 import '../src/settings/devMode';
 import legacyKeys from './fixtures/legacy-keys.json';
 import { Settings, TYPES, ROWS, PREFIX, features } from '../src/settings/settings';
-import { store, isDebug } from '../src/utils/helpers';
+import {
+  store,
+  createCoreLogger,
+  isDebugEnabled
+} from '../src/utils/helpers';
 import { showPanel, closePanel, initSettingsPage } from '../src/settings/panel';
 import { createModuleHost } from '../src/core/registry';
 import type { SettingRow } from '../src/types';
@@ -258,9 +262,21 @@ describe('Settings: Legacy Migration (Settings.migrate)', () => {
 });
 
 describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
-  it('preserves all 33 legacy keys with exact schema and adds only manualOverridesEnabled (34 total)', () => {
+  it('preserves all non-retired legacy keys with exact schema and registers consolidated debug + manualOverridesEnabled keys', () => {
+    const RETIRED_LEGACY_KEYS = new Set([
+      'debugGeneral',
+      'debugFastLoad',
+      'debugSync',
+      'debugCompareView',
+      'debugMediaInfo',
+      'debugTierLabels'
+    ]);
     expect(legacyKeys).toHaveLength(33);
     for (const expected of legacyKeys) {
+      if (RETIRED_LEGACY_KEYS.has(expected.key)) {
+        expect(ROWS[expected.key]).toBeUndefined();
+        continue;
+      }
       const actual = ROWS[expected.key];
       expect(actual, `Missing setting row for key "${expected.key}"`).toBeDefined();
       expect(actual.type).toBe(expected.type);
@@ -270,8 +286,8 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
 
     const legacyKeySet = new Set(legacyKeys.map((k) => k.key));
     const addedKeys = INITIAL_REGISTERED_KEYS.filter((k) => !legacyKeySet.has(k));
-    expect(addedKeys).toEqual(['manualOverridesEnabled']);
-    expect(INITIAL_REGISTERED_KEYS).toHaveLength(34);
+    expect(addedKeys).toEqual(['debug', 'manualOverridesEnabled']);
+    expect(INITIAL_REGISTERED_KEYS).toHaveLength(29);
   });
 
   it('rolls back atomically when any option key collides during Settings.register', () => {
@@ -306,7 +322,13 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
     expect(features).toHaveLength(beforeFeatureCount);
   });
 
-  it('enforces mandatory def: false on toggles in register and registerCoreSetting', () => {
+  it('supports Settings.has(), enforces def: false on all toggles, and rejects reserved "general" channels', () => {
+    store.del(PREFIX + 'tagPercentage');
+    expect(Settings.has('tagPercentage')).toBe(false);
+    Settings.set('tagPercentage', 60);
+    expect(Settings.has('tagPercentage')).toBe(true);
+    expect(() => Settings.has('doesNotExist')).toThrow('Unknown setting: doesNotExist');
+
     expect(() =>
       Settings.register({
         id: 'badToggleDefault',
@@ -326,6 +348,23 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
         help: 'Bad'
       })
     ).toThrow(/must default to false/);
+
+    expect(() =>
+      Settings.register({
+        id: 'badGeneralChan',
+        key: 'badGeneralChanEnabled',
+        title: 'Bad General',
+        help: 'Bad',
+        debug: {
+          title: 'Bad General Debug',
+          help: 'Help',
+          channels: {
+            General: { label: 'General', title: 'General', debug: true }
+          }
+        }
+      })
+    ).toThrow(/conflicts with reserved "general"/);
+    expect(ROWS.badGeneralChanEnabled).toBeUndefined();
   });
 
   it('normalizes standardized json validators via TYPES.json.normalize', () => {
@@ -342,8 +381,12 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
     });
   });
 
-  it('renders auto-ordered sections, alphabetical modules, Developer Mode, and live collapsible [data-debug-for]', () => {
+  it('renders 2-tier Core and Module Developer Mode debug groups, hides { debug: false } modules, and syncs nested debug state cleanly', () => {
     closePanel();
+    Settings.set('devModeEnabled', false);
+    Settings.set('fastLoadEnabled', false);
+    Settings.set('debug', {});
+
     const host = createModuleHost();
     showPanel(host);
 
@@ -353,36 +396,109 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
     expect(sections[0]).toBe('Sync');
     expect(sections.slice(-3)).toEqual(['Advanced', 'backup', 'credits']);
 
-    const advCard = document.querySelector('#ala-settings-panel [data-section="Advanced"] [data-feature="devMode"]');
+    const advCard = document.querySelector('#ala-settings-panel [data-section="Advanced"] [data-feature="devMode"]')!;
     expect(advCard).not.toBeNull();
-    expect(advCard!.querySelector('input[data-key="debugGeneral"]')).not.toBeNull();
 
-    const fastLoadDebugWrap = advCard!.querySelector<HTMLElement>('[data-debug-for="fastLoadEnabled"]');
-    expect(fastLoadDebugWrap).not.toBeNull();
-    expect(fastLoadDebugWrap!.classList.contains('is-open')).toBe(false);
+    for (const f of features) {
+      if (!f.debug || f.debug.debug === false) {
+        expect(advCard.querySelector(`[data-debug-for="${f.toggle.key}"]`)).toBeNull();
+      }
+    }
+
+    const devToggle = advCard.querySelector<HTMLInputElement>('input[data-key="devModeEnabled"]')!;
+    const debugHidden = advCard.querySelector<HTMLInputElement>('input[data-key="debug"]')!;
+    const coreMaster = advCard.querySelector<HTMLInputElement>('input[data-debug-scope="core"]:not([data-debug-channel])')!;
+    const coreChildWrap = advCard.querySelector<HTMLElement>('.ala-child-option[data-debug-children="core"]')!;
+    const coreGen = advCard.querySelector<HTMLInputElement>('input[data-debug-scope="core"][data-debug-channel="general"]')!;
+    const coreApi = advCard.querySelector<HTMLInputElement>('input[data-debug-scope="core"][data-debug-channel="anilist"]')!;
+    expect(debugHidden).not.toBeNull();
+    expect(coreMaster).not.toBeNull();
+    expect(coreChildWrap.classList.contains('is-open')).toBe(false);
+    expect(coreGen.disabled).toBe(true);
+
+    devToggle.checked = true;
+    devToggle.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(coreMaster.disabled).toBe(false);
+    expect(coreChildWrap.classList.contains('is-open')).toBe(false);
+
+    coreMaster.checked = true;
+    coreMaster.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(coreChildWrap.classList.contains('is-open')).toBe(true);
+    expect(coreGen.disabled).toBe(false);
+    expect(JSON.parse(debugHidden.value).core.enabled).toBe(true);
+
+    coreApi.checked = false;
+    coreApi.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(JSON.parse(debugHidden.value).core.channels.anilist).toBe(false);
+
+    const flDebugWrap = advCard.querySelector<HTMLElement>('[data-debug-for="fastLoadEnabled"]')!;
+    const flMaster = flDebugWrap.querySelector<HTMLInputElement>('input[data-debug-scope="fastLoad"]:not([data-debug-channel])')!;
+    const flChildWrap = flDebugWrap.querySelector<HTMLElement>('.ala-child-option[data-debug-children="fastLoad"]')!;
+    const flMain = flDebugWrap.querySelector<HTMLInputElement>('input[data-debug-scope="fastLoad"][data-debug-channel="general"]')!;
+    const flRpc = flDebugWrap.querySelector<HTMLInputElement>('input[data-debug-scope="fastLoad"][data-debug-channel="rpc"]')!;
+
+    expect(flDebugWrap.classList.contains('is-open')).toBe(false);
+    expect(flMaster.disabled).toBe(true);
+    expect(flMain.disabled).toBe(true);
+    expect(flRpc.disabled).toBe(true);
 
     const flToggle = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="fastLoadEnabled"]')!;
     flToggle.checked = true;
     flToggle.dispatchEvent(new Event('change', { bubbles: true }));
-    expect(fastLoadDebugWrap!.classList.contains('is-open')).toBe(true);
+    expect(flDebugWrap.classList.contains('is-open')).toBe(true);
+    expect(flMaster.disabled).toBe(false);
+    expect(flChildWrap.classList.contains('is-open')).toBe(false);
+    expect(flRpc.disabled).toBe(true);
+
+    flMaster.checked = true;
+    flMaster.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(flChildWrap.classList.contains('is-open')).toBe(true);
+    expect(flMain.disabled).toBe(false);
+    expect(flRpc.disabled).toBe(false);
+    expect(JSON.parse(debugHidden.value).fastLoad.enabled).toBe(true);
+
+    document.querySelector<HTMLButtonElement>('#ala-settings-panel .ala-reset')!.click();
+    expect(coreMaster.checked).toBe(false);
+    expect(coreApi.checked).toBe(true);
+    expect(coreChildWrap.classList.contains('is-open')).toBe(false);
+    expect(flMaster.checked).toBe(false);
+    expect(flChildWrap.classList.contains('is-open')).toBe(false);
+    expect(JSON.parse(debugHidden.value).core.enabled).toBe(false);
+
+    flToggle.checked = false;
+    flToggle.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(flDebugWrap.classList.contains('is-open')).toBe(false);
+    expect(flChildWrap.classList.contains('is-open')).toBe(false);
+    expect(flRpc.disabled).toBe(true);
+
+    devToggle.checked = false;
+    devToggle.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(coreChildWrap.classList.contains('is-open')).toBe(false);
+    expect(coreGen.disabled).toBe(true);
 
     closePanel();
   });
 
-  it('registers dynamic debug channels and mutes without wiping preferences when devModeEnabled is off', () => {
-    Settings.set('devModeEnabled', true);
-    Settings.set('debugGeneral', true);
-    Settings.set('debugFastLoad', true);
+  it('gates createCoreLogger on devModeEnabled + debug.core + channel toggle without wiping preferences', () => {
+    const coreLog = createCoreLogger('core');
+    const apiLog = createCoreLogger('anilist');
 
-    expect(isDebug('general')).toBe(true);
-    expect(isDebug('fastLoad')).toBe(true);
-    expect(isDebug('sync')).toBe(false);
+    Settings.set('devModeEnabled', true);
+    Settings.set('debug', {
+      core: {
+        enabled: true,
+        channels: { general: true, settings: true, anilist: false, mal: true }
+      }
+    });
+
+    expect(coreLog.enabled()).toBe(true);
+    expect(apiLog.enabled()).toBe(false);
+    expect(isDebugEnabled('fastLoad', 'general')).toBe(false);
 
     Settings.set('devModeEnabled', false);
-    expect(isDebug('general')).toBe(false);
-    expect(isDebug('fastLoad')).toBe(false);
-    expect(Settings.get('debugGeneral')).toBe(true);
-    expect(Settings.get('debugFastLoad')).toBe(true);
+    expect(coreLog.enabled()).toBe(false);
+    expect(Settings.get('debug').core.enabled).toBe(true);
+    expect(Settings.get('debug').core.channels.general).toBe(true);
   });
 
   it('restores pre-refactor section dropdown styling and shows "Save" without reloading when unchanged', () => {

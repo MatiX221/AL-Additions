@@ -1,5 +1,4 @@
-import { userMap } from './state';
-import { store as gmStore } from '../../utils/helpers';
+import { coreSession, userMap } from './state';
 
 export const isTaxonomyQuery = (parsed: any): boolean =>
   /\bGenreCollection\b|\bMediaTagCollection\b/i.test(String(parsed?.query || ''));
@@ -52,8 +51,9 @@ export function normalizeVariables(vars: any): any {
   }
   if (copy.userName && !copy.userId) {
     const name = String(copy.userName).toLowerCase();
-    const mine = String(gmStore.get('al_username', '') || '').toLowerCase();
-    const id = userMap.get(name) || (name === mine ? Number(gmStore.get('al_user_id', 0)) : 0);
+    const snap = coreSession?.peek();
+    const mine = String(snap?.username || '').toLowerCase();
+    const id = userMap.get(name) || (name === mine && snap?.userId ? Number(snap.userId) : 0);
     if (id) {
       copy.userId = id;
       delete copy.userName;

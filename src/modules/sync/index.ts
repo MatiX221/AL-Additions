@@ -6,10 +6,10 @@ import {
   getManualOverrides,
   validateOverrides
 } from '../../api/malOverrides';
-import { store, safe } from '../../utils/helpers';
-import { ANILIST_SESSION_KEYS, SETTING_PREFIX, type SyncMediaType } from '../../types';
+import { safe } from '../../utils/helpers';
+import type { SyncMediaType } from './types';
 import { TYPES } from './types';
-import { stores, clearCache, PENDING_DELETES_KEY, syncStatus } from './state';
+import { stores, syncStore, setSyncLog, clearCache, syncStatus } from './state';
 import { initSyncPanel, renderPanel } from './panel';
 import { configureOverridesModalStyle, openQuickOverrideModal, openOverridesModal } from './overridesModal';
 import { initDeletionInterceptor } from './deletionInterceptor';
@@ -23,17 +23,6 @@ declare module '../../types' {
   }
 }
 
-const SYNC_DATA_KEYS = [
-  ...ANILIST_SESSION_KEYS,
-  'sync_schema',
-  'sync_lock_heartbeat',
-  'sync_onboarded',
-  'sync_retry_at',
-  'sync_account',
-  PENDING_DELETES_KEY,
-  ...TYPES.flatMap((t) => [`last_sync_${t}`, `last_run_${t}`, `last_compare_${t}`])
-];
-
 defineModule({
   id: 'sync',
   key: 'syncEnabled',
@@ -46,10 +35,9 @@ defineModule({
   title: 'AniList → MyAnimeList Sync',
   help: 'Enable sync and show the list page sync panel',
   debug: {
-    key: 'debugSync',
+    label: 'Sync',
     title: 'Sync Debug',
-    help: 'Log MAL synchronization steps, queue processing, rate limits, and deletions.',
-    pattern: /^\[SYNC/i
+    help: 'Log MAL synchronization steps, queue processing, rate limits, and deletions.'
   },
   options: [
     {
@@ -116,33 +104,87 @@ defineModule({
       help: '<b>Update Only</b> (default) only adds and updates entries on MyAnimeList, keeping existing MAL entries intact if deleted on AniList. <b>Exact Match (Mirror)</b> automatically deletes entries from MyAnimeList when removed from AniList.'
     }
   ],
-  migrate() {
-    if (store.get('sync_schema', 0) < 2) {
+  migrate(m) {
+    if ((m.storage.get<number>('schema', 0) || 0) < 3) {
       safe(() => {
-        for (const k of [
-          'mal_mirror_ANIME',
-          'mal_mirror_MANGA',
-          'retry_queue_ANIME',
-          'retry_queue_MANGA',
-          'force_mirror_refresh',
-          'mal_idmap_ANIME',
-          'mal_idmap_MANGA',
-          'last_full_sync'
-        ])
-          store.del(k);
-        for (const t of TYPES) {
-          if (!store.get(`last_run_${t}`, 0) && store.get(`last_sync_${t}`, 0))
-            store.set(`last_run_${t}`, store.get(`last_sync_${t}`, 0));
+        // @migration(from: "pre-0.8.0", kind: "storage", sunset: "keep-long")
+        if ((m.legacy.get<number>('sync_schema', 0) || 0) < 2) {
+          for (const k of [
+            'mal_mirror_ANIME',
+            'mal_mirror_MANGA',
+            'retry_queue_ANIME',
+            'retry_queue_MANGA',
+            'force_mirror_refresh',
+            'mal_idmap_ANIME',
+            'mal_idmap_MANGA',
+            'last_full_sync'
+          ]) {
+            m.legacy.del(k);
+          }
+          for (const t of TYPES) {
+            if (!m.legacy.get(`last_run_${t}`, 0) && m.legacy.get(`last_sync_${t}`, 0)) {
+              m.legacy.set(`last_run_${t}`, m.legacy.get(`last_sync_${t}`, 0));
+            }
+          }
         }
-        store.set('sync_schema', 2);
+
+        // @migration(from: "v0.9.1", kind: "storage", sunset: "2-3 releases")
+        const pairs: Array<[string, string]> = [
+          ['sync_onboarded', 'sync_onboarded'],
+          ['sync_retry_at', 'sync_retry_at'],
+          ['sync_account', 'sync_account'],
+          ['sync_pending_deletes', 'pending_deletes'],
+          ...TYPES.flatMap((t): Array<[string, string]> => [
+            [`last_sync_${t}`, `last_sync_${t}`],
+            [`last_run_${t}`, `last_run_${t}`],
+            [`last_compare_${t}`, `last_compare_${t}`],
+            [`sync_idmap_${t}`, `idmap_${t}`],
+            [`sync_settled_${t}`, `settled_${t}`]
+          ])
+        ];
+        for (const [oldKey, newKey] of pairs) {
+          const val = m.legacy.get<any>(oldKey, undefined);
+          if (val !== undefined) {
+            if (m.storage.get<any>(newKey, undefined) === undefined) {
+              m.storage.set(newKey, val);
+            }
+            m.legacy.del(oldKey);
+          }
+        }
+
+        for (const t of TYPES) {
+          const rawIds = m.storage.get<any>(`idmap_${t}`, undefined);
+          if (rawIds !== undefined) {
+            try {
+              const parsed = typeof rawIds === 'string' ? JSON.parse(rawIds) : rawIds;
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                stores[t].ids.data = parsed;
+              }
+            } catch {}
+          }
+          const rawSettled = m.storage.get<any>(`settled_${t}`, undefined);
+          if (rawSettled !== undefined) {
+            try {
+              const parsed = typeof rawSettled === 'string' ? JSON.parse(rawSettled) : rawSettled;
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                stores[t].settled.data = parsed;
+              }
+            } catch {}
+          }
+        }
+
+        m.storage.set('schema', 3);
+        m.legacy.del('sync_schema');
+        m.legacy.del('sync_lock_heartbeat');
       }, 'sync schema upgrade');
     }
   },
   setup(ctx) {
+    setSyncLog(ctx.log);
     initDeletionInterceptor(ctx);
 
     ctx.menuCommand('🗑️ AL→MAL Sync: Reset all data', () => {
-      SYNC_DATA_KEYS.forEach((k) => store.del(k));
+      syncStore.clearKnown();
       ctx.api.clearViewer();
       ctx.accounts.clearSecrets('mal');
       ctx.storage.clear();
@@ -165,6 +207,7 @@ defineModule({
     }
 
     ctx.onCleanup(() => {
+      setSyncLog(null);
       if (syncStatus.syncing) syncStatus.cancelled = true;
     });
   }
@@ -191,12 +234,10 @@ defineModule({
       editor: openOverridesModal
     }
   ],
-  migrate() {
-    if (
-      store.get(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, undefined) === undefined &&
-      Object.keys(getManualOverrides()).length > 0
-    ) {
-      store.set(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, true);
+  migrate(m) {
+    // @migration(from: "v0.8.0", kind: "storage", sunset: "2-3 releases")
+    if (!m.settings.has(MANUAL_OVERRIDES_ENABLED_KEY) && Object.keys(getManualOverrides()).length > 0) {
+      m.settings.set(MANUAL_OVERRIDES_ENABLED_KEY, true);
     }
   },
   setup(ctx) {

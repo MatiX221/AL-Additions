@@ -9,10 +9,15 @@ Modules share domain APIs under `src/api/` and `src/utils/` instead of re-implem
 Access the rate-limited AniList GraphQL client via `ctx.api` (backed by `anilistApiClient` in `src/api/anilist.ts`):
 
 ### Authentication & Viewer Info
-- **`ctx.api.hasAuth()`**: Synchronously checks whether a captured AniList bearer token (`al_token_auth`) or logged-in Nuxt state exists without triggering any network request.
-- **`ctx.api.viewer(forceFresh = false)`**: Returns `{ id: number; name: string; scoreFormat: string } | null`. Syncs logged-in user info from the page's Vue/Nuxt state (`__NUXT__`), falling back to cached values or a GraphQL `Viewer` query when authenticated. Returns `null` when logged out.
-- **`ctx.api.clearViewer()`**: Clears all AniList session keys (`al_token`, `al_username`, `al_user_id`, `al_score_format`, `al_token_auth`) and resets cached auth headers cleanly.
+> Always read/update AniList session state through **`ctx.session`** (never `ctx.api.session`, which is blocked in modules by `__tests__/conventions.test.ts`). Both `ctx.session` and `ctx.api.session` are lifecycle-wrapped per module so disposed contexts cannot mutate session state.
+
+- **`ctx.session.peek(opts?: { reconcile?: boolean })`**: Pure read returning `{ userId, username, scoreFormat }` from Nuxt state, navbar, entity cache, and stored session keys with **zero side effects** (safe at `document-start` even when `document.body === null`). Pass `{ reconcile: true }` when you explicitly want `syncFromPage()` to run first.
+- **`ctx.session.userId` / `ctx.session.username` / `ctx.session.scoreFormat`**: Live pure getters backed by `peek()`.
+- **`ctx.session.recordHint({ userId?, username? })`**: Persists viewer hints discovered from AniList API/RPC `Viewer` responses. Guarded against logged-out pages, page-user mismatches, and `CoreHooks.isSessionClearing()`.
+- **`ctx.session.hasAuth()` / `ctx.api.hasAuth()`**: Synchronously checks whether a captured AniList bearer token (`al_token_auth`) or logged-in Nuxt state exists without triggering any network request.
 - **`ctx.session.syncFromPage?.()`**: Synchronously reconciles cached viewer identity against the current DOM/Nuxt auth state (clearing stale identity if the user logged out or switched AniList accounts).
+- **`ctx.session.clear()` / `ctx.api.clearViewer()`**: Clears all AniList session keys (`al_token`, `al_username`, `al_user_id`, `al_score_format`, `al_token_auth`) and resets cached auth headers cleanly.
+- **`ctx.api.viewer(forceFresh = false)`**: Returns `{ id: number; name: string; scoreFormat: string } | null`. Syncs logged-in user info from the page's Vue/Nuxt state (`__NUXT__`), falling back to cached values or a GraphQL `Viewer` query when authenticated. Returns `null` when logged out.
 - **`ctx.api.resumeAt()`**: Returns epoch timestamp (ms) until which AniList requests are backed off due to rate-limiting (`0` if clear).
 
 ### GraphQL Queries & Media Actions
@@ -36,6 +41,12 @@ if (!ctx.accounts.isConnected('mal')) {
 ctx.accounts.disconnect('mal');      // Clears provider secret keys cleanly
 ctx.accounts.clearSecrets('mal');    // Clears secret keys for 'mal' only
 ctx.accounts.clearSecrets();         // Clears secret keys for ALL registered providers
+
+// Subscribe to connection state transitions (fires ONLY when isConnected() flips true <-> false;
+// supports providers registered before or after subscribing; auto-cleaned on module unload):
+ctx.accounts.watch('mal', (connected) => {
+  renderAccountStatus(connected);
+});
 ```
 
 If you implement a new external account integration in `src/api/<provider>.ts`:
@@ -79,7 +90,11 @@ Each parser accepts an optional `pathname` (defaulting to `location.pathname`) a
 - `safe(fn, label?)` / `tryOr(asyncFn, fallback?)`: Non-throwing error guards.
 - `debounce(fn, ms)` / `memo(asyncFn, keyFn?, ttlMs?)`: Deduplicates concurrent async calls and caches results.
 - `openTab(url)`: Safe cross-environment tab opener (`GM_openInTab` fallback to `window.open(..., 'noopener,noreferrer')`).
+- `downloadFile(url, name, opts?)`: Safe `GM_download` wrapper handling `onload`, `onerror`, `ontimeout`, `onabort`, and optional tab fallback (modules should call `ctx.http.download(...)` instead).
 - `store`: Safe typed `GM_*` wrapper (`get`, `set`, `del`, `list`, `watch`) with guards when `GM_*` globals are unavailable.
+- `createCoreLogger('core' | 'settings' | 'anilist' | 'mal')`: Frozen logger for non-module layers (`src/core/*`, `src/settings/*`, `src/api/*`), gated under **Core / Kernel Debug** (`debug.core`) in Developer Mode. *(Feature modules must use `ctx.log` instead.)*
+
+Additionally, `Settings.has(key)` (`src/settings/settings.ts`) checks whether a registered setting has an explicit stored value in GM storage without falling back to its default.
 
 ### `src/utils/dom.ts`
 - `icon(name, size = 18)`: Clean inline SVG icons (`'external'`, `'edit'`, `'chevron'`, `'close'`, `'sliders'`, `'resync'`, `'list'`, `'stop'`, `'spinner'`, etc.).
@@ -96,7 +111,7 @@ Complex configuration objects (`type: 'json'`) should provide a rich modal UI ra
 
 To integrate cleanly with Settings' staged **Save / Reset / Cancel** flow:
 
-1. Define your modal opener accepting `JsonEditorContext` (`{ value, onApply, addStyle }`):
+1. Define your modal opener accepting `JsonEditorContext` (`{ value, onApply, addStyle, log? }`):
 
 ```ts
 import type { JsonEditorContext } from '../../types';
@@ -127,6 +142,8 @@ export function openMyEditor(ec: JsonEditorContext): void {
     }
   };
   document.addEventListener('keydown', onKey, true);
+
+  // Optional diagnostics inside modals use `ec.log?.warn(...)` / `ec.log?.error(...)` (never raw console.*)
 
   // Confirm button stages the new value back into Settings without writing storage directly:
   applyBtn.addEventListener('click', () => {

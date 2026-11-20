@@ -389,6 +389,43 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       expect(emitGqlSpy).not.toHaveBeenCalled();
       expect(gqlEvents).toEqual([]);
 
+      helpers.store.set('al_user_id', 700);
+      helpers.store.set('al_username', 'LiveUser');
+      bus.CoreHooks.setAuthHeader('Bearer live-token');
+
+      ctx1.session.clear();
+      ctx1.session.recordHint({ userId: 999, username: 'StaleUser' });
+      ctx1.api.session.clear();
+      ctx1.api.session.recordHint({ userId: 999, username: 'StaleUser' });
+      ctx1.hooks.setAuthHeader('Bearer stale-token');
+      ctx1.hooks.setAuthHeader(null);
+
+      expect(helpers.store.get('al_user_id', null)).toBe(700);
+      expect(helpers.store.get('al_username', null)).toBe('LiveUser');
+      expect(bus.CoreHooks.getAuthHeader()).toBe('Bearer live-token');
+
+      const staleAccWatch = vi.fn();
+      ctx1.accounts.watch('mal', staleAccWatch);
+      helpers.store.set('mal_token', 'tok_stale_test');
+      expect(staleAccWatch).not.toHaveBeenCalled();
+
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const logErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        settings.Settings.set('devModeEnabled', true);
+        (ctx1.log.debug as any)('disposed-debug');
+        ctx1.log.warn('disposed-warn');
+        ctx1.log.error('disposed-error');
+        expect(debugSpy).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledWith('[Ctx Reload]', 'disposed-warn');
+        expect(logErrSpy).toHaveBeenCalledWith('[Ctx Reload]', 'disposed-error');
+      } finally {
+        debugSpy.mockRestore();
+        warnSpy.mockRestore();
+        logErrSpy.mockRestore();
+      }
+
       expect(helpers.store.get('ala_mod_ctxReloadMod_k', null)).toBe('v2');
       ctx2.storage.clear();
       expect(helpers.store.get('ala_mod_ctxReloadMod_k', null)).toBeNull();
@@ -551,89 +588,308 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
     });
   });
 
-  it('B1-07: gates ctx.debug.log() and patternless registerDebugChannel() on channel opt-in and handles /g and /y patterns', async () => {
-    const { registry, settings, helpers, types } = await loadFreshKernel();
+  it('B1-07: enforces symmetrical ctx.log & ctx.log.channel() gating, frozen metadata, { debug: false } zero-setting mode, and compile-time checks', async () => {
+    const { registry, settings } = await loadFreshKernel();
     const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
-    let noPatCtx!: any;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
+    let plainCtx!: any;
+    let quietCtx!: any;
+    let simpleCtx!: any;
+    let multiCtx!: any;
+
+    try {
+      registry.defineModule({
+        id: 'plainMod',
+        key: 'plainModEnabled',
+        title: 'Plain Module',
+        help: 'No debug config',
+        setup(ctx) {
+          plainCtx = ctx;
+          expect(ctx.title).toBe('Plain Module');
+          expect(ctx.help).toBe('No debug config');
+          expect(ctx.log.canDebug).toBe(false);
+          expect(ctx.log.label).toBe('Plain Module');
+          expect(Object.isFrozen(ctx.log)).toBe(true);
+
+          if (false as boolean) {
+            // @ts-expect-error debug omitted -> .debug() blocked at compile time
+            ctx.log.debug('nope');
+            // @ts-expect-error no channels declared
+            ctx.log.channel('any');
+          }
+        }
+      });
+
+      registry.defineModule({
+        id: 'quietMod',
+        key: 'quietModEnabled',
+        title: 'Quiet Module',
+        help: 'Warn/error custom prefix only',
+        debug: {
+          debug: false,
+          label: 'Quiet',
+          channels: {
+            sub: { label: 'Sub', debug: false }
+          }
+        },
+        setup(ctx) {
+          quietCtx = ctx;
+          const sub = ctx.log.channel('sub');
+          expect(ctx.log.canDebug).toBe(false);
+          expect(sub.canDebug).toBe(false);
+          expect(sub.id).toBe('sub');
+          expect(Object.isFrozen(sub)).toBe(true);
+
+          if (false as boolean) {
+            // @ts-expect-error debug: false module blocks .debug()
+            ctx.log.debug('nope');
+            // @ts-expect-error debug: false channel blocks .debug()
+            sub.debug('nope');
+            // @ts-expect-error undeclared channel name
+            ctx.log.channel('unknown');
+          }
+        }
+      });
+
+      registry.defineModule({
+        id: 'simpleDbgMod',
+        key: 'simpleDbgEnabled',
+        title: 'Simple Debug Module',
+        help: 'Single debug toggle',
+        debug: {
+          label: 'Simple',
+          title: 'Simple Debug',
+          help: 'Simple help'
+        },
+        setup(ctx) {
+          simpleCtx = ctx;
+          expect(ctx.log.canDebug).toBe(true);
+          expect(ctx.log.label).toBe('Simple');
+          expect(ctx.log.title).toBe('Simple Debug');
+          expect(ctx.log.help).toBe('Simple help');
+
+          if (false as boolean) {
+            // @ts-expect-error no channels declared
+            ctx.log.channel('rpc');
+          }
+        }
+      });
+
+      registry.defineModule({
+        id: 'multiDbgMod',
+        key: 'multiDbgEnabled',
+        title: 'Multi Debug Module',
+        help: 'Multi channel debug',
+        debug: {
+          label: 'Multi',
+          title: 'Multi Debug',
+          help: 'Multi help',
+          channels: {
+            rpc: { label: 'RPC', title: 'Worker RPC', debug: true, help: 'RPC logs' },
+            quiet: { label: 'QuietCh', debug: false }
+          }
+        },
+        setup(ctx) {
+          multiCtx = ctx;
+          const rpc = ctx.log.channel('rpc');
+          const quiet = ctx.log.channel('quiet');
+          expect(rpc).toBe(ctx.log.channel('rpc'));
+          expect(rpc.id).toBe('rpc');
+          expect(rpc.label).toBe('RPC');
+          expect(rpc.title).toBe('Worker RPC');
+          expect(rpc.help).toBe('RPC logs');
+          expect(rpc.canDebug).toBe(true);
+          expect(Object.isFrozen(rpc)).toBe(true);
+          expect(quiet.canDebug).toBe(false);
+
+          if (false as boolean) {
+            // @ts-expect-error debug: false channel blocks .debug()
+            quiet.debug('blocked');
+            // @ts-expect-error undeclared channel name
+            ctx.log.channel('missing');
+          }
+        }
+      });
+
+      const defaultDebug = settings.Settings.get('debug');
+      expect(defaultDebug.plainMod).toBeUndefined();
+      expect(defaultDebug.quietMod).toBeUndefined();
+      expect(defaultDebug.simpleDbgMod).toEqual({ enabled: false });
+      expect(defaultDebug.multiDbgMod).toEqual({ enabled: false, channels: { general: true, rpc: true } });
+      expect(defaultDebug.multiDbgMod.channels.quiet).toBeUndefined();
+
+      settings.Settings.set('plainModEnabled', true);
+      settings.Settings.set('quietModEnabled', true);
+      settings.Settings.set('simpleDbgEnabled', true);
+      settings.Settings.set('multiDbgEnabled', true);
+      registry.startModules(false);
+
+      settings.Settings.set('devModeEnabled', true);
+      (plainCtx.log.debug as any)('ignored');
+      plainCtx.log.warn('plain-w');
+      plainCtx.log.error('plain-e');
+      expect(debugSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith('[Plain Module]', 'plain-w');
+      expect(errSpy).toHaveBeenCalledWith('[Plain Module]', 'plain-e');
+
+      const fallbackCh1 = (plainCtx.log.channel as any)('missing');
+      const fallbackCh2 = (plainCtx.log.channel as any)('missing');
+      expect(fallbackCh1).toBe(fallbackCh2);
+      expect(Object.isFrozen(fallbackCh1)).toBe(true);
+      expect(fallbackCh1.canDebug).toBe(false);
+      fallbackCh1.debug('ignored');
+      fallbackCh1.warn('fb-warn');
+      expect(debugSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith('[Plain Module (missing)]', 'fb-warn');
+
+      (quietCtx.log.debug as any)('ignored');
+      quietCtx.log.warn('q-root');
+      quietCtx.log.channel('sub').error('q-sub');
+      expect(debugSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith('[Quiet]', 'q-root');
+      expect(errSpy).toHaveBeenCalledWith('[Quiet (Sub)]', 'q-sub');
+
+      expect(simpleCtx.log.enabled()).toBe(false);
+      simpleCtx.log.debug('suppressed');
+      expect(debugSpy).not.toHaveBeenCalled();
+
+      settings.Settings.set('debug', { simpleDbgMod: { enabled: true } });
+      expect(simpleCtx.log.enabled()).toBe(true);
+      simpleCtx.log.debug('hello-simple');
+      expect(debugSpy).toHaveBeenLastCalledWith('[Simple]', 'hello-simple');
+
+      const rpcLog = multiCtx.log.channel('rpc');
+      expect(multiCtx.log.enabled()).toBe(false);
+      expect(rpcLog.enabled()).toBe(false);
+
+      settings.Settings.set('debug', { multiDbgMod: { enabled: true } });
+      expect(multiCtx.log.enabled()).toBe(true);
+      expect(rpcLog.enabled()).toBe(true);
+      multiCtx.log.debug('root-msg');
+      rpcLog.debug('rpc-msg');
+      expect(debugSpy).toHaveBeenCalledWith('[Multi]', 'root-msg');
+      expect(debugSpy).toHaveBeenCalledWith('[Multi (RPC)]', 'rpc-msg');
+
+      debugSpy.mockClear();
+      settings.Settings.set('debug', {
+        multiDbgMod: { enabled: true, channels: { general: false, rpc: true } }
+      });
+      expect(multiCtx.log.enabled()).toBe(false);
+      expect(rpcLog.enabled()).toBe(true);
+      multiCtx.log.debug('root-muted');
+      rpcLog.debug('rpc-still-on');
+      expect(debugSpy).toHaveBeenCalledTimes(1);
+      expect(debugSpy).toHaveBeenCalledWith('[Multi (RPC)]', 'rpc-still-on');
+
+      debugSpy.mockClear();
+      settings.Settings.set('devModeEnabled', false);
+      expect(rpcLog.enabled()).toBe(false);
+      rpcLog.debug('dev-off');
+      expect(debugSpy).not.toHaveBeenCalled();
+    } finally {
+      debugSpy.mockRestore();
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  it('tracks ctx.http.download() outcomes and aborts in-flight downloads on unload without opening fallback tab', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const dlSpy = vi.spyOn(globalThis, 'GM_download');
+
+    let dlCtx!: any;
     registry.defineModule({
-      id: 'noPatMod',
-      key: 'noPatEnabled',
-      title: 'No Pattern Mod',
+      id: 'dlMod',
+      key: 'dlModEnabled',
+      title: 'Download Mod',
       help: 'Test',
-      debug: {
-        key: 'debugNoPat',
-        title: 'No Pattern Debug',
-        help: 'Omits pattern'
-      },
       setup(ctx) {
-        noPatCtx = ctx;
+        dlCtx = ctx;
       }
     });
-
-    helpers.registerDebugChannel('', `${types.SETTING_PREFIX}debugEmpty`, false);
-    helpers.registerDebugChannel('mod', `${types.SETTING_PREFIX}debugModPrefix`, false);
-    helpers.registerDebugChannel('mod.v1+', `${types.SETTING_PREFIX}debugSpecialPlus`, false);
-    helpers.registerDebugChannel('mod.v1+test', `${types.SETTING_PREFIX}debugSpecial`, false);
-    helpers.registerDebugChannel('gMod', `${types.SETTING_PREFIX}debugGMod`, false, /^\[GMOD/gi);
-    helpers.registerDebugChannel('yMod', `${types.SETTING_PREFIX}debugYMod`, false, /\[YMOD/yi);
-
-    settings.Settings.set('noPatEnabled', true);
+    settings.Settings.set('dlModEnabled', true);
     registry.startModules(false);
 
-    settings.Settings.set('devModeEnabled', true);
-    settings.Settings.set('debugNoPat', false);
+    dlSpy.mockImplementationOnce((opts: any) => {
+      opts.onload?.();
+      return { abort: vi.fn() };
+    });
+    await expect(dlCtx.http.download('https://example.com/a.jpg', 'a.jpg')).resolves.toBe('download');
+    expect(clickSpy).not.toHaveBeenCalled();
 
-    expect(noPatCtx.debug.enabled()).toBe(false);
-    noPatCtx.debug.log('should-suppress');
-    helpers.logDebug('[NOPATMOD]', 'should-suppress');
-    helpers.logDebug('[NOPATMOD] direct-suppress');
-    helpers.logDebug('[MOD.V1+TEST] escaped-suppress');
-    helpers.logDebug('[MOD.V1+] msg');
-    helpers.logDebug('[MOD.V1+:sub]', 'sub-suppress');
-    helpers.logDebug('[MOD] prefix-suppress');
+    dlSpy.mockImplementationOnce((opts: any) => {
+      opts.onerror?.({ error: 'network' });
+      return { abort: vi.fn() };
+    });
+    await expect(dlCtx.http.download('https://example.com/b.jpg', 'b.jpg')).resolves.toBe('tab');
+    expect(clickSpy).toHaveBeenCalledTimes(1);
 
-    helpers.logDebug('[GMOD] call 1');
-    helpers.logDebug('[GMOD] call 2');
-    helpers.logDebug('[GMOD] call 3');
-    helpers.logDebug('[YMOD] call 1');
-    helpers.logDebug('[YMOD] call 2');
-    expect(debugSpy).not.toHaveBeenCalled();
+    clickSpy.mockClear();
+    const abortMock = vi.fn();
+    dlSpy.mockImplementationOnce((opts: any) => ({
+      abort: () => {
+        abortMock();
+        opts.onabort?.();
+      }
+    }));
 
-    helpers.logDebug('[UNREGISTERED]', 'visible');
-    helpers.logDebug('[MODXV111TEST]', 'escaped-verify');
-    helpers.logDebug('[MOD.V1+X] msg');
-    helpers.logDebug('[MODXV1+] msg');
-    expect(debugSpy).toHaveBeenCalledTimes(4);
-    expect(debugSpy).toHaveBeenNthCalledWith(1, '[UNREGISTERED]', 'visible');
-    expect(debugSpy).toHaveBeenNthCalledWith(2, '[MODXV111TEST]', 'escaped-verify');
-    expect(debugSpy).toHaveBeenNthCalledWith(3, '[MOD.V1+X] msg');
-    expect(debugSpy).toHaveBeenNthCalledWith(4, '[MODXV1+] msg');
+    const pending = dlCtx.http.download('https://example.com/c.jpg', 'c.jpg');
+    settings.Settings.set('dlModEnabled', false);
+    host.reload(['dlMod']);
 
-    debugSpy.mockClear();
-    helpers.store.set(`${types.SETTING_PREFIX}debugSpecialPlus`, true);
-    helpers.logDebug('[MOD.V1+] msg');
-    helpers.logDebug('[MOD.V1+:sub]', 'enabled-sub');
-    helpers.logDebug('[MOD] still-suppressed');
-    expect(debugSpy).toHaveBeenCalledTimes(2);
-    expect(debugSpy).toHaveBeenNthCalledWith(1, '[MOD.V1+] msg');
-    expect(debugSpy).toHaveBeenNthCalledWith(2, '[MOD.V1+:sub]', 'enabled-sub');
+    await expect(pending).rejects.toThrow('Download aborted');
+    expect(abortMock).toHaveBeenCalledTimes(1);
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
 
-    debugSpy.mockClear();
-    helpers.store.set(`${types.SETTING_PREFIX}debugSpecialPlus`, false);
-    helpers.store.set(`${types.SETTING_PREFIX}debugModPrefix`, true);
-    helpers.logDebug('[MOD] msg');
-    helpers.logDebug('[MOD.V1+] msg');
-    expect(debugSpy).toHaveBeenCalledTimes(1);
-    expect(debugSpy).toHaveBeenNthCalledWith(1, '[MOD] msg');
+  it('provides scoped MigrateContext (storage, settings.has/get/set, legacy) and guards post-migrate writes', async () => {
+    const { registry, helpers } = await loadFreshKernel();
+    let capturedM!: any;
 
-    debugSpy.mockClear();
-    settings.Settings.set('debugNoPat', true);
-    expect(noPatCtx.debug.enabled()).toBe(true);
-    noPatCtx.debug.log('hello');
-    helpers.logDebug('[NOPATMOD] direct-ok');
-    expect(debugSpy).toHaveBeenNthCalledWith(1, '[NOPATMOD]', 'hello');
-    expect(debugSpy).toHaveBeenNthCalledWith(2, '[NOPATMOD] direct-ok');
+    helpers.store.set('legacy_old_key', 'from-old');
+
+    registry.defineModule({
+      id: 'migCtxMod',
+      key: 'migCtxEnabled',
+      title: 'Migrate Context Mod',
+      help: 'Test',
+      options: [
+        { key: 'migOpt', type: 'number', def: 10, min: 1, max: 100, title: 'Opt', help: 'Opt' }
+      ],
+      migrate(m) {
+        capturedM = m;
+        expect(m.id).toBe('migCtxMod');
+        expect(m.settings.has('migOpt')).toBe(false);
+        expect(m.settings.get('migOpt')).toBe(10);
+        m.settings.set('migOpt', 42);
+        expect(m.settings.has('migOpt')).toBe(true);
+
+        const old = m.legacy.get('legacy_old_key', null);
+        if (old) {
+          m.storage.set('migrated', old);
+          m.legacy.del('legacy_old_key');
+        }
+      },
+      setup: () => {}
+    });
+
+    registry.runMigrations();
+
+    expect(helpers.store.get('ala_mod_migCtxMod_migrated', null)).toBe('from-old');
+    expect(helpers.store.get('legacy_old_key', null)).toBeNull();
+    expect(helpers.store.get('ala_setting_migOpt', null)).toBe(42);
+
+    capturedM.storage.set('migrated', 'clobbered');
+    capturedM.storage.clear();
+    capturedM.legacy.set('legacy_old_key', 'recreated');
+    capturedM.settings.set('migOpt', 99);
+    expect(helpers.store.get('ala_mod_migCtxMod_migrated', null)).toBe('from-old');
+    expect(helpers.store.get('legacy_old_key', null)).toBeNull();
+    expect(helpers.store.get('ala_setting_migOpt', null)).toBe(42);
   });
 
   it('B1-08: isolates async rejections and sync throws in runAccountAuthCallbacks() so remaining providers still run', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import '../src/modules/sync';
 import {
   convertScore,
@@ -10,14 +10,21 @@ import {
 } from '../src/modules/sync/reconcile';
 import { dedupeTargets, buildTitleIndex, localMatch } from '../src/modules/sync/targets';
 import {
+  SYNC_STORAGE_PREFIX,
+  syncStore,
+  stores,
+  acquireLock,
+  releaseLock,
   addPendingDelete,
   removePendingDelete,
   getPendingDeletes,
   clearPendingDeletes
 } from '../src/modules/sync/state';
 import { Settings } from '../src/settings/settings';
-import { runMigrations } from '../src/core/registry';
+import { runMigrations, bootModuleForTest, disposeFeature } from '../src/core/registry';
 import { clearAccountSecrets } from '../src/core/accounts';
+import { isMalConnected } from '../src/api/mal';
+import { mountPanel } from '../src/modules/sync/panel';
 import { store } from '../src/utils/helpers';
 import type { AniListSyncEntry, SyncTarget, SyncCounters } from '../src/modules/sync/types';
 
@@ -312,43 +319,132 @@ describe('Sync Engine: Pending Deletions Queue', () => {
   });
 });
 
-describe('Sync Module: Raw Persistence Keys & Migrations', () => {
-  it('preserves persisted sync watermarks and caches across runMigrations()', () => {
-    store.set('sync_schema', 2);
+describe('Sync Module: Scoped Storage, Schema < 3 Migration, Reset & Lock Unwind', () => {
+  it('matches SYNC_STORAGE_PREFIX with ala_mod_sync_ and migrates schema < 2 and < 3 cleanly with idempotent second run', () => {
+    expect(SYNC_STORAGE_PREFIX).toBe('ala_mod_sync_');
+
+    store.set('sync_schema', 1);
+    store.set('mal_mirror_ANIME', { stale: true });
     store.set('last_sync_ANIME', 1000);
-    store.set('last_run_ANIME', 2000);
     store.set('last_compare_MANGA', 3000);
     store.set('sync_account', 'tester');
     store.set('sync_retry_at', 4000);
     store.set('sync_onboarded', true);
-    store.set('sync_idmap_ANIME', { 1: { m: 10, t: 99 } });
-    store.set('sync_settled_MANGA', { 2: { h: 'abc', t: 99 } });
-    addPendingDelete({ mediaId: 7, malId: 70, type: 'ANIME', title: 'Test', deletedAt: 5000 });
+    store.set('sync_lock_heartbeat', { tab: 'old', at: 1 });
+    store.set('sync_idmap_ANIME', JSON.stringify({ 1: { m: 10, t: Date.now() } }));
+    store.set('sync_settled_MANGA', JSON.stringify({ 2: [1, 'dead', Date.now()] }));
+    store.set(
+      'sync_pending_deletes',
+      JSON.stringify([{ mediaId: 7, malId: 70, type: 'ANIME', title: 'Test', deletedAt: 5000 }])
+    );
 
     runMigrations();
 
-    expect(store.get('last_sync_ANIME', 0)).toBe(1000);
-    expect(store.get('last_run_ANIME', 0)).toBe(2000);
-    expect(store.get('last_compare_MANGA', 0)).toBe(3000);
-    expect(store.get('sync_account', null)).toBe('tester');
-    expect(store.get('sync_retry_at', 0)).toBe(4000);
-    expect(store.get('sync_onboarded', false)).toBe(true);
-    expect(store.get('sync_idmap_ANIME', {})).toEqual({ 1: { m: 10, t: 99 } });
-    expect(store.get('sync_settled_MANGA', {})).toEqual({ 2: { h: 'abc', t: 99 } });
+    expect(store.get('sync_schema', null)).toBeNull();
+    expect(store.get('mal_mirror_ANIME', null)).toBeNull();
+    expect(store.get('sync_lock_heartbeat', null)).toBeNull();
+    expect(store.get('last_sync_ANIME', null)).toBeNull();
+    expect(store.get('sync_idmap_ANIME', null)).toBeNull();
+    expect(store.get('sync_pending_deletes', null)).toBeNull();
+
+    expect(syncStore.get('schema', 0)).toBe(3);
+    expect(syncStore.get('last_sync_ANIME', 0)).toBe(1000);
+    expect(syncStore.get('last_run_ANIME', 0)).toBe(1000);
+    expect(syncStore.get('last_compare_MANGA', 0)).toBe(3000);
+    expect(syncStore.get('sync_account', null)).toBe('tester');
+    expect(syncStore.get('sync_retry_at', 0)).toBe(4000);
+    expect(syncStore.get('sync_onboarded', false)).toBe(true);
+    expect(stores.ANIME.ids.data['1']?.m).toBe(10);
+    expect(stores.MANGA.settled.data['2']?.[1]).toBe('dead');
     expect(getPendingDeletes()).toHaveLength(1);
+
+    syncStore.set('last_sync_ANIME', 9999);
+    store.set('last_sync_ANIME', 1111);
+    runMigrations();
+    expect(syncStore.get('last_sync_ANIME', 0)).toBe(9999);
   });
 
-  it('wipes MAL credentials cleanly via clearAccountSecrets("mal")', () => {
+  it('wipes MAL credentials cleanly via clearAccountSecrets("mal") and updates isMalConnected()', () => {
     store.set('mal_token', 'tok');
     store.set('mal_refresh_token', 'ref');
     store.set('mal_expires_at', 999999);
     store.set('mal_code_verifier', 'ver');
+    expect(isMalConnected()).toBe(true);
 
     clearAccountSecrets('mal');
 
+    expect(isMalConnected()).toBe(false);
     expect(store.get('mal_token', null)).toBeNull();
     expect(store.get('mal_refresh_token', null)).toBeNull();
     expect(store.get('mal_expires_at', null)).toBeNull();
     expect(store.get('mal_code_verifier', null)).toBeNull();
+  });
+
+  it('clears all scoped data, caches, and credentials via Reset all data menu command and releases lock after unload', async () => {
+    const regSpy = vi.spyOn(globalThis, 'GM_registerMenuCommand');
+    try {
+      Settings.set('syncEnabled', true);
+      syncStore.set('last_sync_ANIME', 12345);
+      store.set('mal_token', 'mal_tok');
+      stores.ANIME.ids.data['10'] = { m: 20, t: Date.now() };
+
+      await bootModuleForTest('sync');
+
+      const resetCall = regSpy.mock.calls.find(([label]) => String(label).includes('Reset all data'));
+      expect(resetCall).toBeDefined();
+      (resetCall![1] as () => void)();
+
+      expect(syncStore.get('last_sync_ANIME', null)).toBeNull();
+      expect(store.get('mal_token', null)).toBeNull();
+      expect(Object.keys(stores.ANIME.ids.data)).toHaveLength(0);
+
+      vi.useFakeTimers();
+      try {
+        const lockPromise = acquireLock();
+        await vi.advanceTimersByTimeAsync(260);
+        expect(await lockPromise).toBe(true);
+        expect(store.get(`${SYNC_STORAGE_PREFIX}lock_heartbeat`, null)).not.toBeNull();
+
+        disposeFeature('sync');
+        releaseLock();
+        expect(store.get(`${SYNC_STORAGE_PREFIX}lock_heartbeat`, null)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    } finally {
+      disposeFeature('sync');
+      regSpy.mockRestore();
+    }
+  });
+
+  it('re-renders the sync panel via ctx.accounts.watch("mal") on connect and disconnect transitions', async () => {
+    history.replaceState({}, '', '/user/MatiX/animelist');
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 1, name: 'MatiX' } } } };
+    document.body.innerHTML = '<div class="sidebar"><div title="Random List Entry"></div></div>';
+    Settings.set('syncEnabled', true);
+    store.del('mal_token');
+
+    try {
+      await bootModuleForTest('sync');
+      mountPanel();
+
+      const panelEl = document.getElementById('almal-panel');
+      expect(panelEl).not.toBeNull();
+      const disconnectedHtml = panelEl!.innerHTML;
+      expect(disconnectedHtml).not.toContain('almal-meta-row');
+
+      store.set('mal_token', 'tok_live');
+      expect(panelEl!.innerHTML).toContain('almal-meta-row');
+      expect(panelEl!.innerHTML).not.toBe(disconnectedHtml);
+
+      store.del('mal_token');
+      expect(panelEl!.innerHTML).toBe(disconnectedHtml);
+    } finally {
+      disposeFeature('sync');
+      delete (window as any).__NUXT__;
+      document.body.innerHTML = '';
+      history.replaceState({}, '', '/');
+      store.del('mal_token');
+    }
   });
 });

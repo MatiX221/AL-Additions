@@ -23,10 +23,9 @@ defineModule({
   title: 'Compare View Improvements',
   help: 'Sort lists by title or scores, auto-load complete compare list, and filter by status with responsive mobile dropdown.',
   debug: {
-    key: 'debugCompareView',
+    label: 'Compare View',
     title: 'Compare View Debug',
-    help: 'Log list comparison data loading, score diffs, sorting, and filtering passes.',
-    pattern: /^\[COMPARE/i
+    help: 'Log list comparison data loading, score diffs, sorting, and filtering passes.'
   },
   setup(ctx) {
     ctx.addStyle(COMPARE_CSS_ID, COMPARE_CSS);

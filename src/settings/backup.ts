@@ -1,9 +1,11 @@
-import { store, logDebug } from '../utils/helpers';
+import { createCoreLogger, store } from '../utils/helpers';
 import { ROWS, TYPES, PREFIX } from './settings';
 import { promptPasswordModal } from './passwordModal';
 import { getAccountSecretKeys } from '../core/accounts';
 import { CoreHooks } from '../core/bus';
 import { ANILIST_SESSION_KEYS } from '../types';
+
+const settingsLog = createCoreLogger('settings');
 
 export const BACKUP_VERSION = 1;
 export const BACKUP_FILENAME = 'al-additions.settings';
@@ -210,7 +212,7 @@ export async function createBackup(
     out.set(iv, 5 + SALT_LENGTH);
     out.set(ciphertext, 5 + SALT_LENGTH + IV_LENGTH);
 
-    logDebug('[CORE]', `Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+    settingsLog.debug(`Created encrypted backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
     return out;
   } else {
     const out = new Uint8Array(5 + compressedBytes.length);
@@ -218,7 +220,7 @@ export async function createBackup(
     out[4] = FORMAT_VERSION;
     out.set(compressedBytes, 5);
 
-    logDebug('[CORE]', `Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
+    settingsLog.debug(`Created plain backup (${out.length} bytes, compressed from ${jsonBytes.length} bytes)`);
     return out;
   }
 }
@@ -258,6 +260,7 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
 
   CoreHooks.setSessionClearing(true);
   try {
+    // @migration(from: "v0.9.0", kind: "cleanup", sunset: "keep-long")
     for (const k of ANILIST_SESSION_KEYS) {
       store.del(k);
     }
@@ -282,6 +285,7 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
       }
     }
 
+    // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
     const hasExplicitOverridesFlag =
       hasOwn(data, 'manualOverridesEnabled') || hasOwn(data, `${PREFIX}manualOverridesEnabled`);
     const rawOverrides =
@@ -318,6 +322,7 @@ export function applyVersion1Settings(data: Record<string, any>): ImportResult {
 
 export type PasswordPromptFn = (hint?: string) => Promise<string | null>;
 
+// @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
 async function handleLegacyJsonBackup(jsonText: string, promptPassword: PasswordPromptFn): Promise<ImportResult> {
   let payload: any;
   try {
@@ -448,7 +453,7 @@ export async function importBackup(
       throw new Error('Decrypted content is not valid JSON.');
     }
 
-    logDebug('[CORE]', 'Imported encrypted binary backup successfully.');
+    settingsLog.debug('Imported encrypted binary backup successfully.');
     const data = payload && typeof payload === 'object' && payload.data ? payload.data : payload;
     return applyVersion1Settings(data);
   }
@@ -476,11 +481,12 @@ export async function importBackup(
       throw new Error('Corrupted backup file: invalid JSON content.');
     }
 
-    logDebug('[CORE]', 'Imported plain binary backup successfully.');
+    settingsLog.debug('Imported plain binary backup successfully.');
     const data = payload && typeof payload === 'object' && payload.data ? payload.data : payload;
     return applyVersion1Settings(data);
   }
 
+  // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
   if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
     let jsonText: string;
     try {
@@ -488,10 +494,11 @@ export async function importBackup(
     } catch {
       throw new Error('Corrupted or invalid GZIP backup file.');
     }
-    logDebug('[CORE]', 'Imported legacy GZIP backup.');
+    settingsLog.debug('Imported legacy GZIP backup.');
     return handleLegacyJsonBackup(jsonText, promptPassword);
   }
 
+  // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
   let jsonText: string;
   try {
     jsonText = new TextDecoder().decode(bytes);
@@ -499,7 +506,7 @@ export async function importBackup(
     throw new Error('Failed to decode backup file as UTF-8 text.');
   }
 
-  logDebug('[CORE]', 'Imported legacy JSON/text backup.');
+  settingsLog.debug('Imported legacy JSON/text backup.');
   return handleLegacyJsonBackup(jsonText, promptPassword);
 }
 

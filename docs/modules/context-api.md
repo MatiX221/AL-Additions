@@ -2,6 +2,8 @@
 
 When your module boots, the kernel passes a dedicated `ctx: FeatureContext` instance to `setup(ctx)`. Every resource registered through `ctx` is tied to that specific boot lifecycle and cleaned up automatically when the module stops or reloads.
 
+Readonly module metadata is available directly on `ctx.id`, `ctx.title`, and `ctx.help`.
+
 ---
 
 ## Settings Access
@@ -28,7 +30,7 @@ ctx.storage.del('lastChecked');
 
 // Cross-tab / live reactive updates (returns CleanupFn, auto-cleaned on module unload)
 const unwatch = ctx.storage.watch('lastChecked', (shortKey, oldVal, newVal, remote) => {
-  ctx.debug.log(shortKey, 'changed:', oldVal, '->', newVal, 'remote:', remote);
+  ctx.log.debug(shortKey, 'changed:', oldVal, '->', newVal, 'remote:', remote);
 });
 
 // Removes ONLY keys belonging to this module (prefixed with `ala_mod_<moduleId>_`)
@@ -98,13 +100,13 @@ ctx.onRoute(/^\/(?:anime|manga)\/(\d+)/, async (rc) => {
 
   // Return an optional cleanup or call rc.onCleanup(...)
   return () => {
-    ctx.debug.log('Left media page:', mediaId);
+    ctx.log.debug('Left media page:', mediaId);
   };
 });
 
 // Overload 2: Run on every route change (no matcher)
 ctx.onRoute((rc) => {
-  ctx.debug.log('Current URL:', rc.pathname);
+  ctx.log.debug('Current URL:', rc.pathname);
 });
 ```
 
@@ -194,6 +196,10 @@ const res = await ctx.http.request('https://api.example.com/post', {
   headers: { 'Content-Type': 'application/json' },
   data: JSON.stringify({ ok: true })
 });
+
+// Lifecycle-tracked file download (wraps GM_download with optional new-tab fallback on error/timeout)
+// Resolves to 'download' or 'tab'; aborts cleanly on module unload without opening a fallback tab.
+const outcome = await ctx.http.download('https://example.com/banner.jpg', 'banner.jpg', { saveAs: false });
 ```
 
 ---
@@ -221,14 +227,30 @@ ctx.menuCommand('My Feature: Clear Cache', () => {
 
 ---
 
-## Debugging (`ctx.debug`)
+## Logging (`ctx.log` & `ctx.log.channel()`)
 
 ```ts
-if (ctx.debug.enabled()) {
-  ctx.debug.log('Resolved', items.length, 'entries');
+// Always active (even when Developer Mode is off or during module teardown):
+ctx.log.warn('Standalone script detected; pausing built-in module.');
+ctx.log.error('Request failed:', err);
+
+// Debug logging (compile-time checked; gated automatically on Developer Mode + nested `debug` setting):
+ctx.log.debug('Step finished');
+
+// Optional escape hatch to skip expensive argument construction:
+if (ctx.log.enabled()) {
+  ctx.log.debug('Resolved', items.length, 'entries');
 }
-// Or call log directly (checks enabled automatically):
-ctx.debug.log('Step finished');
+
+// Declared sub-channels (returns a memoized, frozen ChannelLogger):
+const rpc = ctx.log.channel('rpc');
+rpc.debug('Cache HIT', key); // Prints: [My Label (RPC)] Cache HIT ...
+rpc.warn('Worker error', e); // Always active
 ```
 
-- Automatically prefixes output with `[<CHANNEL>]` (e.g. `[MYFEATURE]`) and gates execution on **both** the global **Developer Mode** master switch (`devModeEnabled`) **and** your module's declared `debug` channel toggle (or `window.__ALA_DEBUG__ = true` override in the browser console).
+- **Automatic prefixes:** Root logs prefix `[Label]` (defaulting to `meta.title`); channel logs prefix `[Label (ChannelLabel)]`.
+- **Compile-time safety:** Calling `ctx.log.debug(...)` is blocked by TypeScript (`never`) unless the module declares an enabled `debug` definition (not omitted and not `{ debug: false }`). Similarly, `ctx.log.channel(id)` only accepts declared channel keys, and `debug: false` channels block `.debug()` at compile time.
+- **Readonly metadata:** Both `ctx.log` and every `ChannelLogger` are `Object.freeze`'d and expose `.label`, `.title`, `.help`, `.canDebug` (plus `.id` on channel loggers).
+- **Teardown safety:** Once a module context is disposed, `.debug()` silently no-ops while `.warn()` and `.error()` remain active so cleanup errors are never swallowed.
+- **Helper typing:** Helper functions extracted into sibling files that only use `.warn()`/`.error()` accept `FeatureContext`; helpers that call `ctx.log.debug(...)` type their parameter as `FeatureContext<true>` (or accept `Logger<true>` / `ChannelLogger<true>`).
+- **Console override:** Setting `window.__ALA_DEBUG__ = true` in DevTools enables all debuggable loggers immediately without changing saved settings.

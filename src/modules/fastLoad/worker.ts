@@ -1,6 +1,8 @@
 import {
   win,
   coreHooks,
+  coreSession,
+  fastLoadRpcLog,
   rpcCache,
   rpcInflight,
   rpcEpoch,
@@ -22,7 +24,7 @@ import {
   normalizeGqlQuery,
   stableStringify
 } from './helpers';
-import { store as gmStore, logDebug } from '../../utils/helpers';
+import { store as gmStore } from '../../utils/helpers';
 
 export const workerPending = new WeakMap<
   object,
@@ -112,10 +114,14 @@ export function extractUsersFromRpcResult(res: any) {
     scanUsers(res);
 
     const viewer = res.Viewer || res.data?.Viewer;
-    if (viewer && viewer.id && viewer.name) {
-      rememberUser(String(viewer.name), Number(viewer.id));
-      gmStore.set('al_user_id', Number(viewer.id));
-      gmStore.set('al_username', String(viewer.name));
+    if (viewer && (viewer.id || viewer.name)) {
+      if (viewer.id && viewer.name) {
+        rememberUser(String(viewer.name), Number(viewer.id));
+      }
+      coreSession?.recordHint({
+        userId: viewer.id ? Number(viewer.id) : undefined,
+        username: viewer.name ? String(viewer.name) : undefined
+      });
     }
     const user = res.User || res.data?.User || res.MediaListCollection?.user || res.data?.MediaListCollection?.user;
     if (user && user.id && user.name) {
@@ -134,7 +140,7 @@ export const onIn = function (this: any, ev: MessageEvent) {
   const p = pMap.get(id);
   if (!p) return;
   pMap.delete(id);
-  logDebug('[FASTLOAD RPC] IN', id, Object.keys(d));
+  fastLoadRpcLog?.debug('IN', id, Object.keys(d));
   if (d.result) {
     extractUsersFromRpcResult(d.result);
   }
@@ -204,7 +210,7 @@ const prefetchedWorkerKeys = new Map<string, number>();
 export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, userName?: string) {
   const url = findWorkerUrl();
   if (!url || !WorkerCtor) {
-    logDebug('[FASTLOAD RPC] Prefetch skipped: worker script unknown');
+    fastLoadRpcLog?.debug('Prefetch skipped: worker script unknown');
     return;
   }
   if (!userId && userName) {
@@ -222,7 +228,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
     } catch {}
   }
   if (!tpl) {
-    logDebug('[FASTLOAD RPC] Prefetch skipped: no list template yet');
+    fastLoadRpcLog?.debug('Prefetch skipped: no list template yet');
     return;
   }
 
@@ -234,10 +240,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
     vars.userName = userName;
     delete vars.userId;
   }
-  const authVal =
-    lastAuth ||
-    gmStore.get('al_token_auth', '') ||
-    (gmStore.get('al_token', null) ? `Bearer ${gmStore.get('al_token', null)}` : '');
+  const authVal = lastAuth || coreHooks?.getAuthHeader() || '';
   const headers: any = { ...(tpl.headers || {}) };
   if (authVal) {
     headers.Authorization = authVal;
@@ -264,7 +267,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
   try {
     w = new WorkerCtor(url, workerOpts);
   } catch (err) {
-    logDebug('[FASTLOAD RPC] Prefetch worker failed to start', err);
+    fastLoadRpcLog?.debug('Prefetch worker failed to start', err);
     return;
   }
   const id = `alfl_prefetch_${type}_${now}`;
@@ -294,7 +297,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
     attempt(() => w.terminate());
   };
   const timer = setTimeout(() => {
-    logDebug('[FASTLOAD RPC] Prefetch timed out', type);
+    fastLoadRpcLog?.debug('Prefetch timed out', type);
     finish();
   }, 30_000);
 
@@ -332,7 +335,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
         }
         while (rpcCache.size > RPC_MAX_ENTRIES) rpcCache.delete(rpcCache.keys().next().value as string);
       });
-      logDebug('[FASTLOAD RPC] Prefetch cached', type, Object.keys(d));
+      fastLoadRpcLog?.debug('Prefetch cached', type, Object.keys(d));
       for (const k of [key, ...possibleKeys]) {
         const f = rpcInflight.get(k);
         if (f) {
@@ -341,7 +344,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
         }
       }
     } else {
-      logDebug('[FASTLOAD RPC] Prefetch failed', d.error);
+      fastLoadRpcLog?.debug('Prefetch failed', d.error);
       for (const k of [key, ...possibleKeys]) {
         const f = rpcInflight.get(k);
         if (f) {
@@ -355,7 +358,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
   });
 
   w.addEventListener('error', (e: any) => {
-    logDebug('[FASTLOAD RPC] Prefetch worker error', e?.message);
+    fastLoadRpcLog?.debug('Prefetch worker error', e?.message);
     attempt(() => {
       win.localStorage?.removeItem('alfl:workerUrl');
       gmStore.del('alfl:workerUrl');
@@ -364,7 +367,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
     finish();
   });
 
-  logDebug('[FASTLOAD RPC] Prefetch dispatching', type, vars);
+  fastLoadRpcLog?.debug('Prefetch dispatching', type, vars);
   w.postMessage({ type: 'RPC', id, method: 'fetch', params });
 }
 
@@ -385,7 +388,7 @@ export function hookWorker(yielded: () => boolean) {
               gmStore.set('alfl:workerUrl', workerUrl);
             });
             workerOpts = options;
-            logDebug('[FASTLOAD RPC] Page worker created:', urlStr);
+            fastLoadRpcLog?.debug('Page worker created:', urlStr);
           }
           if (!watched.has(instance)) {
             watched.add(instance);
@@ -415,7 +418,7 @@ export function hookWorker(yielded: () => boolean) {
             coreHooks?.isRpcBlocked(String(data.params[1]), data.params[2]) ||
             (typeof blocker === 'function' && blocker(String(data.params[1]), data.params[2]));
           if (isBlocked) {
-            logDebug('[FASTLOAD RPC] Blocked request:', JSON.stringify(data.params[2]).slice(0, 60));
+            fastLoadRpcLog?.debug('Blocked request:', JSON.stringify(data.params[2]).slice(0, 60));
             const targetId = data.params[2]?.id || data.params[2]?.userId;
             const pageId = data.params[4]?.page?.id || (targetId ? `listComparison-${targetId}` : 'listComparison');
             const pageNum = data.params[2]?.page || 1;
@@ -464,9 +467,9 @@ export function hookWorker(yielded: () => boolean) {
           }
           const h = data.params[3] || {};
           const a = h.Authorization ?? h.authorization;
-          if (a && !coreHooks?.isSessionClearing()) {
+          if (a && /^Bearer\s+/i.test(String(a)) && !coreHooks?.isSessionClearing()) {
             lastAuth = String(a);
-            gmStore.set('al_token_auth', lastAuth);
+            coreHooks?.setAuthHeader(lastAuth);
           }
           const q = { query: data.params[1], variables: data.params[2] };
           if (isMediaListQuery(q)) {
@@ -550,7 +553,7 @@ export function hookWorker(yielded: () => boolean) {
 
             if (hit) {
               stats.cacheHits++;
-              logDebug('[FASTLOAD RPC] HIT', label, `${Math.round((Date.now() - hit.time) / 1000)}s old`);
+              fastLoadRpcLog?.debug('HIT', label, `${Math.round((Date.now() - hit.time) / 1000)}s old`);
               const worker = this;
               const reply = { ...clone(hit.msg), id: data.id };
               const MessageEventCtor = win.MessageEvent || MessageEvent;
@@ -560,12 +563,12 @@ export function hookWorker(yielded: () => boolean) {
 
             if (flying) {
               stats.deduped++;
-              logDebug('[FASTLOAD RPC] Attached to in-flight prefetch:', label);
+              fastLoadRpcLog?.debug('Attached to in-flight prefetch:', label);
               const worker = this;
               const replyId = data.id;
               flying.promise.then(
                 (msg: any) => {
-                  logDebug('[FASTLOAD RPC] In-flight prefetch delivered to page:', label);
+                  fastLoadRpcLog?.debug('In-flight prefetch delivered to page:', label);
                   const reply = { ...clone(msg), id: replyId };
                   const MessageEventCtor = win.MessageEvent || MessageEvent;
                   setTimeout(() => worker.dispatchEvent(new MessageEventCtor('message', { data: reply })), 0);
@@ -577,7 +580,7 @@ export function hookWorker(yielded: () => boolean) {
               return;
             }
 
-            logDebug('[FASTLOAD RPC] MISS', label, JSON.stringify(q.variables).slice(0, 80));
+            fastLoadRpcLog?.debug('MISS', label, JSON.stringify(q.variables).slice(0, 80));
             let pMap = workerPending.get(this);
             if (!pMap) {
               pMap = new Map();

@@ -1,5 +1,8 @@
 import { GM_registerMenuCommand } from 'vite-plugin-monkey/dist/client';
+import { createCoreLogger } from '../utils/helpers';
 import type { CleanupFn } from '../types';
+
+const coreLog = createCoreLogger('core');
 
 interface MenuEntry {
   handler: (() => void) | null;
@@ -32,7 +35,7 @@ export function registerMenuCommand(label: string, onClick: () => void): Cleanup
         try {
           entry?.handler?.();
         } catch (e) {
-          console.error(`[AL-Additions] Menu command "${label}" failed:`, e);
+          coreLog.error(`Menu command "${label}" failed:`, e);
         }
       });
     }

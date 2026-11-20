@@ -1,6 +1,5 @@
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
-import type { CoreHooksApi } from '../../types';
-import { store as gmStore } from '../../utils/helpers';
+import type { AniListSession, ChannelLogger, CoreHooksApi, Logger } from '../../types';
 import { stats, attempt } from './config';
 
 export const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
@@ -9,6 +8,18 @@ export const doc: Document = win.document;
 export let coreHooks: CoreHooksApi | null = null;
 export function setCoreHooks(hooks: CoreHooksApi | null): void {
   coreHooks = hooks;
+}
+
+export let coreSession: AniListSession | null = null;
+export function setCoreSession(session: AniListSession | null): void {
+  coreSession = session;
+}
+
+export let fastLoadLog: Logger<true> | null = null;
+export let fastLoadRpcLog: ChannelLogger<true> | null = null;
+export function setFastLoadLogs(log: Logger<true> | null, rpc: ChannelLogger<true> | null): void {
+  fastLoadLog = log;
+  fastLoadRpcLog = rpc;
 }
 
 export const navListeners: Array<() => void> = [];
@@ -96,13 +107,10 @@ export function getViewerFromWindow(): { id: number; name: string } {
       if (typeof user.name === 'string' && user.name) res.name = user.name;
     }
   });
-  if (!res.id) {
-    const storedId = Number(gmStore.get('al_user_id', 0));
-    if (storedId > 0) res.id = storedId;
-  }
-  if (!res.name) {
-    const stored = gmStore.get<string | null>('al_username', null);
-    if (stored) res.name = stored;
+  if (!res.id || !res.name) {
+    const snap = coreSession?.peek();
+    if (!res.id && snap?.userId) res.id = snap.userId;
+    if (!res.name && snap?.username) res.name = snap.username;
   }
   if (!res.name && doc) {
     const href = doc

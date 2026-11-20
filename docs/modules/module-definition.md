@@ -11,7 +11,10 @@ import { defineModule } from '../../core/registry';
 ## Complete Schema Reference
 
 ```ts
-export interface ModuleMeta<TId extends string = string> {
+export interface ModuleMeta<
+  TId extends string = string,
+  TDebug extends ModuleDebugDef<any> | undefined = undefined
+> {
   id: TId;
   key: string;
   legacy?: string[];
@@ -25,14 +28,16 @@ export interface ModuleMeta<TId extends string = string> {
   after?: string[];
   accounts?: string[];
   options?: SettingOption[];
-  debug?: ModuleDebugDef;
+  debug?: TDebug;
   standalone?: ModuleStandaloneDef;
-  migrate?: () => void;
-  setup: (ctx: ScopedFeatureContext<TId>) => void | Promise<void>;
+  migrate?: (m: MigrateContext) => void;
+  setup: (
+    ctx: ScopedFeatureContext<TId, CanModuleDebug<TDebug>, ModuleChannels<TDebug>>
+  ) => void | Promise<void>;
 }
 ```
 
-`ScopedFeatureContext<TId>` extends `FeatureContext`, scoping `ctx.services.provide(localName, impl)` to keys registered under `${id}:*` in `ServiceMap` while remaining assignable to helpers taking `FeatureContext`.
+`ScopedFeatureContext` scopes `ctx.services.provide(localName, impl)` to keys registered under `${id}:*` in `ServiceMap` and types `ctx.log` / `ctx.log.channel(...)` from your literal `debug` definition (blocking `.debug()` and undeclared channels at compile time). Contexts with `debug` enabled are assignable to `FeatureContext<true>` and `FeatureContext`.
 
 ---
 
@@ -44,7 +49,7 @@ export interface ModuleMeta<TId extends string = string> {
 - Used as the namespace for:
   - Module-scoped storage (`ctx.storage` prefixes keys with `ala_mod_<id>_`).
   - Published services (`ctx.services.provide('quickEdit', fn)` publishes `'manualOverrides:quickEdit'`).
-  - Default debug channel name (unless overridden by `debug.channel`).
+  - Consolidated debug configuration scope (`debug[id]` inside `ala_setting_debug`).
 
 ### `key` (required)
 - Setting name stored in Tampermonkey storage under `ala_setting_<key>`.
@@ -150,25 +155,48 @@ export interface SettingOption {
 Set `childOf: 'someToggleOptionKey'` on a secondary option (such as an interval number tied to an Auto-Sync toggle) to collapse/disable it unless both the module and `someToggleOptionKey` are enabled.
 
 ### Atomic Registration
-`Settings.register` validates every key (`[toggle, ...options, debug]`) before committing any key to `ROWS` or `features`. A duplicate key anywhere in `options` or `debug` throws immediately and rolls back atomically with zero partial keys left behind.
+`Settings.register` validates every key (`[toggle, ...options]`) and reserved debug channel names (rejecting `'general'` case-insensitively) before committing anything to `ROWS` or `features`. Any collision throws immediately and rolls back atomically with zero partial keys left behind.
 
 ---
 
-## Debug Channel (`debug`)
+## Debug Logging (`debug`)
 
-```ts
-debug: {
-  key: 'debugMyMod',
-  title: 'My Module Debug',
-  help: 'Log verbose activity for My Module in the console.',
-  channel?: 'myMod',          // defaults to module id
-  pattern?: /^\[MYMOD/i       // optional tag matcher for standalone logDebug() calls
-}
-```
+Modules support three `debug` configurations:
 
-- Automatically registers `ala_setting_<debug.key>` (defaulting to `false`) and binds `ctx.debug` inside `setup(ctx)`.
-- In Settings, appears inside **Advanced → Developer Mode**, automatically wrapped in `[data-debug-for="<toggleKey>"]` so it collapses whenever either **Developer Mode** or your module is toggled off.
-- Turning **Developer Mode** off mutes all `ctx.debug.log(...)` output cleanly without wiping your individual module debug toggle preferences.
+1. **Omitted (`debug` not set):** `ctx.log.warn(...)` and `ctx.log.error(...)` prefix `[<title>]`, `ctx.log.debug(...)` is blocked at compile time, and nothing is added to Developer Mode.
+2. **Warn/error custom prefix only (`debug: false`):** Customize `[Label]` and optional sub-channel prefixes for `.warn()`/`.error()` without adding dead toggles to Developer Mode:
+   ```ts
+   debug: {
+     debug: false,
+     label: 'AniSongs',
+     channels: {
+       audio: { label: 'Audio', debug: false }
+     }
+   }
+   ```
+3. **Debuggable (`debug?: true`):** Registers an entry under `debug[id]` in the consolidated `ala_setting_debug` JSON setting and renders inside **Advanced → Developer Mode** wrapped in `[data-debug-for="<toggleKey>"]`:
+   ```ts
+   debug: {
+     label: 'Fast Load',         // optional console tag (defaults to meta.title)
+     title: 'Fast Load Debug',
+     help: 'Log GraphQL caching, prefetching, deduplication, and Web Worker RPC activity.',
+     channels: {
+       rpc: {
+         label: 'RPC',
+         title: 'Web Worker RPC',
+         debug: true,
+         help: 'Log Web Worker RPC requests, cache hits/misses, and prefetches.'
+       }
+     }
+   }
+   ```
+
+- **Single toggle vs. 2-tier collapsible group:**
+  - If a module declares zero `debug: true` channels, Developer Mode renders a single master toggle (`debug[id] = { enabled: false }`).
+  - If a module declares one or more `debug: true` channels, Developer Mode renders a master toggle plus a collapsible child group containing **General** (`channels.general`, for `ctx.log.debug(...)`) and each `debug: true` channel (`channels.<chId>`, defaulting to `true`). The channel key `'general'` is reserved.
+  - Channels with `debug: false` inside a debuggable module format `[Label (Sub)]` for `.warn()`/`.error()`, register no toggle, and block `.debug()` at compile time.
+- **Non-destructive muting:** Turning **Developer Mode** off mutes all `.debug()` output cleanly without wiping your nested `debug` preferences.
+- **Backup format:** All Core/Kernel (`debug.core`) and module debug preferences live together under a single `"debug"` object next to `"devModeEnabled"` in settings backups.
 
 ---
 
@@ -193,9 +221,27 @@ standalone: {
 
 ## Migrations & Error Isolation
 
-### `migrate?: () => void`
+### `migrate?: (m: MigrateContext) => void`
 - Runs during `runMigrations()` **after** `Settings.migrate()`, **even if your module is disabled**.
-- Use `migrate()` for one-time data schema upgrades or inspecting legacy localStorage/store keys before modules boot.
+- Receives a scoped `MigrateContext` (`m`) so migrations never hardcode `'ala_mod_<id>_'` or `'ala_setting_'` prefixes:
+  - `m.id`: Module ID.
+  - `m.storage`: Module-scoped `StorageScope` (`get`, `set`, `del`, `watch`, `clear` under `ala_mod_<id>_`).
+  - `m.settings`: `{ has(key), get(key), set(key, val) }` backed by `Settings`.
+  - `m.legacy`: `{ get(key, def?), set(key, val), del(key) }` for reading and deleting pre-migration raw GM storage keys.
+  - Writes via `m.storage` and `m.legacy` are automatically disabled once `migrate(m)` finishes.
+- **Required `@migration` annotation:** Every `migrate` hook or migration helper must document its origin, kind (`storage`, `import`, or `cleanup`), and rough removal timeframe (enforced by `__tests__/conventions.test.ts`):
+  ```ts
+  migrate(m) {
+    // @migration(from: "v0.9.1", kind: "storage", sunset: "2-3 releases")
+    const oldVal = m.legacy.get('old_raw_key', null);
+    if (oldVal !== null) {
+      if (m.storage.get('new_key', null) === null) {
+        m.storage.set('new_key', oldVal);
+      }
+      m.legacy.del('old_raw_key');
+    }
+  }
+  ```
 
 ### Fault Isolation
 If `migrate()`, synchronous `setup(ctx)`, asynchronous `setup(ctx)` rejection, or any individual `CleanupFn` throws:

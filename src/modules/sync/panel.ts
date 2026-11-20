@@ -6,14 +6,14 @@ import {
   exchangeMalCode,
   setMalUiSink
 } from '../../api/mal';
-import { store, tryOr, esc, debounce } from '../../utils/helpers';
-import { findSyncPanelAnchor, listRoute, navUserName } from '../../utils/anilistDom';
+import { tryOr, esc, debounce } from '../../utils/helpers';
+import { findSyncPanelAnchor, listRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
 import type { FeatureContext } from '../../types';
-import { progress, syncStatus, onProgressChange, onStateChange } from './state';
+import { progress, syncStatus, syncStore, onProgressChange, onStateChange } from './state';
 import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';
 
-let panelCtx: FeatureContext | null = null;
+let panelCtx: FeatureContext<true> | null = null;
 
 const PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
@@ -217,7 +217,7 @@ export function renderPanel(): void {
       ['ANIME', 'Anime sync'],
       ['MANGA', 'Manga sync']
     ])
-      .map(([type, label]) => `<div class="almal-meta-row">${label}: ${timeEl(store.get('last_run_' + type, 0))}</div>`)
+      .map(([type, label]) => `<div class="almal-meta-row">${label}: ${timeEl(syncStore.get('last_run_' + type, 0))}</div>`)
       .join('');
     html += `<div class="almal-actions">
         ${
@@ -317,14 +317,14 @@ const ACTIONS: Record<string, () => void> = {
 };
 
 let lastMountTry = 0;
-let retryTimer: ReturnType<typeof setTimeout> | 0 = 0;
+let retryCancel: (() => void) | null = null;
 let selfLookup = false;
 
 function isOwnList(): boolean {
   const route = listRoute();
   const owner = route?.owner || '';
   if (!owner) return false;
-  const me = store.get<string | null>('al_username', null) || navUserName();
+  const me = panelCtx?.session.username || '';
   if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
     selfLookup = true;
     void tryOr(() => panelCtx!.api.viewer()).then(() => mountSoon());
@@ -336,12 +336,13 @@ const onListRoute = (): boolean =>
   !!panelCtx?.get('syncEnabled') && LIST_PATH_RE.test(location.pathname) && isOwnList();
 
 export function mountPanel(): void {
-  clearTimeout(retryTimer);
+  retryCancel?.();
+  retryCancel = null;
   if (!panelCtx || !onListRoute() || document.getElementById('almal-panel')) return;
   lastMountTry = Date.now();
   const anchor = findSyncPanelAnchor();
   if (!anchor) {
-    retryTimer = setTimeout(mountSoon, 700);
+    retryCancel = panelCtx.timeout(mountSoon, 700);
     return;
   }
   const panelEl = document.createElement('div');
@@ -359,7 +360,7 @@ export function mountPanel(): void {
 }
 const mountSoon = debounce(mountPanel, 250);
 
-export function initSyncPanel(ctx: FeatureContext): void {
+export function initSyncPanel(ctx: FeatureContext<true>): void {
   panelCtx = ctx;
   ctx.ownUi('#almal-panel');
   ctx.addStyle('almal-style', PANEL_CSS);
@@ -378,13 +379,14 @@ export function initSyncPanel(ctx: FeatureContext): void {
   );
   ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
   ctx.onCleanup(onStateChange(renderPanel));
-  ctx.onCleanup(store.watch('mal_token', () => renderPanel()));
+  ctx.accounts.watch('mal', () => renderPanel());
 
   ctx.onBodyMutation(() => {
     if (!document.getElementById('almal-panel') && Date.now() - lastMountTry > 1000 && onListRoute()) mountSoon();
   });
   ctx.onNav(() => {
-    clearTimeout(retryTimer);
+    retryCancel?.();
+    retryCancel = null;
     document.getElementById('almal-panel')?.remove();
     mountSoon();
   });
@@ -406,8 +408,8 @@ export function initSyncPanel(ctx: FeatureContext): void {
   }, 2000);
 
   ctx.onCleanup(() => {
-    clearTimeout(retryTimer);
-    retryTimer = 0;
+    retryCancel?.();
+    retryCancel = null;
     selfLookup = false;
     document.getElementById('almal-panel')?.remove();
     if (panelCtx === ctx) panelCtx = null;

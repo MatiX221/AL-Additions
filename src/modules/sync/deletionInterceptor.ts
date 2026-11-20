@@ -68,7 +68,7 @@ export function extractDialogMedia(root: Element = document.body): { mediaId: nu
   return { mediaId, type, title: title || `Media #${mediaId}`, malId };
 }
 
-export function initDeletionInterceptor(ctx: FeatureContext): void {
+export function initDeletionInterceptor(ctx: FeatureContext<true>): void {
   if (typeof window === 'undefined' || location.hostname !== 'anilist.co') return;
 
   ctx.hooks.onGqlFetch((ev) => {
@@ -76,7 +76,7 @@ export function initDeletionInterceptor(ctx: FeatureContext): void {
     if (!queryStr) return;
 
     if (ev.phase === 'request' && queryStr.includes('DeleteMediaListEntry')) {
-      ctx.debug.log('DeleteMediaListEntry intercepted for variables:', ev.variables);
+      ctx.log.debug('DeleteMediaListEntry intercepted for variables:', ev.variables);
       if (ctx.get('syncMode') === 'exact') {
         const candidate = activeCandidate || extractDialogMedia(document.body);
         if (candidate) {
@@ -87,7 +87,7 @@ export function initDeletionInterceptor(ctx: FeatureContext): void {
             title: candidate.title,
             deletedAt: Date.now()
           });
-          ctx.debug.log('Queued pending deletion for exact match:', candidate);
+          ctx.log.debug('Queued pending deletion for exact match:', candidate);
           activeCandidate = null;
           log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, 'info');
         }
@@ -97,7 +97,7 @@ export function initDeletionInterceptor(ctx: FeatureContext): void {
 
     if (ev.phase === 'response' && queryStr.includes('SaveMediaListEntry') && ev.variables?.mediaId) {
       const mediaId = Number(ev.variables.mediaId);
-      ctx.debug.log('SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:', mediaId);
+      ctx.log.debug('SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:', mediaId);
       removePendingDelete(mediaId, 'ANIME');
       removePendingDelete(mediaId, 'MANGA');
     }

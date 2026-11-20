@@ -1,8 +1,10 @@
 import { registerAccountProvider } from '../core/accounts';
 import { showToast } from '../core/toast';
-import { authError, gm, logDebug, memo, openTab, randomString, sleep, store } from '../utils/helpers';
+import { authError, createCoreLogger, gm, memo, openTab, randomString, sleep, store } from '../utils/helpers';
 import { RateLimiter } from '../utils/limiter';
 import { strictTitle } from '../utils/matching';
+
+const malLog = createCoreLogger('mal');
 
 export const MAL_AUTH_URL = 'https://myanimelist.net/v1/oauth2/authorize';
 export const MAL_TOKEN_URL = 'https://myanimelist.net/v1/oauth2/token';
@@ -48,7 +50,7 @@ export function log(msg: any, level: 'info' | 'warn' | 'error' | 'success' = 'in
   try {
     uiSink?.onLog?.({ line, message: lastNotice, level });
   } catch (e) {
-    console.error('[AL→MAL Sync] uiSink.onLog failed:', e);
+    malLog.error('uiSink.onLog failed:', e);
   }
 }
 
@@ -60,7 +62,7 @@ export function toast(msg: string, isError?: boolean, closeTab?: boolean): void 
       return;
     }
   } catch (e) {
-    console.error('[AL→MAL Sync] uiSink.onToast failed:', e);
+    malLog.error('uiSink.onToast failed:', e);
   }
   showToast(msg, { type: isError ? 'error' : 'success', closeTab });
 }
@@ -170,11 +172,13 @@ export function captureCredentials(): void {
   }
 }
 
+export const isMalConnected = (): boolean => !!store.get('mal_token', null);
+
 registerAccountProvider({
   id: 'mal',
   name: 'MyAnimeList',
   secretKeys: MAL_SECRET_KEYS,
-  isConnected: () => !!store.get('mal_token', null),
+  isConnected: () => isMalConnected(),
   connect: () => malConnect(),
   disconnect: () => clearMalAuth(),
   onAuthCallback: () => captureCredentials()
@@ -265,9 +269,9 @@ async function malRequestWithToken(
   await malLimiter.acquire(checkCancel ?? hooks.checkCancel);
   const token = await malEnsureToken(failedToken);
   onTokenResolved?.();
-  logDebug('[SYNC]', `MAL ${method} ${url}`, data ? { data } : '');
+  malLog.debug(`MAL ${method} ${url}`, data ? { data } : '');
   const res = await gm.request(url, { method, data, timeout, headers: { Authorization: `Bearer ${token}`, ...headers } });
-  logDebug('[SYNC]', `MAL ${method} response: ${res.status} for ${url}`);
+  malLog.debug(`MAL ${method} response: ${res.status} for ${url}`);
   if (looksLimited(res)) malLimiter.limit(parseRetryAfterMs(res.responseHeaders, res.status === 429 ? 5000 : 60000));
   else if (res.status >= 500) malLimiter.limit(2000);
   else if (res.status >= 200 && res.status < 300) malLimiter.success();

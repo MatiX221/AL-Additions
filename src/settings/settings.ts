@@ -163,15 +163,15 @@ function register(f: FeatureMeta): void {
   }));
 
   const batch = [toggle, ...options];
-  if (f.debug) {
-    batch.push({
-      key: f.debug.key,
-      type: 'toggle',
-      def: false,
-      legacy: [f.debug.key],
-      title: f.debug.title,
-      help: f.debug.help
-    });
+  if (f.debug && f.debug.debug !== false) {
+    const channelEntries = Object.entries(f.debug.channels || {});
+    for (const [chId] of channelEntries) {
+      if (chId.toLowerCase() === 'general') {
+        throw new Error(
+          `Debug channel "${chId}" for module "${f.id}" conflicts with reserved "general" channel`
+        );
+      }
+    }
   }
   const seenKeys = new Set<string>();
   for (const row of batch) {
@@ -223,6 +223,11 @@ function registerCoreSetting(o: SettingOption): SettingRow {
   return row;
 }
 
+function has(key: string): boolean {
+  if (!hasOwn(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
+  return store.get(PREFIX + key, undefined) !== undefined;
+}
+
 function get(key: string): any {
   if (!hasOwn(ROWS, key)) throw new Error(`Unknown setting: ${key}`);
   const r = ROWS[key];
@@ -238,13 +243,16 @@ function set(key: string, raw: any): void {
 
 function migrate(): void {
   safe(() => {
+    // @migration(from: "v0.9.0", kind: "cleanup", sunset: "2-3 releases")
     store.del('al_token');
 
     for (const r of Object.values(ROWS)) {
       if (store.get(PREFIX + r.key, undefined) !== undefined) continue;
       for (const name of r.legacy) {
+        // @migration(from: "v0.8.0", kind: "storage", sunset: "2-3 releases")
         let v: any = store.get(PREFIX + name, undefined);
         if (v === undefined) {
+          // @migration(from: "pre-0.8.0", kind: "storage", sunset: "2-3 releases")
           const raw = localStorage.getItem('ALAdditions:' + name);
           if (raw != null) {
             try {
@@ -263,4 +271,4 @@ function migrate(): void {
   }, 'settings migration');
 }
 
-export const Settings = { get, set, register, registerCoreSetting, migrate };
+export const Settings = { has, get, set, register, registerCoreSetting, migrate };

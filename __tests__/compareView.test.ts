@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   normalizeStatus,
   getEntryMediaId,
@@ -6,6 +6,8 @@ import {
   compareEntries,
   type EntryData
 } from '../src/modules/compareView';
+import { loadAllEntriesViaMediaList } from '../src/modules/compareView/loader';
+import { AniList } from '../src/api/anilist';
 
 describe('compareView: normalizeStatus', () => {
   it('handles empty, null, or undefined values with fallback', () => {
@@ -249,3 +251,66 @@ describe('compareView: DOM structure & score formatting', () => {
   });
 });
 
+describe('compareView: ctx.session integration & ctx.log usage', () => {
+  it('uses ctx.session.peek({ reconcile: true }) and logs via ctx.log.debug and ctx.log.error', async () => {
+    history.replaceState({}, '', '/user/OtherUser/animelist/compare');
+    const compareRoot = document.createElement('div');
+    compareRoot.className = 'compare';
+    const sidebar = document.createElement('div');
+    document.body.append(compareRoot, sidebar);
+
+    const debugLog = vi.fn();
+    const errorLog = vi.fn();
+    const peekSpy = vi.spyOn(AniList.session, 'peek');
+
+    const makeMockCtx = (overrides: Record<string, any> = {}) =>
+      ({
+        session: AniList.session,
+        hooks: {
+          getCacheBridge: () => null,
+          setPrefetchPaused: () => () => {}
+        },
+        api: {
+          viewer: vi.fn().mockResolvedValue(null),
+          getMediaList: vi.fn(),
+          ...overrides
+        },
+        log: {
+          label: 'Compare View',
+          title: 'Compare View Debug',
+          canDebug: true,
+          enabled: () => true,
+          debug: debugLog,
+          warn: vi.fn(),
+          error: errorLog,
+          channel: vi.fn()
+        }
+      }) as any;
+
+    try {
+      const stateMissing: any = { isLoadingAll: false, loadFailed: false, loadAbortState: null };
+      await loadAllEntriesViaMediaList(makeMockCtx(), stateMissing, compareRoot, sidebar);
+      expect(peekSpy).toHaveBeenCalledWith({ reconcile: true });
+      expect(stateMissing.loadFailed).toBe(true);
+      expect(debugLog).toHaveBeenCalledWith('Missing viewer or other user for getMediaList, keeping fallback');
+
+      (window as any).__NUXT__ = { state: { auth: { user: { id: 100, name: 'MeUser' } } } };
+      const boom = new Error('network boom');
+      const getMediaList = vi.fn().mockRejectedValue(boom);
+      const stateErr: any = { isLoadingAll: false, loadFailed: false, loadAbortState: null };
+      await loadAllEntriesViaMediaList(
+        makeMockCtx({ getMediaList }),
+        stateErr,
+        compareRoot,
+        sidebar
+      );
+      expect(getMediaList.mock.calls.some(([target, type]) => target === 100 && type === 'ANIME')).toBe(true);
+      expect(stateErr.loadFailed).toBe(true);
+      expect(errorLog).toHaveBeenCalledWith('CompareView getMediaList error:', boom);
+    } finally {
+      delete (window as any).__NUXT__;
+      peekSpy.mockRestore();
+      history.replaceState({}, '', '/');
+    }
+  });
+});
