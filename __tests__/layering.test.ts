@@ -225,7 +225,7 @@ describe('Architecture: Zero Import-Time Side Effects', () => {
       const docSpy = vi.spyOn(document, 'addEventListener');
 
       try {
-        await import(`../src/modules/${dir}/index.ts`);
+        await import(/* @vite-ignore */ `../src/modules/${dir}/index.ts`);
 
         for (const fn of gmFns) {
           expect(fn, `GM_* called while importing modules/${dir}`).not.toHaveBeenCalled();
