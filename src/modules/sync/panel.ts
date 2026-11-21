@@ -7,7 +7,6 @@ import {
   setMalUiSink
 } from '../../api/mal';
 import { tryOr, esc, debounce } from '../../utils/helpers';
-import { findSyncPanelAnchor, listRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
 import type { FeatureContext } from '../../types';
 import { progress, syncStatus, syncStore, onProgressChange, onStateChange } from './state';
@@ -320,9 +319,32 @@ let lastMountTry = 0;
 let retryCancel: (() => void) | null = null;
 let selfLookup = false;
 
+function listRouteOwner(): string {
+  const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
+  if (!m) return '';
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
+}
+
+function findPanelAnchor(): HTMLElement | null {
+  const shuffle = document.querySelector<HTMLElement>('[title*="Random List Entry" i], [aria-label*="Random List Entry" i]');
+  if (shuffle) return shuffle.parentElement || shuffle;
+  if (!document.body) return null;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let t: Node | null; (t = walker.nextNode()); ) {
+    const el = t.parentElement;
+    if (t.nodeValue?.trim() === 'Sort' && el?.matches('div, section, aside') && el.parentElement) {
+      return el.parentElement;
+    }
+  }
+  return null;
+}
+
 function isOwnList(): boolean {
-  const route = listRoute();
-  const owner = route?.owner || '';
+  const owner = listRouteOwner();
   if (!owner) return false;
   const me = panelCtx?.session.username || '';
   if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
@@ -340,7 +362,7 @@ export function mountPanel(): void {
   retryCancel = null;
   if (!panelCtx || !onListRoute() || document.getElementById('almal-panel')) return;
   lastMountTry = Date.now();
-  const anchor = findSyncPanelAnchor();
+  const anchor = findPanelAnchor();
   if (!anchor) {
     retryCancel = panelCtx.timeout(mountSoon, 700);
     return;

@@ -1,6 +1,5 @@
 import { defineModule } from '../../core/registry';
-import { findOverviewContainer, mediaRoute } from '../../utils/anilistDom';
-import { memo, debounce } from '../../utils/helpers';
+import { memo } from '../../utils/helpers';
 import {
   DEFAULT_ANISONGS_CONFIG,
   validateAniSongsConfig,
@@ -963,64 +962,38 @@ defineModule({
       overview.appendChild(root);
     }
 
-    let cur: AnisongsState | null = null;
     let backoff = { id: null as string | null, until: 0 };
-    const animeId = (): string | null => {
-      const r = mediaRoute();
-      return r && r.kind === 'anime' ? String(r.id) : null;
-    };
 
-    async function sync(): Promise<void> {
-      const id = animeId();
-      if (!id) {
-        document.getElementById(ROOT)?.remove();
-        cur = null;
-        return;
-      }
-      if (cur?.id === id) return;
+    ctx.onRoute(/^\/anime\/(\d+)(?:\/|$)/, async (rc) => {
+      const id = rc.match![1];
       if (backoff.id === id && Date.now() < backoff.until) return;
       document.getElementById(ROOT)?.remove();
       const mine: AnisongsState = { id, themes: null, busy: true };
-      cur = mine;
       try {
         const themes = await loadThemes(id, id);
-        if (cur !== mine) return;
+        if (rc.signal.aborted) return;
         if (!themes.OP.length && !themes.ED.length) return;
         mine.themes = themes;
-        const overview = await ctx.waitForSelector('.overview', 10000);
-        if (cur === mine && overview && animeId() === id) mount(mine as { id: string; themes: ThemesGroup }, overview);
+        const overview = await rc.waitForSelector('.overview', 10000);
+        if (rc.signal.aborted || !overview) return;
+        mount(mine as { id: string; themes: ThemesGroup }, overview);
+        rc.onCleanup(
+          ctx.onBodyMutation(() => {
+            if (!rc.signal.aborted && !document.getElementById(ROOT)) {
+              const ov = document.querySelector<HTMLElement>('.overview');
+              if (ov) mount(mine as { id: string; themes: ThemesGroup }, ov);
+            }
+          })
+        );
       } catch (err) {
+        if (rc.signal.aborted) return;
         ctx.log.error('Anisongs sync error:', err);
-        if (cur === mine) {
-          cur = null;
-          backoff = { id, until: Date.now() + 30000 };
-        }
+        backoff = { id, until: Date.now() + 30000 };
       } finally {
         mine.busy = false;
       }
-    }
-
-    function repair(): void {
-      const id = animeId();
-      if (!id) return;
-      if (cur?.id !== id) return void sync();
-      if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
-        const overview = findOverviewContainer();
-        if (overview) {
-          try {
-            mount(cur as { id: string; themes: ThemesGroup }, overview);
-          } catch (err) {
-            ctx.log.error('Anisongs repair error:', err);
-          }
-        }
-      }
-    }
-
-    ctx.ready(() => void sync());
-    ctx.onNav(() => void sync());
-    ctx.onBodyMutation(debounce(repair, 200));
+    });
     ctx.onCleanup(() => {
-      cur = null;
       document.getElementById(ROOT)?.remove();
     });
   }

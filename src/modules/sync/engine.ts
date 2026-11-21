@@ -7,11 +7,11 @@ import {
   breaker,
   log,
   clearMalAuth,
-  isMalConnected
+  isMalConnected,
+  strictTitle
 } from '../../api/mal';
 import { hooks } from '../../api/mal';
 import { tryOr, authError } from '../../utils/helpers';
-import { strictTitle } from '../../utils/matching';
 import type { AniListClient } from '../../types';
 import {
   TYPES,

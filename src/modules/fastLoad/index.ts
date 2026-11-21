@@ -1,5 +1,8 @@
 import { defineModule } from '../../core/registry';
-import { detectFastLoad, isBuiltInRunning, markBuiltIn } from '../../utils/standalone';
+let builtInRunning = false;
+const detectStandaloneFastLoad = (): boolean =>
+  !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !builtInRunning;
+
 import { CFG, GQL_ORIGIN, MEDIA_ORIGIN, attempt } from './config';
 import {
   win,
@@ -51,13 +54,13 @@ defineModule({
   },
   standalone: {
     name: 'AniList Fast Load',
-    probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning('fastLoad')
+    probe: detectStandaloneFastLoad
   },
   migrate(m) {
     // @migration(from: "v0.9.1", kind: "cleanup", sunset: "2-3 releases")
     m.legacy.del('alfl:workerUrl');
     m.legacy.del('alfl:rpc:listTpl:v2');
-    if (!m.storage.get<boolean>('localStorageCleaned', false) && !detectFastLoad()) {
+    if (!m.storage.get<boolean>('localStorageCleaned', false) && !detectStandaloneFastLoad()) {
       for (const k of [
         'alfl:taxonomy:v1',
         'alfl:routes:v1',
@@ -84,7 +87,7 @@ defineModule({
     }
 
     win.__ALA_FAST_LOAD__ = '0.4.3';
-    markBuiltIn('fastLoad');
+    builtInRunning = true;
     setCoreHooks(ctx.hooks);
     setCoreSession(ctx.session);
     setCoreStorage(ctx.storage);

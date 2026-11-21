@@ -1,7 +1,6 @@
 import { defineModule } from '../../core/registry';
-import { ANILIST_SELECTORS, mediaRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
-import { openTab, debounce } from '../../utils/helpers';
+import { openTab } from '../../utils/helpers';
 import { getEffectiveMalId, isIgnored } from '../../api/malOverrides';
 import type { MediaRoute } from '../../types';
 
@@ -42,7 +41,6 @@ defineModule({
       return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
     };
 
-    let disposed = false;
     let activeTimerCleanup: (() => void) | null = null;
     let attachedAnchor: { h1: HTMLElement; route: MediaRoute } | null = null;
     let quickEditFn = ctx.services.get('manualOverrides:quickEdit') ?? null;
@@ -193,45 +191,35 @@ defineModule({
       mountEditButton(h1, route);
     }
 
-    let token = 0;
-    let placedKey: string | null = null;
-    let placing = false;
+    ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, async (rc) => {
+      rc.onCleanup(() => {
+        activeTimerCleanup?.();
+        activeTimerCleanup = null;
+        attachedAnchor = null;
+        document.getElementById(ID)?.remove();
+        document.getElementById(EDIT_ID)?.remove();
+      });
+      const kind = rc.match![1] as 'anime' | 'manga';
+      const route: MediaRoute = {
+        kind,
+        type: kind.toUpperCase() as 'ANIME' | 'MANGA',
+        id: Number(rc.match![2])
+      };
 
-    async function place(): Promise<void> {
-      if (disposed) return;
-      const route = mediaRoute();
-      const key = route && `${route.type}:${route.id}`;
-      if (key && key === placedKey && document.getElementById(ID)) return;
-      activeTimerCleanup?.();
-      activeTimerCleanup = null;
-      attachedAnchor = null;
-      document.getElementById(ID)?.remove();
-      document.getElementById(EDIT_ID)?.remove();
-      placedKey = null;
-      if (!route) return;
+      const ensureMounted = () => {
+        if (rc.signal.aborted || document.getElementById(ID)) return;
+        const h1 = document.querySelector<HTMLElement>('.page-content .header .content > h1');
+        if (h1) attach(h1, route);
+      };
 
-      const mine = ++token;
-      placing = true;
-      try {
-        const h1 = await ctx.waitForSelector(ANILIST_SELECTORS.mediaTitle, 8000);
-        if (disposed || !h1 || mine !== token || mediaRoute()?.id !== route.id || document.getElementById(ID)) return;
-        attach(h1, route);
-        placedKey = key;
-      } finally {
-        if (mine === token) placing = false;
-      }
-    }
+      const h1 = await rc.waitForSelector<HTMLElement>('.page-content .header .content > h1', 8000);
+      if (rc.signal.aborted || !h1) return;
+      if (!document.getElementById(ID)) attach(h1, route);
 
-    const repair = debounce(() => {
-      if (!disposed && placedKey && !placing && !document.getElementById(ID)) void place();
-    }, 400);
+      rc.onCleanup(ctx.onBodyMutation(ensureMounted));
+    });
 
-    void place();
-    ctx.onNav(() => void place());
-    ctx.onBodyMutation(repair);
     ctx.onCleanup(() => {
-      disposed = true;
-      token++;
       activeTimerCleanup?.();
       activeTimerCleanup = null;
       attachedAnchor = null;

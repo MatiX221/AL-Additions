@@ -2,7 +2,15 @@ import { registerAccountProvider } from '../core/accounts';
 import { showToast } from '../core/toast';
 import { authError, createCoreLogger, gm, memo, openTab, randomString, sleep, store } from '../utils/helpers';
 import { RateLimiter } from '../utils/limiter';
-import { strictTitle } from '../utils/matching';
+
+export const strictTitle = (s: string | null | undefined): string =>
+  String(s || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[’‘'`]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
 
 const malLog = createCoreLogger('mal');
 

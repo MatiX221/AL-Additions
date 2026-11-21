@@ -1,7 +1,6 @@
 import type { FeatureContext } from '../../types';
 import type { MediaListEntryItem } from '../../api/anilist';
 import { esc } from '../../utils/helpers';
-import { compareRoute } from '../../utils/anilistDom';
 import {
   compareEntries,
   getEntryData,
@@ -38,6 +37,20 @@ export function createCompareRpcBlocker(state: CompareState) {
     (/\bcompareWithAuthList\b/i.test(q || '') || Boolean(vars?.compareWithAuthList));
 }
 
+function parseCompareRoute(pathname = location.pathname): { userName: string; type: 'ANIME' | 'MANGA' } | null {
+  const m = pathname.match(/^\/user\/([^/]+)\/(animelist|mangalist)\/compare(?:\/|$)/i);
+  if (!m) return null;
+  let userName = m[1];
+  try {
+    userName = decodeURIComponent(userName);
+  } catch {}
+  const isManga = m[2].toLowerCase().startsWith('manga');
+  return {
+    userName,
+    type: isManga ? 'MANGA' : 'ANIME'
+  };
+}
+
 async function resolveCompareUsers(ctx: FeatureContext<true>): Promise<{
   viewerId?: number;
   viewerName?: string;
@@ -45,7 +58,7 @@ async function resolveCompareUsers(ctx: FeatureContext<true>): Promise<{
   otherName?: string;
   type: 'ANIME' | 'MANGA';
 }> {
-  const route = compareRoute();
+  const route = parseCompareRoute();
   const type: 'ANIME' | 'MANGA' =
     route?.type || (location.pathname.toLowerCase().includes('mangalist') ? 'MANGA' : 'ANIME');
   const bridge = ctx.hooks.getCacheBridge();

@@ -1,5 +1,4 @@
 import { defineModule } from '../../core/registry';
-import { ANILIST_SELECTORS } from '../../utils/anilistDom';
 import { clean, debounce } from '../../utils/helpers';
 
 interface AiringCacheEntry {
@@ -73,7 +72,7 @@ defineModule({
 
     function watchingEntries(): Element[] {
       const out: Element[] = [];
-      for (const wrap of document.querySelectorAll(ANILIST_SELECTORS.listWrap)) {
+      for (const wrap of document.querySelectorAll('.list-wrap')) {
         if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll('.list-entries .entry')));
       }
       return out;

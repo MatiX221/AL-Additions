@@ -1,6 +1,5 @@
 import { defineModule } from '../../core/registry';
 import { externalReleased } from '../../api/scrapers';
-import { findMediaSidebarSpot, mediaRoute } from '../../utils/anilistDom';
 import { tryOr, safe } from '../../utils/helpers';
 import type { MediaRoute } from '../../types';
 
@@ -70,7 +69,8 @@ defineModule({
     }
 
     function findSpot(): { parent: HTMLElement; before: HTMLElement } | null {
-      return findMediaSidebarSpot();
+      const el = document.querySelector<HTMLElement>('.sidebar > .data');
+      return el?.parentElement && el.parentElement !== document.body ? { parent: el.parentElement, before: el } : null;
     }
 
     const scoreStep = (f: string | null): string => (f === 'POINT_10_DECIMAL' ? '0.1' : '1');
@@ -85,6 +85,7 @@ defineModule({
     };
     const scoreFormat = async (): Promise<string | null> => (await tryOr(() => ctx.api.viewer()))?.scoreFormat || null;
 
+    let currentRoute: MediaRoute | null = null;
     let shown: string | null = null;
     let gen = 0;
     let rendering = false;
@@ -176,7 +177,7 @@ defineModule({
     }
 
     async function render(force = false): Promise<void> {
-      const route = mediaRoute();
+      const route = currentRoute;
       if (!route) {
         shown = null;
         panel()?.remove();
@@ -198,7 +199,7 @@ defineModule({
       if (!ctx.api.hasAuth()) return renderConnect(key, 'none');
 
       const g = gen;
-      const stale = (): boolean => g !== gen || mediaRoute()?.id !== route.id;
+      const stale = (): boolean => g !== gen || currentRoute?.id !== route.id;
       rendering = true;
       ctx.log.debug('Rendering media info panel for:', key);
       try {
@@ -409,18 +410,29 @@ defineModule({
 
     ctx.listen(window, 'load', () => schedule(500), { once: true });
     ctx.ready(() => schedule(document.readyState === 'complete' ? 500 : 1200));
-    ctx.onNav(() => {
-      const r = mediaRoute();
-      if (r && shown === `${r.type}:${r.id}` && panel()) return;
+    ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
+      const kind = rc.match![1] as 'anime' | 'manga';
+      const r: MediaRoute = {
+        kind,
+        type: kind.toUpperCase() as 'ANIME' | 'MANGA',
+        id: Number(rc.match![2])
+      };
+      currentRoute = r;
       gen++;
       shown = null;
       routeAt = Date.now();
       retry = { key: null, at: 0, count: 0 };
       panel()?.remove();
       schedule(1200);
+      return () => {
+        if (currentRoute === r) currentRoute = null;
+        gen++;
+        shown = null;
+        panel()?.remove();
+      };
     });
     ctx.onBodyMutation(() => {
-      const r = mediaRoute();
+      const r = currentRoute;
       if (!r || panel() || rendering || saving) return;
       if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
       schedule(500);
@@ -429,6 +441,7 @@ defineModule({
       if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
     });
     ctx.onCleanup(() => {
+      currentRoute = null;
       gen++;
       clearTimeout(timer);
       timer = 0;

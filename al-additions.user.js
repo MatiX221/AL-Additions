@@ -2624,95 +2624,6 @@
 			}
 		};
 	}
-	var ANILIST_SELECTORS = {
-		loginNav: "nav a[href=\"/login\"], .nav a[href=\"/login\"]",
-		userNav: "nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .nav a[href^=\"/user/\"]",
-		loggedInNav: "nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .user-wrap .avatar",
-		mediaTitle: ".page-content .header .content > h1",
-		sidebarData: ".sidebar > .data",
-		overview: ".overview",
-		banner: ".banner",
-		filtersSlot: ".filters",
-		compareRoot: ".compare",
-		listWrap: ".list-wrap",
-		listEntry: ".entry",
-		shuffleControl: "[title*=\"Random List Entry\" i], [aria-label*=\"Random List Entry\" i]"
-	};
-	function decodeRouteSegment(s) {
-		try {
-			return decodeURIComponent(s);
-		} catch {
-			return s;
-		}
-	}
-	function mediaRoute(pathname = location.pathname) {
-		const m = pathname.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
-		return m ? {
-			kind: m[1],
-			type: m[1].toUpperCase(),
-			id: Number(m[2])
-		} : null;
-	}
-	function listRoute(pathname = location.pathname) {
-		const m = pathname.match(/^\/user\/([^/]+)\/(anime|manga)list(?:\/|$)/i);
-		if (!m) return null;
-		return {
-			owner: decodeRouteSegment(m[1]),
-			type: m[2].toUpperCase() === "MANGA" ? "MANGA" : "ANIME"
-		};
-	}
-	function compareRoute(pathname = location.pathname) {
-		const m = pathname.match(/^\/user\/([^/]+)\/(animelist|mangalist)\/compare(?:\/|$)/i);
-		if (!m) return null;
-		const kind = m[2].toLowerCase().startsWith("manga") ? "manga" : "anime";
-		return {
-			userName: decodeRouteSegment(m[1]),
-			kind,
-			type: kind === "manga" ? "MANGA" : "ANIME"
-		};
-	}
-	function staffOrStudioRoute(pathname = location.pathname) {
-		const m = pathname.match(/^\/(staff|studio)\/(\d+)(?:\/|$)/);
-		return m ? {
-			kind: m[1],
-			id: m[2]
-		} : null;
-	}
-	function isLoggedOutNav(doc = document) {
-		return !!doc?.querySelector?.(ANILIST_SELECTORS.loginNav);
-	}
-	function hasLoggedInNav(doc = document) {
-		return !!doc?.querySelector?.(ANILIST_SELECTORS.loggedInNav);
-	}
-	function navUserName(doc = document) {
-		const href = doc?.querySelector?.(ANILIST_SELECTORS.userNav)?.getAttribute("href");
-		const m = href && href.match(/^\/user\/([^/?#]+)/);
-		return m ? decodeRouteSegment(m[1]) : "";
-	}
-	function findMediaSidebarSpot(doc = document) {
-		const el = doc.querySelector(ANILIST_SELECTORS.sidebarData);
-		return el?.parentElement && el.parentElement !== doc.body ? {
-			parent: el.parentElement,
-			before: el
-		} : null;
-	}
-	function findOverviewContainer(doc = document) {
-		return doc.querySelector(ANILIST_SELECTORS.overview);
-	}
-	function findBannerElement(doc = document) {
-		return doc.querySelector(ANILIST_SELECTORS.banner);
-	}
-	function findSyncPanelAnchor(doc = document) {
-		const shuffle = doc.querySelector(ANILIST_SELECTORS.shuffleControl);
-		if (shuffle) return shuffle.parentElement || shuffle;
-		if (!doc.body) return null;
-		const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
-		for (let t; t = walker.nextNode();) {
-			const el = t.parentElement;
-			if (t.nodeValue?.trim() === "Sort" && el?.matches("div, section, aside") && el.parentElement) return el.parentElement;
-		}
-		return null;
-	}
 	defineModule({
 		id: "behindDots",
 		key: "behindDotsEnabled",
@@ -2761,7 +2672,7 @@
 			const sectionIsWatching = (wrap) => clean(wrap?.querySelector(".section-name")?.textContent) === "Watching";
 			function watchingEntries() {
 				const out = [];
-				for (const wrap of document.querySelectorAll(ANILIST_SELECTORS.listWrap)) if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll(".list-entries .entry")));
+				for (const wrap of document.querySelectorAll(".list-wrap")) if (sectionIsWatching(wrap)) out.push(...Array.from(wrap.querySelectorAll(".list-entries .entry")));
 				return out;
 			}
 			function progressOf(entry) {
@@ -4297,23 +4208,12 @@
 				root.appendChild(cols);
 				overview.appendChild(root);
 			}
-			let cur = null;
 			let backoff = {
 				id: null,
 				until: 0
 			};
-			const animeId = () => {
-				const r = mediaRoute();
-				return r && r.kind === "anime" ? String(r.id) : null;
-			};
-			async function sync() {
-				const id = animeId();
-				if (!id) {
-					document.getElementById(ROOT)?.remove();
-					cur = null;
-					return;
-				}
-				if (cur?.id === id) return;
+			ctx.onRoute(/^\/anime\/(\d+)(?:\/|$)/, async (rc) => {
+				const id = rc.match[1];
 				if (backoff.id === id && Date.now() < backoff.until) return;
 				document.getElementById(ROOT)?.remove();
 				const mine = {
@@ -4321,45 +4221,32 @@
 					themes: null,
 					busy: true
 				};
-				cur = mine;
 				try {
 					const themes = await loadThemes(id, id);
-					if (cur !== mine) return;
+					if (rc.signal.aborted) return;
 					if (!themes.OP.length && !themes.ED.length) return;
 					mine.themes = themes;
-					const overview = await ctx.waitForSelector(".overview", 1e4);
-					if (cur === mine && overview && animeId() === id) mount(mine, overview);
+					const overview = await rc.waitForSelector(".overview", 1e4);
+					if (rc.signal.aborted || !overview) return;
+					mount(mine, overview);
+					rc.onCleanup(ctx.onBodyMutation(() => {
+						if (!rc.signal.aborted && !document.getElementById(ROOT)) {
+							const ov = document.querySelector(".overview");
+							if (ov) mount(mine, ov);
+						}
+					}));
 				} catch (err) {
+					if (rc.signal.aborted) return;
 					ctx.log.error("Anisongs sync error:", err);
-					if (cur === mine) {
-						cur = null;
-						backoff = {
-							id,
-							until: Date.now() + 3e4
-						};
-					}
+					backoff = {
+						id,
+						until: Date.now() + 3e4
+					};
 				} finally {
 					mine.busy = false;
 				}
-			}
-			function repair() {
-				const id = animeId();
-				if (!id) return;
-				if (cur?.id !== id) return void sync();
-				if (cur.themes && !cur.busy && !document.getElementById(ROOT)) {
-					const overview = findOverviewContainer();
-					if (overview) try {
-						mount(cur, overview);
-					} catch (err) {
-						ctx.log.error("Anisongs repair error:", err);
-					}
-				}
-			}
-			ctx.ready(() => void sync());
-			ctx.onNav(() => void sync());
-			ctx.onBodyMutation(debounce(repair, 200));
+			});
 			ctx.onCleanup(() => {
-				cur = null;
 				document.getElementById(ROOT)?.remove();
 			});
 		}
@@ -4424,14 +4311,13 @@
       @media (pointer:coarse){.ala-banner-dl{right:8px;bottom:8px;height:40px;min-width:40px;border-radius:20px}}
       @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
 			const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
-			const bannerAllowed = () => !!mediaRoute() || /^\/user\//.test(location.pathname) && !!ctx.get("bannerProfiles");
+			let activeSlug = null;
 			async function download() {
-				const banner = findBannerElement();
-				const url = banner && bannerAllowed() && bannerUrl(banner);
+				const banner = document.querySelector(".banner");
+				const url = banner && activeSlug && bannerUrl(banner);
 				if (!url) return null;
 				const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
-				const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split("/")[2] || "anilist"}.${ext}`;
-				return ctx.http.download(url, name);
+				return ctx.http.download(url, `anilist-banner-${activeSlug}.${ext}`);
 			}
 			function createButton() {
 				const btn = document.createElement("button");
@@ -4460,10 +4346,10 @@
 				return btn;
 			}
 			function scan() {
-				const banner = findBannerElement();
+				const banner = document.querySelector(".banner");
 				if (!banner) return;
 				let btn = banner.querySelector(".ala-banner-dl");
-				const show = bannerAllowed() && !!bannerUrl(banner);
+				const show = !!activeSlug && !!bannerUrl(banner);
 				if (!btn && !show) return;
 				if (!btn) {
 					btn = createButton();
@@ -4472,10 +4358,21 @@
 				btn.hidden = !show;
 			}
 			const scanSoon = debounce(scan, 150);
-			ctx.ready(scan);
-			ctx.onNav(() => ctx.timeout(scan, 300));
+			ctx.onRoute(/^\/(?:(anime|manga)\/(\d+)|user\/([^/?#]+))(?:\/|$)/, (rc) => {
+				const mediaId = rc.match?.[2];
+				const userSeg = rc.match?.[3];
+				if (userSeg && !ctx.get("bannerProfiles")) return;
+				activeSlug = mediaId || userSeg || "anilist";
+				scan();
+				rc.timeout(scan, 300);
+				return () => {
+					activeSlug = null;
+					scan();
+				};
+			});
 			ctx.onBodyMutation(scanSoon);
 			ctx.onCleanup(() => {
+				activeSlug = null;
 				document.querySelectorAll(".ala-banner-dl").forEach((el) => el.remove());
 			});
 		}
@@ -5228,8 +5125,21 @@
 	function createCompareRpcBlocker(state) {
 		return (q, vars) => !state.loadFailed && isComparePage() && (/\bcompareWithAuthList\b/i.test(q || "") || Boolean(vars?.compareWithAuthList));
 	}
+	function parseCompareRoute(pathname = location.pathname) {
+		const m = pathname.match(/^\/user\/([^/]+)\/(animelist|mangalist)\/compare(?:\/|$)/i);
+		if (!m) return null;
+		let userName = m[1];
+		try {
+			userName = decodeURIComponent(userName);
+		} catch {}
+		const isManga = m[2].toLowerCase().startsWith("manga");
+		return {
+			userName,
+			type: isManga ? "MANGA" : "ANIME"
+		};
+	}
 	async function resolveCompareUsers(ctx) {
-		const route = compareRoute();
+		const route = parseCompareRoute();
 		const type = route?.type || (location.pathname.toLowerCase().includes("mangalist") ? "MANGA" : "ANIME");
 		const bridge = ctx.hooks.getCacheBridge();
 		const userMap = bridge?.getUserMap();
@@ -5503,50 +5413,6 @@
 			});
 		}
 	});
-	var builtInRunning = new Set();
-	var markBuiltIn = (id) => {
-		builtInRunning.add(id);
-	};
-	var isBuiltInRunning = (id) => builtInRunning.has(id);
-	var CACHE_MS = 3e4;
-	var cache = new Map();
-	var PROBE_ATTR$1 = "data-ala-probe";
-	var pageWin = () => typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
-	function detectFastLoad() {
-		const w = pageWin();
-		return !!(w.__ANILIST_FAST_LOAD__ || w.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning("fastLoad");
-	}
-	async function probeTierLabels(timeoutMs = 600) {
-		if (!document.body) return false;
-		const probe = document.createElement("div");
-		probe.className = "score";
-		probe.hidden = true;
-		probe.setAttribute("score", "9");
-		probe.setAttribute(PROBE_ATTR$1, "1");
-		probe.textContent = "9";
-		document.body.appendChild(probe);
-		try {
-			const end = Date.now() + timeoutMs;
-			while (Date.now() < end) {
-				await sleep(50);
-				if (probe.hasAttribute("data-tier-modified")) return true;
-			}
-			return false;
-		} finally {
-			probe.remove();
-		}
-	}
-	function detectStandalone(id, probe, cacheMs = CACHE_MS) {
-		const hit = cache.get(id);
-		if (hit && Date.now() - hit.at < cacheMs) return hit.result;
-		const runner = probe || (id === "fastLoad" ? detectFastLoad : id === "tierLabels" ? probeTierLabels : () => false);
-		const result = Promise.resolve().then(() => runner()).then(Boolean).catch(() => false);
-		cache.set(id, {
-			at: Date.now(),
-			result
-		});
-		return result;
-	}
 	var CFG = {
 		lazyMedia: false,
 		rowSkipping: false,
@@ -7207,6 +7073,8 @@
 			if (anchor) prefetchFor(anchor, yielded);
 		}, opts);
 	}
+	var builtInRunning = false;
+	var detectStandaloneFastLoad = () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !builtInRunning;
 	defineModule({
 		id: "fastLoad",
 		key: "fastLoadEnabled",
@@ -7228,12 +7096,12 @@
 		},
 		standalone: {
 			name: "AniList Fast Load",
-			probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning("fastLoad")
+			probe: detectStandaloneFastLoad
 		},
 		migrate(m) {
 			m.legacy.del("alfl:workerUrl");
 			m.legacy.del("alfl:rpc:listTpl:v2");
-			if (!m.storage.get("localStorageCleaned", false) && !detectFastLoad()) {
+			if (!m.storage.get("localStorageCleaned", false) && !detectStandaloneFastLoad()) {
 				for (const k of [
 					"alfl:taxonomy:v1",
 					"alfl:routes:v1",
@@ -7255,7 +7123,7 @@
 				return;
 			}
 			win.__ALA_FAST_LOAD__ = "0.4.3";
-			markBuiltIn("fastLoad");
+			builtInRunning = true;
 			setCoreHooks(ctx.hooks);
 			setCoreSession(ctx.session);
 			setCoreStorage(ctx.storage);
@@ -7366,7 +7234,7 @@
 			const ID = "ala-keyframe-link";
 			const BASE = "https://keyframe-staff-list.com";
 			const LABEL = "Keyframe Staff List";
-			const SLOT = ANILIST_SELECTORS.filtersSlot;
+			const SLOT = ".filters";
 			const PATHS = {
 				staff: "person",
 				studio: "studio"
@@ -7379,9 +7247,9 @@
 			const copyScope = (from, to) => {
 				for (const at of Array.from(from.attributes)) if (at.name.startsWith("data-v-")) to.setAttribute(at.name, at.value);
 			};
-			function skin(a) {
+			function skin(a, container) {
 				if (!a || a.dataset.kfSkin) return;
-				const ref = a.parentElement?.querySelector(".mini-select");
+				const ref = (container ?? a.parentElement)?.querySelector(".mini-select");
 				if (!ref) return;
 				a.classList.remove("ala-kf-plain");
 				a.classList.add("mini-select");
@@ -7400,63 +7268,33 @@
 				}
 				a.dataset.kfSkin = "1";
 			}
-			function build(r) {
-				const a = document.createElement("a");
-				a.id = ID;
-				a.className = "ala-kf-plain";
-				a.href = `${BASE}/${PATHS[r.kind]}/${r.id}`;
-				a.target = "_blank";
-				a.rel = "noopener noreferrer";
-				a.title = `Open on ${LABEL}`;
-				a.setAttribute("aria-label", `Open on ${LABEL}`);
-				a.innerHTML = `${icon("external", 14)}<span>${LABEL}</span>`;
-				a.addEventListener("click", (e) => e.stopPropagation());
-				return a;
-			}
-			let token = 0;
-			let placedKey = null;
-			let placing = false;
-			async function place() {
-				const r = staffOrStudioRoute();
-				const key = r && `${r.kind}:${r.id}`;
-				if (key && key === placedKey && document.getElementById(ID)) return;
-				document.getElementById(ID)?.remove();
-				placedKey = null;
-				if (!r) return;
-				const mine = ++token;
-				placing = true;
-				try {
-					const row = await ctx.waitForSelector(SLOT, 8e3);
-					const now = staffOrStudioRoute();
-					if (row && mine === token && now && now.kind === r.kind && now.id === r.id && !document.getElementById(ID)) {
-						const a = build(r);
-						row.insertBefore(a, row.firstChild);
-						skin(a);
-						placedKey = key;
+			ctx.onRoute(/^\/(staff|studio)\/(\d+)(?:\/|$)/, (rc) => {
+				const kind = rc.match[1];
+				const id = rc.match[2];
+				rc.mount({
+					id: ID,
+					anchor: SLOT,
+					position: "afterbegin",
+					create: () => {
+						const a = document.createElement("a");
+						a.id = ID;
+						a.className = "ala-kf-plain";
+						a.href = `${BASE}/${PATHS[kind]}/${id}`;
+						a.target = "_blank";
+						a.rel = "noopener noreferrer";
+						a.title = `Open on ${LABEL}`;
+						a.setAttribute("aria-label", `Open on ${LABEL}`);
+						a.innerHTML = `${icon("external", 14)}<span>${LABEL}</span>`;
+						rc.listen(a, "click", (e) => e.stopPropagation());
+						skin(a, document.querySelector(SLOT));
+						return a;
 					}
-				} finally {
-					if (mine === token) placing = false;
-				}
-			}
-			const repair = debounce(() => {
-				if (!staffOrStudioRoute() || placing) return;
-				const a = document.getElementById(ID);
-				if (!a) {
-					placedKey = null;
-					place();
-				} else skin(a);
-			}, 400);
-			place();
-			ctx.onNav(() => void place());
-			ctx.onBodyMutation(repair);
-			ctx.onCleanup(() => {
-				token++;
-				document.getElementById(ID)?.remove();
+				});
+				rc.onCleanup(ctx.onBodyMutation(() => skin(document.getElementById(ID))));
 			});
 		}
 	});
 	var normTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(the|a|an)\b/g, " ").replace(/\s+/g, " ").trim();
-	var strictTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
 	function titleScore(a, b) {
 		const x = normTitle(a);
 		const y = normTitle(b);
@@ -7636,7 +7474,11 @@
 				return info?.status === "FINISHED" ? maxOf(info, "ANIME") : null;
 			}
 			function findSpot() {
-				return findMediaSidebarSpot();
+				const el = document.querySelector(".sidebar > .data");
+				return el?.parentElement && el.parentElement !== document.body ? {
+					parent: el.parentElement,
+					before: el
+				} : null;
 			}
 			const scoreStep = (f) => f === "POINT_10_DECIMAL" ? "0.1" : "1";
 			const scoreMax = (f) => ({
@@ -7657,6 +7499,7 @@
 				};
 			};
 			const scoreFormat = async () => (await tryOr(() => ctx.api.viewer()))?.scoreFormat || null;
+			let currentRoute = null;
 			let shown = null;
 			let gen = 0;
 			let rendering = false;
@@ -7741,7 +7584,7 @@
 				}
 			}
 			async function render(force = false) {
-				const route = mediaRoute();
+				const route = currentRoute;
 				if (!route) {
 					shown = null;
 					panel()?.remove();
@@ -7761,7 +7604,7 @@
 				}
 				if (!ctx.api.hasAuth()) return renderConnect(key, "none");
 				const g = gen;
-				const stale = () => g !== gen || mediaRoute()?.id !== route.id;
+				const stale = () => g !== gen || currentRoute?.id !== route.id;
 				rendering = true;
 				ctx.log.debug("Rendering media info panel for:", key);
 				try {
@@ -7954,9 +7797,14 @@
 			}
 			ctx.listen(window, "load", () => schedule(500), { once: true });
 			ctx.ready(() => schedule(document.readyState === "complete" ? 500 : 1200));
-			ctx.onNav(() => {
-				const r = mediaRoute();
-				if (r && shown === `${r.type}:${r.id}` && panel()) return;
+			ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
+				const kind = rc.match[1];
+				const r = {
+					kind,
+					type: kind.toUpperCase(),
+					id: Number(rc.match[2])
+				};
+				currentRoute = r;
 				gen++;
 				shown = null;
 				routeAt = Date.now();
@@ -7967,9 +7815,15 @@
 				};
 				panel()?.remove();
 				schedule(1200);
+				return () => {
+					if (currentRoute === r) currentRoute = null;
+					gen++;
+					shown = null;
+					panel()?.remove();
+				};
 			});
 			ctx.onBodyMutation(() => {
-				const r = mediaRoute();
+				const r = currentRoute;
 				if (!r || panel() || rendering || saving) return;
 				if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
 				schedule(500);
@@ -7978,6 +7832,7 @@
 				if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
 			});
 			ctx.onCleanup(() => {
+				currentRoute = null;
 				gen++;
 				clearTimeout(timer);
 				timer = 0;
@@ -8080,6 +7935,27 @@
 		}
 	};
 	var anilistLog = createCoreLogger("anilist");
+	var NAV_SELECTORS = {
+		loginNav: "nav a[href=\"/login\"], .nav a[href=\"/login\"]",
+		userNav: "nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .nav a[href^=\"/user/\"]",
+		loggedInNav: "nav a[href^=\"/user/\"], .nav-wrap a[href^=\"/user/\"], .user-wrap .avatar"
+	};
+	function isLoggedOutNav(doc = document) {
+		return !!doc?.querySelector?.(NAV_SELECTORS.loginNav);
+	}
+	function hasLoggedInNav(doc = document) {
+		return !!doc?.querySelector?.(NAV_SELECTORS.loggedInNav);
+	}
+	function navUserName(doc = document) {
+		const href = doc?.querySelector?.(NAV_SELECTORS.userNav)?.getAttribute("href");
+		const m = href && href.match(/^\/user\/([^/?#]+)/);
+		if (!m) return "";
+		try {
+			return decodeURIComponent(m[1]);
+		} catch {
+			return m[1];
+		}
+	}
 	function stripCommentsAndStrings(q) {
 		let out = "";
 		let i = 0;
@@ -9340,7 +9216,6 @@
 				const frag = (ctx.get("nyaaProviders") || []).map(encodeURIComponent).join("&text=");
 				return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
 			};
-			let disposed = false;
 			let activeTimerCleanup = null;
 			let attachedAnchor = null;
 			let quickEditFn = ctx.services.get("manualOverrides:quickEdit") ?? null;
@@ -9456,41 +9331,31 @@
 				};
 				mountEditButton(h1, route);
 			}
-			let token = 0;
-			let placedKey = null;
-			let placing = false;
-			async function place() {
-				if (disposed) return;
-				const route = mediaRoute();
-				const key = route && `${route.type}:${route.id}`;
-				if (key && key === placedKey && document.getElementById(ID)) return;
-				activeTimerCleanup?.();
-				activeTimerCleanup = null;
-				attachedAnchor = null;
-				document.getElementById(ID)?.remove();
-				document.getElementById(EDIT_ID)?.remove();
-				placedKey = null;
-				if (!route) return;
-				const mine = ++token;
-				placing = true;
-				try {
-					const h1 = await ctx.waitForSelector(ANILIST_SELECTORS.mediaTitle, 8e3);
-					if (disposed || !h1 || mine !== token || mediaRoute()?.id !== route.id || document.getElementById(ID)) return;
-					attach(h1, route);
-					placedKey = key;
-				} finally {
-					if (mine === token) placing = false;
-				}
-			}
-			const repair = debounce(() => {
-				if (!disposed && placedKey && !placing && !document.getElementById(ID)) place();
-			}, 400);
-			place();
-			ctx.onNav(() => void place());
-			ctx.onBodyMutation(repair);
+			ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, async (rc) => {
+				rc.onCleanup(() => {
+					activeTimerCleanup?.();
+					activeTimerCleanup = null;
+					attachedAnchor = null;
+					document.getElementById(ID)?.remove();
+					document.getElementById(EDIT_ID)?.remove();
+				});
+				const kind = rc.match[1];
+				const route = {
+					kind,
+					type: kind.toUpperCase(),
+					id: Number(rc.match[2])
+				};
+				const ensureMounted = () => {
+					if (rc.signal.aborted || document.getElementById(ID)) return;
+					const h1 = document.querySelector(".page-content .header .content > h1");
+					if (h1) attach(h1, route);
+				};
+				const h1 = await rc.waitForSelector(".page-content .header .content > h1", 8e3);
+				if (rc.signal.aborted || !h1) return;
+				if (!document.getElementById(ID)) attach(h1, route);
+				rc.onCleanup(ctx.onBodyMutation(ensureMounted));
+			});
 			ctx.onCleanup(() => {
-				disposed = true;
-				token++;
 				activeTimerCleanup?.();
 				activeTimerCleanup = null;
 				attachedAnchor = null;
@@ -9540,6 +9405,7 @@
 			ctx.ready(() => fixLinks([document.body]));
 		}
 	});
+	var strictTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
 	var malLog = createCoreLogger("mal");
 	var MAL_AUTH_URL = "https://myanimelist.net/v1/oauth2/authorize";
 	var MAL_TOKEN_URL = "https://myanimelist.net/v1/oauth2/token";
@@ -11051,8 +10917,28 @@
 	var lastMountTry = 0;
 	var retryCancel = null;
 	var selfLookup = false;
+	function listRouteOwner() {
+		const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
+		if (!m) return "";
+		try {
+			return decodeURIComponent(m[1]);
+		} catch {
+			return m[1];
+		}
+	}
+	function findPanelAnchor() {
+		const shuffle = document.querySelector("[title*=\"Random List Entry\" i], [aria-label*=\"Random List Entry\" i]");
+		if (shuffle) return shuffle.parentElement || shuffle;
+		if (!document.body) return null;
+		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+		for (let t; t = walker.nextNode();) {
+			const el = t.parentElement;
+			if (t.nodeValue?.trim() === "Sort" && el?.matches("div, section, aside") && el.parentElement) return el.parentElement;
+		}
+		return null;
+	}
 	function isOwnList() {
-		const owner = listRoute()?.owner || "";
+		const owner = listRouteOwner();
 		if (!owner) return false;
 		const me = panelCtx?.session.username || "";
 		if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
@@ -11067,7 +10953,7 @@
 		retryCancel = null;
 		if (!panelCtx || !onListRoute() || document.getElementById("almal-panel")) return;
 		lastMountTry = Date.now();
-		const anchor = findSyncPanelAnchor();
+		const anchor = findPanelAnchor();
 		if (!anchor) {
 			retryCancel = panelCtx.timeout(mountSoon, 700);
 			return;
@@ -12191,6 +12077,7 @@
 		renderList();
 	}
 	var activeCandidate = null;
+	var activeRouteMedia = null;
 	function extractDialogMedia(root = document.body) {
 		const dialog = root.closest(".el-dialog, .el-dialog__wrapper, body")?.querySelector(".el-dialog__body") || document.querySelector(".el-dialog__body");
 		if (!dialog) return null;
@@ -12220,12 +12107,9 @@
 				}
 			}
 		}
-		if (!mediaId) {
-			const route = mediaRoute();
-			if (route) {
-				mediaId = route.id;
-				type = route.type;
-			}
+		if (!mediaId && activeRouteMedia) {
+			mediaId = activeRouteMedia.id;
+			type = activeRouteMedia.type;
 		}
 		if (!mediaId) return null;
 		const override = getOverride(mediaId);
@@ -12240,6 +12124,15 @@
 	}
 	function initDeletionInterceptor(ctx) {
 		if (typeof window === "undefined" || location.hostname !== "anilist.co") return;
+		ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
+			activeRouteMedia = {
+				id: Number(rc.match[2]),
+				type: rc.match[1].toUpperCase()
+			};
+			return () => {
+				activeRouteMedia = null;
+			};
+		});
 		ctx.hooks.onGqlFetch((ev) => {
 			const queryStr = ev.query || ev.operationName || "";
 			if (!queryStr) return;
@@ -12306,6 +12199,7 @@
 		}, true);
 		ctx.onCleanup(() => {
 			activeCandidate = null;
+			activeRouteMedia = null;
 		});
 	}
 	defineModule({
@@ -12555,6 +12449,7 @@
 			ctx.onNav(() => apply(false));
 		}
 	});
+	var PROBE_ATTR = "data-ala-probe";
 	var DEFAULT_TIERS = [
 		{
 			min: 95,
@@ -12965,6 +12860,35 @@
 			}
 		} catch (_) {}
 	}
+	var probeCache = null;
+	function probeTierLabels(timeoutMs = 600) {
+		if (probeCache && Date.now() - probeCache.at < 3e4) return probeCache.result;
+		const result = (async () => {
+			if (!document.body) return false;
+			const probe = document.createElement("div");
+			probe.className = "score";
+			probe.hidden = true;
+			probe.setAttribute("score", "9");
+			probe.setAttribute(PROBE_ATTR, "1");
+			probe.textContent = "9";
+			document.body.appendChild(probe);
+			try {
+				const end = Date.now() + timeoutMs;
+				while (Date.now() < end) {
+					await sleep(50);
+					if (probe.hasAttribute("data-tier-modified")) return true;
+				}
+				return false;
+			} finally {
+				probe.remove();
+			}
+		})();
+		probeCache = {
+			at: Date.now(),
+			result
+		};
+		return result;
+	}
 	defineModule({
 		id: "tierLabels",
 		key: "tierLabelsEnabled",
@@ -12981,7 +12905,7 @@
 		},
 		standalone: {
 			name: "AniList Tier Labels",
-			probe: () => detectStandalone("tierLabels")
+			probe: () => probeTierLabels()
 		},
 		options: [
 			{
@@ -13221,7 +13145,7 @@
 						runScan();
 					}, 100);
 				});
-				detectStandalone("tierLabels").then((found) => {
+				probeTierLabels().then((found) => {
 					ctx.storage.set(HINT_KEY, found);
 					const wasPaused = paused;
 					paused = found;

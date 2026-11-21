@@ -1,5 +1,4 @@
 import { defineModule } from '../../core/registry';
-import { findBannerElement, mediaRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
 import { debounce } from '../../utils/helpers';
 
@@ -45,16 +44,14 @@ defineModule({
         /url\((['"]?)(.*?)\1\)/
       )?.[2] || null;
 
-    const bannerAllowed = (): boolean =>
-      !!mediaRoute() || (/^\/user\//.test(location.pathname) && !!ctx.get('bannerProfiles'));
+    let activeSlug: string | null = null;
 
     async function download(): Promise<'download' | 'tab' | null> {
-      const banner = findBannerElement();
-      const url = banner && bannerAllowed() && bannerUrl(banner);
+      const banner = document.querySelector<HTMLElement>('.banner');
+      const url = banner && activeSlug && bannerUrl(banner);
       if (!url) return null;
       const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || 'jpg').toLowerCase();
-      const name = `anilist-banner-${mediaRoute()?.id || location.pathname.split('/')[2] || 'anilist'}.${ext}`;
-      return ctx.http.download(url, name);
+      return ctx.http.download(url, `anilist-banner-${activeSlug}.${ext}`);
     }
 
     function createButton(): HTMLButtonElement {
@@ -87,10 +84,10 @@ defineModule({
     }
 
     function scan(): void {
-      const banner = findBannerElement();
+      const banner = document.querySelector<HTMLElement>('.banner');
       if (!banner) return;
       let btn = banner.querySelector<HTMLButtonElement>('.ala-banner-dl');
-      const show = bannerAllowed() && !!bannerUrl(banner);
+      const show = !!activeSlug && !!bannerUrl(banner);
       if (!btn && !show) return;
       if (!btn) {
         btn = createButton();
@@ -100,10 +97,21 @@ defineModule({
     }
 
     const scanSoon = debounce(scan, 150);
-    ctx.ready(scan);
-    ctx.onNav(() => ctx.timeout(scan, 300));
+    ctx.onRoute(/^\/(?:(anime|manga)\/(\d+)|user\/([^/?#]+))(?:\/|$)/, (rc) => {
+      const mediaId = rc.match?.[2];
+      const userSeg = rc.match?.[3];
+      if (userSeg && !ctx.get('bannerProfiles')) return;
+      activeSlug = mediaId || userSeg || 'anilist';
+      scan();
+      rc.timeout(scan, 300);
+      return () => {
+        activeSlug = null;
+        scan();
+      };
+    });
     ctx.onBodyMutation(scanSoon);
     ctx.onCleanup(() => {
+      activeSlug = null;
       document.querySelectorAll('.ala-banner-dl').forEach((el) => el.remove());
     });
   }

@@ -1,10 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  normTitle,
-  strictTitle,
-  titleScore,
-  bestMatch
-} from '../src/utils/matching';
+import { strictTitle } from '../src/api/mal';
+import { normTitle, titleScore, bestMatch } from '../src/api/scrapers';
 
 describe('Matching: normTitle', () => {
   it('handles null, undefined, and empty string inputs', () => {

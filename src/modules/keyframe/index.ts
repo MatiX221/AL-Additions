@@ -1,7 +1,5 @@
 import { defineModule } from '../../core/registry';
-import { ANILIST_SELECTORS, staffOrStudioRoute } from '../../utils/anilistDom';
 import { icon } from '../../utils/dom';
-import { debounce } from '../../utils/helpers';
 
 defineModule({
   id: 'keyframe',
@@ -16,7 +14,7 @@ defineModule({
     const ID = 'ala-keyframe-link';
     const BASE = 'https://keyframe-staff-list.com';
     const LABEL = 'Keyframe Staff List';
-    const SLOT = ANILIST_SELECTORS.filtersSlot;
+    const SLOT = '.filters';
     const PATHS: Record<string, string> = { staff: 'person', studio: 'studio' };
 
     ctx.addStyle(
@@ -34,9 +32,9 @@ defineModule({
       }
     };
 
-    function skin(a: HTMLElement | null): void {
+    function skin(a: HTMLElement | null, container?: Element | null): void {
       if (!a || a.dataset.kfSkin) return;
-      const ref = a.parentElement?.querySelector('.mini-select');
+      const ref = (container ?? a.parentElement)?.querySelector('.mini-select');
       if (!ref) return;
       a.classList.remove('ala-kf-plain');
       a.classList.add('mini-select');
@@ -58,65 +56,31 @@ defineModule({
       a.dataset.kfSkin = '1';
     }
 
-    function build(r: { kind: 'staff' | 'studio'; id: string }): HTMLAnchorElement {
-      const a = document.createElement('a');
-      a.id = ID;
-      a.className = 'ala-kf-plain';
-      a.href = `${BASE}/${PATHS[r.kind]}/${r.id}`;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.title = `Open on ${LABEL}`;
-      a.setAttribute('aria-label', `Open on ${LABEL}`);
-      a.innerHTML = `${icon('external', 14)}<span>${LABEL}</span>`;
-      a.addEventListener('click', (e) => e.stopPropagation());
-      return a;
-    }
+    ctx.onRoute(/^\/(staff|studio)\/(\d+)(?:\/|$)/, (rc) => {
+      const kind = rc.match![1] as 'staff' | 'studio';
+      const id = rc.match![2];
 
-    let token = 0;
-    let placedKey: string | null = null;
-    let placing = false;
-
-    async function place(): Promise<void> {
-      const r = staffOrStudioRoute();
-      const key = r && `${r.kind}:${r.id}`;
-      if (key && key === placedKey && document.getElementById(ID)) return;
-      document.getElementById(ID)?.remove();
-      placedKey = null;
-      if (!r) return;
-
-      const mine = ++token;
-      placing = true;
-      try {
-        const row = await ctx.waitForSelector(SLOT, 8000);
-        const now = staffOrStudioRoute();
-        if (row && mine === token && now && now.kind === r.kind && now.id === r.id && !document.getElementById(ID)) {
-          const a = build(r);
-          row.insertBefore(a, row.firstChild);
-          skin(a);
-          placedKey = key;
+      rc.mount({
+        id: ID,
+        anchor: SLOT,
+        position: 'afterbegin',
+        create: () => {
+          const a = document.createElement('a');
+          a.id = ID;
+          a.className = 'ala-kf-plain';
+          a.href = `${BASE}/${PATHS[kind]}/${id}`;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.title = `Open on ${LABEL}`;
+          a.setAttribute('aria-label', `Open on ${LABEL}`);
+          a.innerHTML = `${icon('external', 14)}<span>${LABEL}</span>`;
+          rc.listen(a, 'click', (e) => e.stopPropagation());
+          skin(a, document.querySelector(SLOT));
+          return a;
         }
-      } finally {
-        if (mine === token) placing = false;
-      }
-    }
+      });
 
-    const repair = debounce(() => {
-      if (!staffOrStudioRoute() || placing) return;
-      const a = document.getElementById(ID);
-      if (!a) {
-        placedKey = null;
-        void place();
-      } else {
-        skin(a);
-      }
-    }, 400);
-
-    void place();
-    ctx.onNav(() => void place());
-    ctx.onBodyMutation(repair);
-    ctx.onCleanup(() => {
-      token++;
-      document.getElementById(ID)?.remove();
+      rc.onCleanup(ctx.onBodyMutation(() => skin(document.getElementById(ID))));
     });
   }
 });

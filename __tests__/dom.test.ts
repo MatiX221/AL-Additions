@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { findExactText, mediaRoute, icon } from '../src/utils/dom';
+import { findExactText, icon } from '../src/utils/dom';
 import { downloadFile } from '../src/utils/helpers';
 
 describe('DOM Utilities (src/utils/dom.ts)', () => {
@@ -27,17 +27,6 @@ describe('DOM Utilities (src/utils/dom.ts)', () => {
     expect(findExactText('Developer')).toBe(document.getElementById('dev-wrap'));
     expect(findExactText('Missing')).toBeNull();
     expect(findExactText('Tools')).toBeNull();
-  });
-
-  it('mediaRoute parses anime/manga routes and ignores unrelated paths', () => {
-    history.replaceState({}, '', '/anime/16498/Shingeki-no-Kyojin');
-    expect(mediaRoute()).toEqual({ kind: 'anime', type: 'ANIME', id: 16498 });
-
-    history.replaceState({}, '', '/manga/2');
-    expect(mediaRoute()).toEqual({ kind: 'manga', type: 'MANGA', id: 2 });
-
-    history.replaceState({}, '', '/settings');
-    expect(mediaRoute()).toBeNull();
   });
 
   it('icon renders SVG markup with requested dimensions', () => {

@@ -1,6 +1,6 @@
 import { defineModule } from '../../core/registry';
 import type { MigrateContext } from '../../types';
-import { detectStandalone } from '../../utils/standalone';
+import { sleep } from '../../utils/helpers';
 import { PROBE_ATTR, DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from './tiers';
 import { openTierEditor } from './tierModal';
 
@@ -42,6 +42,34 @@ function migrateLegacyTierLabels(m: MigrateContext): void {
   } catch (_) {}
 }
 
+let probeCache: { at: number; result: Promise<boolean> } | null = null;
+
+function probeTierLabels(timeoutMs = 600): Promise<boolean> {
+  if (probeCache && Date.now() - probeCache.at < 30_000) return probeCache.result;
+  const result = (async () => {
+    if (!document.body) return false;
+    const probe = document.createElement('div');
+    probe.className = 'score';
+    probe.hidden = true;
+    probe.setAttribute('score', '9');
+    probe.setAttribute(PROBE_ATTR, '1');
+    probe.textContent = '9';
+    document.body.appendChild(probe);
+    try {
+      const end = Date.now() + timeoutMs;
+      while (Date.now() < end) {
+        await sleep(50);
+        if (probe.hasAttribute('data-tier-modified')) return true;
+      }
+      return false;
+    } finally {
+      probe.remove();
+    }
+  })();
+  probeCache = { at: Date.now(), result };
+  return result;
+}
+
 defineModule({
   id: 'tierLabels',
   key: 'tierLabelsEnabled',
@@ -58,7 +86,7 @@ defineModule({
   },
   standalone: {
     name: 'AniList Tier Labels',
-    probe: () => detectStandalone('tierLabels')
+    probe: () => probeTierLabels()
   },
   options: [
     {
@@ -376,7 +404,7 @@ defineModule({
         }, 100);
       });
 
-      void detectStandalone('tierLabels').then((found) => {
+      void probeTierLabels().then((found) => {
         ctx.storage.set(HINT_KEY, found);
         const wasPaused = paused;
         paused = found;

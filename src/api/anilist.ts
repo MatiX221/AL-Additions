@@ -1,11 +1,35 @@
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import { CoreHooks } from '../core/bus';
 import { ANILIST_SESSION_KEYS, type AniListClient, type AniListSession } from '../types';
-import { hasLoggedInNav, isLoggedOutNav, navUserName } from '../utils/anilistDom';
 import { authError, createCoreLogger, sleep, store } from '../utils/helpers';
 import { RateLimiter } from '../utils/limiter';
 
 const anilistLog = createCoreLogger('anilist');
+
+const NAV_SELECTORS = {
+  loginNav: 'nav a[href="/login"], .nav a[href="/login"]',
+  userNav: 'nav a[href^="/user/"], .nav-wrap a[href^="/user/"], .nav a[href^="/user/"]',
+  loggedInNav: 'nav a[href^="/user/"], .nav-wrap a[href^="/user/"], .user-wrap .avatar'
+} as const;
+
+function isLoggedOutNav(doc: Document = document): boolean {
+  return !!doc?.querySelector?.(NAV_SELECTORS.loginNav);
+}
+
+function hasLoggedInNav(doc: Document = document): boolean {
+  return !!doc?.querySelector?.(NAV_SELECTORS.loggedInNav);
+}
+
+function navUserName(doc: Document = document): string {
+  const href = doc?.querySelector?.(NAV_SELECTORS.userNav)?.getAttribute('href');
+  const m = href && href.match(/^\/user\/([^/?#]+)/);
+  if (!m) return '';
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
+}
 
 export type { AniListClient, AniListSession };
 

@@ -1,5 +1,4 @@
-import { strictTitle } from '../../utils/matching';
-import { searchMalId, log } from '../../api/mal';
+import { searchMalId, log, strictTitle } from '../../api/mal';
 import { stores, markDone, ID_MISS_TTL_MS } from './state';
 import { STATUS_MAP } from './reconcile';
 import { SyncMediaType, AniListSyncEntry, SyncTarget, SyncCounters, typeLabel } from './types';

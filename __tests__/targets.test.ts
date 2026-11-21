@@ -13,7 +13,8 @@ import { searchMalId, log } from '../src/api/mal';
 import { getOverride } from '../src/api/malOverrides';
 import type { AniListSyncEntry, SyncCounters } from '../src/modules/sync/types';
 
-vi.mock('../src/api/mal', () => ({
+vi.mock('../src/api/mal', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/api/mal')>()),
   searchMalId: vi.fn(),
   log: vi.fn()
 }));

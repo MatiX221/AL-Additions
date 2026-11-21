@@ -1,4 +1,3 @@
-import { mediaRoute } from '../../utils/anilistDom';
 import { log } from '../../api/mal';
 import { stores, addPendingDelete, removePendingDelete } from './state';
 import { SyncMediaType, typeLabel } from './types';
@@ -6,6 +5,7 @@ import { getOverride } from '../../api/malOverrides';
 import type { FeatureContext } from '../../types';
 
 let activeCandidate: { mediaId: number; type: SyncMediaType; title: string; malId?: number } | null = null;
+let activeRouteMedia: { id: number; type: SyncMediaType } | null = null;
 
 export function extractDialogMedia(root: Element = document.body): { mediaId: number; type: SyncMediaType; title: string; malId?: number } | null {
   const dialog = root.closest('.el-dialog, .el-dialog__wrapper, body')?.querySelector('.el-dialog__body') || document.querySelector('.el-dialog__body');
@@ -49,12 +49,9 @@ export function extractDialogMedia(root: Element = document.body): { mediaId: nu
     }
   }
 
-  if (!mediaId) {
-    const route = mediaRoute();
-    if (route) {
-      mediaId = route.id;
-      type = route.type;
-    }
+  if (!mediaId && activeRouteMedia) {
+    mediaId = activeRouteMedia.id;
+    type = activeRouteMedia.type;
   }
 
   if (!mediaId) return null;
@@ -70,6 +67,16 @@ export function extractDialogMedia(root: Element = document.body): { mediaId: nu
 
 export function initDeletionInterceptor(ctx: FeatureContext<true>): void {
   if (typeof window === 'undefined' || location.hostname !== 'anilist.co') return;
+
+  ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
+    activeRouteMedia = {
+      id: Number(rc.match![2]),
+      type: rc.match![1].toUpperCase() as SyncMediaType
+    };
+    return () => {
+      activeRouteMedia = null;
+    };
+  });
 
   ctx.hooks.onGqlFetch((ev) => {
     const queryStr = ev.query || ev.operationName || '';
@@ -167,5 +174,6 @@ export function initDeletionInterceptor(ctx: FeatureContext<true>): void {
 
   ctx.onCleanup(() => {
     activeCandidate = null;
+    activeRouteMedia = null;
   });
 }
