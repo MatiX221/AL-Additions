@@ -596,7 +596,8 @@ function followElementWhileCollapsing(
   collapsible: HTMLElement,
   startScrollY: number,
   startDocHeight: number,
-  startAnchorDocTop: number
+  startAnchorDocTop: number,
+  listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void
 ): () => void {
   if (typeof window === 'undefined' || typeof window.scrollBy !== 'function') return () => {};
 
@@ -618,14 +619,16 @@ function followElementWhileCollapsing(
 
   let rafId = 0;
   let active = true;
+  let unlistenWheel = () => {};
+  let unlistenTouch = () => {};
   const stop = () => {
     if (!active) return;
     active = false;
     if (rafId) cancelAnimationFrame(rafId);
     clearTimeout(timer);
     collapsible.removeEventListener('transitionend', onEnd);
-    window.removeEventListener('wheel', stop);
-    window.removeEventListener('touchstart', stop);
+    unlistenWheel();
+    unlistenTouch();
   };
   const onEnd = (e: TransitionEvent) => {
     if (e.target === collapsible && e.propertyName === 'grid-template-rows') {
@@ -645,8 +648,10 @@ function followElementWhileCollapsing(
   }, COLLAPSE_FALLBACK_MS);
 
   collapsible.addEventListener('transitionend', onEnd);
-  window.addEventListener('wheel', stop, { passive: true, once: true });
-  window.addEventListener('touchstart', stop, { passive: true, once: true });
+  if (listen) {
+    unlistenWheel = listen(window, 'wheel', stop, { passive: true, once: true });
+    unlistenTouch = listen(window, 'touchstart', stop, { passive: true, once: true });
+  }
   rafId = requestAnimationFrame(tick);
   return stop;
 }
@@ -655,7 +660,8 @@ export function createSongGroup(
   title: string,
   songs: SongEntry[],
   activePresets: SongProviderPreset[],
-  groupType: 'OP' | 'ED'
+  groupType: 'OP' | 'ED',
+  listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void
 ): HTMLDivElement {
   const g = document.createElement('div');
   g.className = 'daiya-anisongs-group';
@@ -708,7 +714,7 @@ export function createSongGroup(
     btn.textContent = expanded ? 'Show less' : showAllLabel;
     btn.setAttribute('aria-expanded', String(expanded));
     if (!expanded) {
-      stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop);
+      stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen);
     }
   });
 
@@ -784,6 +790,10 @@ defineModule({
       editor: openAniSongsModal
     }
   ],
+  migrate(m) {
+    // @migration(from: "v0.9.1", kind: "cleanup", sunset: "2-3 releases")
+    m.legacy.del('daiya_anisongs_cache_v8');
+  },
   setup(ctx) {
     const API = 'https://rs.animethemes.moe/graphql';
     const ROOT = 'daiya-anisongs';
@@ -935,7 +945,7 @@ defineModule({
 
     function mount(state: { id: string; themes: ThemesGroup }, overview: HTMLElement): void {
       document.getElementById(ROOT)?.remove();
-      const config = getValidAniSongsConfig();
+      const config = getValidAniSongsConfig(ctx.get('aniSongsProviders'));
       const presetMap = new Map<string, SongProviderPreset>();
       config.presets.forEach((p) => presetMap.set(p.id, p));
       const activePresets = config.active.map((id) => presetMap.get(id)).filter(Boolean) as SongProviderPreset[];
@@ -946,8 +956,8 @@ defineModule({
       const cols = document.createElement('div');
       cols.className = 'daiya-anisongs-columns';
       cols.append(
-        createSongGroup('Openings', state.themes.OP, activePresets, 'OP'),
-        createSongGroup('Endings', state.themes.ED, activePresets, 'ED')
+        createSongGroup('Openings', state.themes.OP, activePresets, 'OP', ctx.listen),
+        createSongGroup('Endings', state.themes.ED, activePresets, 'ED', ctx.listen)
       );
       root.appendChild(cols);
       overview.appendChild(root);

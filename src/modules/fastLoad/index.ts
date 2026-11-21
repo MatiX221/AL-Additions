@@ -1,11 +1,12 @@
 import { defineModule } from '../../core/registry';
-import { isBuiltInRunning, markBuiltIn } from '../../utils/standalone';
+import { detectFastLoad, isBuiltInRunning, markBuiltIn } from '../../utils/standalone';
 import { CFG, GQL_ORIGIN, MEDIA_ORIGIN, attempt } from './config';
 import {
   win,
   doc,
   setCoreHooks,
   setCoreSession,
+  setCoreStorage,
   setFastLoadLogs,
   initUserMap,
   registerGlobalBridges,
@@ -52,6 +53,26 @@ defineModule({
     name: 'AniList Fast Load',
     probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning('fastLoad')
   },
+  migrate(m) {
+    // @migration(from: "v0.9.1", kind: "cleanup", sunset: "2-3 releases")
+    m.legacy.del('alfl:workerUrl');
+    m.legacy.del('alfl:rpc:listTpl:v2');
+    if (!m.storage.get<boolean>('localStorageCleaned', false) && !detectFastLoad()) {
+      for (const k of [
+        'alfl:taxonomy:v1',
+        'alfl:routes:v1',
+        'alfl:routes:v2',
+        'alfl:routes:v3',
+        'alfl:routes:v4',
+        'alfl:userMap',
+        'alfl:workerUrl',
+        'alfl:rpc:listTpl:v2'
+      ]) {
+        m.legacy.delLocal(k);
+      }
+      m.storage.set('localStorageCleaned', true);
+    }
+  },
   setup(ctx) {
     if (win.top !== win.self) return;
     if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
@@ -66,6 +87,7 @@ defineModule({
     markBuiltIn('fastLoad');
     setCoreHooks(ctx.hooks);
     setCoreSession(ctx.session);
+    setCoreStorage(ctx.storage);
     setFastLoadLogs(ctx.log, ctx.log.channel('rpc'));
 
     ctx.hooks.registerCacheBridge({
@@ -168,6 +190,7 @@ defineModule({
     ctx.onCleanup(() => {
       navListeners.length = 0;
       setFastLoadLogs(null, null);
+      setCoreStorage(null);
       setCoreSession(null);
       setCoreHooks(null);
     });

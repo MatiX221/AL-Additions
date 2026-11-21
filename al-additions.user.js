@@ -1420,17 +1420,23 @@
 		};
 	})();
 	var styleRefCounts = new Map();
+	function prefixAlaId(id) {
+		const trimmed = id.trim();
+		if (!trimmed) return "";
+		return trimmed.startsWith("ala-") ? trimmed : `ala-${trimmed}`;
+	}
 	function addStyle(id, css) {
+		const styleId = prefixAlaId(id) || "ala-style";
 		let disposed = false;
 		let cancelReady = null;
-		styleRefCounts.set(id, (styleRefCounts.get(id) || 0) + 1);
+		styleRefCounts.set(styleId, (styleRefCounts.get(styleId) || 0) + 1);
 		const mount = () => {
 			if (disposed) return;
 			const parent = document.head || document.documentElement;
 			if (!parent) return;
-			if (!document.getElementById(id)) {
+			if (!document.getElementById(styleId)) {
 				const s = document.createElement("style");
-				s.id = id;
+				s.id = styleId;
 				s.textContent = css;
 				parent.appendChild(s);
 			}
@@ -1442,11 +1448,11 @@
 			disposed = true;
 			cancelReady?.();
 			cancelReady = null;
-			const nextCount = (styleRefCounts.get(id) || 1) - 1;
+			const nextCount = (styleRefCounts.get(styleId) || 1) - 1;
 			if (nextCount <= 0) {
-				styleRefCounts.delete(id);
-				document.getElementById(id)?.remove();
-			} else styleRefCounts.set(id, nextCount);
+				styleRefCounts.delete(styleId);
+				document.getElementById(styleId)?.remove();
+			} else styleRefCounts.set(styleId, nextCount);
 		};
 	}
 	var TOAST_ID = "ala-toast";
@@ -1782,11 +1788,16 @@
 			activeRequests.clear();
 		});
 		const storagePrefix = `ala_mod_${rec.id}_`;
+		const allowedAccounts = new Set(rec.accounts);
+		const assertAccountAllowed = (id) => {
+			if (!allowedAccounts.has(id)) throw new Error(`Module "${rec.id}" cannot access account provider "${id}" without declaring it in accounts`);
+		};
 		const addMount = (spec, pushCleanup, signal) => {
 			if (disposed || signal?.aborted) return noop;
 			let mountedEl = null;
 			let mountDisposed = false;
 			let ownDisposer = null;
+			const resolvedId = spec.id ? prefixAlaId(spec.id) : "";
 			const tryMount = () => {
 				if (mountDisposed || disposed || signal?.aborted) return;
 				if (spec.match && !spec.match()) {
@@ -1797,8 +1808,8 @@
 					return;
 				}
 				if (mountedEl?.isConnected) return;
-				if (spec.id) {
-					const existing = document.getElementById(spec.id);
+				if (resolvedId) {
+					const existing = document.getElementById(resolvedId);
 					if (existing?.isConnected) {
 						mountedEl = existing;
 						return;
@@ -1807,11 +1818,12 @@
 				const anchor = typeof spec.anchor === "string" ? document.querySelector(spec.anchor) : spec.anchor();
 				if (!anchor) return;
 				const el = spec.create();
-				if (spec.id && !el.id) el.id = spec.id;
+				if (resolvedId) el.id = resolvedId;
+				else if (el.id) el.id = prefixAlaId(el.id);
 				anchor.insertAdjacentElement(spec.position ?? "afterend", el);
 				mountedEl = el;
 				if (spec.ownUi && !ownDisposer) {
-					const sel = el.id ? `#${el.id}` : spec.id ? `#${spec.id}` : "";
+					const sel = el.id ? `#${el.id}` : resolvedId ? `#${resolvedId}` : "";
 					if (sel) ownDisposer = Core.registerOwnUi(sel);
 				}
 			};
@@ -2142,7 +2154,7 @@
 			get: (key) => Settings.get(key),
 			set: (key, val) => Settings.set(key, val),
 			storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
-			persistent: (key, prune) => persistent(key, prune),
+			persistent: (key, prune) => persistent(`${storagePrefix}${key}`, prune),
 			ready: (cb) => whenAlive(() => Core.ready(cb)),
 			onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
 			onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
@@ -2183,12 +2195,34 @@
 				return getSessionWrapper();
 			},
 			accounts: {
-				get: (id) => getAccountProvider(id),
-				isConnected: (id) => !!getAccountProvider(id)?.isConnected(),
-				connect: (id) => getAccountProvider(id)?.connect(),
-				disconnect: (id) => getAccountProvider(id)?.disconnect(),
-				clearSecrets: (providerId) => clearAccountSecrets(providerId),
-				watch: (id, cb) => whenAlive(() => watchAccountProvider(id, cb))
+				get: (id) => {
+					assertAccountAllowed(id);
+					return getAccountProvider(id);
+				},
+				isConnected: (id) => {
+					assertAccountAllowed(id);
+					return !!getAccountProvider(id)?.isConnected();
+				},
+				connect: (id) => {
+					assertAccountAllowed(id);
+					if (!disposed) getAccountProvider(id)?.connect();
+				},
+				disconnect: (id) => {
+					assertAccountAllowed(id);
+					if (!disposed) getAccountProvider(id)?.disconnect();
+				},
+				clearSecrets: (providerId) => {
+					if (providerId !== void 0) {
+						assertAccountAllowed(providerId);
+						clearAccountSecrets(providerId);
+						return;
+					}
+					for (const id of allowedAccounts) clearAccountSecrets(id);
+				},
+				watch: (id, cb) => {
+					assertAccountAllowed(id);
+					return whenAlive(() => watchAccountProvider(id, cb));
+				}
 			},
 			toast: {
 				show: showToast,
@@ -2360,6 +2394,7 @@
 		const hosts = meta.hosts?.length ? meta.hosts.slice() : ["anilist.co"];
 		const dependsOn = (meta.dependsOn || []).slice();
 		const after = (meta.after || []).slice();
+		const accounts = meta.accounts ? [...meta.accounts] : [];
 		Settings.register({
 			id: meta.id,
 			key: meta.key,
@@ -2375,7 +2410,7 @@
 			requiresReload: meta.requiresReload,
 			dependsOn,
 			after,
-			accounts: meta.accounts,
+			accounts: accounts.length ? accounts : void 0,
 			debug: meta.debug,
 			standalone: meta.standalone
 		});
@@ -2390,6 +2425,7 @@
 			requiresReload: !!meta.requiresReload,
 			dependsOn,
 			after,
+			accounts,
 			debug: meta.debug,
 			standalone: meta.standalone,
 			migrate: meta.migrate,
@@ -2437,6 +2473,7 @@
 			requiresReload: true,
 			dependsOn: [],
 			after: [],
+			accounts: [],
 			setup: () => init(),
 			legacyInit: init,
 			invalidId: false,
@@ -2478,6 +2515,19 @@
 						},
 						del: (key) => {
 							if (!migrateDone) store$1.del(key);
+						},
+						getLocal: (key) => {
+							try {
+								return localStorage.getItem(key);
+							} catch {
+								return null;
+							}
+						},
+						delLocal: (key) => {
+							if (migrateDone) return;
+							try {
+								localStorage.removeItem(key);
+							} catch {}
 						}
 					}
 				};
@@ -2510,6 +2560,9 @@
 	}
 	function createModuleHost() {
 		return {
+			get api() {
+				return configuredServices?.api;
+			},
 			reload(ids) {
 				const targetSet = new Set(ids);
 				const graph = resolveAllStates();
@@ -2672,6 +2725,9 @@
 		debug: {
 			debug: false,
 			label: "Airing Dots"
+		},
+		migrate(m) {
+			m.legacy.del("daiya-anilist-airing-cache-v5");
 		},
 		setup(ctx) {
 			const CLASS = "daiya-behind-dot";
@@ -3072,8 +3128,9 @@
 			}
 		};
 	}
-	function getValidAniSongsConfig() {
-		const check = validateAniSongsConfig(Settings.get("aniSongsProviders"));
+	function getValidAniSongsConfig(raw) {
+		if (raw === void 0) return JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
+		const check = validateAniSongsConfig(raw);
 		return check.valid && check.config ? check.config : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
 	}
 	function buildProviderUrl(template, params) {
@@ -3284,7 +3341,7 @@
   `;
 		document.body.appendChild(backdrop);
 		const close = () => {
-			document.removeEventListener("keydown", onKey, true);
+			unlistenKey();
 			backdrop.remove();
 		};
 		const onKey = (e) => {
@@ -3293,7 +3350,7 @@
 				close();
 			}
 		};
-		document.addEventListener("keydown", onKey, true);
+		const unlistenKey = ctx.listen(document, "keydown", onKey, true);
 		backdrop.querySelectorAll(".ala-as-close").forEach((btn) => btn.addEventListener("click", close));
 		backdrop.addEventListener("click", (e) => {
 			if (e.target === backdrop) close();
@@ -3935,7 +3992,7 @@
 		if (typeof document === "undefined") return 0;
 		return Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0);
 	}
-	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop) {
+	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop, listen) {
 		if (typeof window === "undefined" || typeof window.scrollBy !== "function") return () => {};
 		const stepScroll = () => {
 			const docShrink = Math.max(0, startDocHeight - getDocumentHeight());
@@ -3951,14 +4008,16 @@
 		}
 		let rafId = 0;
 		let active = true;
+		let unlistenWheel = () => {};
+		let unlistenTouch = () => {};
 		const stop = () => {
 			if (!active) return;
 			active = false;
 			if (rafId) cancelAnimationFrame(rafId);
 			clearTimeout(timer);
 			collapsible.removeEventListener("transitionend", onEnd);
-			window.removeEventListener("wheel", stop);
-			window.removeEventListener("touchstart", stop);
+			unlistenWheel();
+			unlistenTouch();
 		};
 		const onEnd = (e) => {
 			if (e.target === collapsible && e.propertyName === "grid-template-rows") {
@@ -3976,18 +4035,20 @@
 			stop();
 		}, COLLAPSE_FALLBACK_MS);
 		collapsible.addEventListener("transitionend", onEnd);
-		window.addEventListener("wheel", stop, {
-			passive: true,
-			once: true
-		});
-		window.addEventListener("touchstart", stop, {
-			passive: true,
-			once: true
-		});
+		if (listen) {
+			unlistenWheel = listen(window, "wheel", stop, {
+				passive: true,
+				once: true
+			});
+			unlistenTouch = listen(window, "touchstart", stop, {
+				passive: true,
+				once: true
+			});
+		}
 		rafId = requestAnimationFrame(tick);
 		return stop;
 	}
-	function createSongGroup(title, songs, activePresets, groupType) {
+	function createSongGroup(title, songs, activePresets, groupType, listen) {
 		const g = document.createElement("div");
 		g.className = "daiya-anisongs-group";
 		const h = document.createElement("h2");
@@ -4030,7 +4091,7 @@
 			extraWrap.classList.toggle("is-open", expanded);
 			btn.textContent = expanded ? "Show less" : showAllLabel;
 			btn.setAttribute("aria-expanded", String(expanded));
-			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop);
+			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen);
 		});
 		g.appendChild(btn);
 		return g;
@@ -4094,6 +4155,9 @@
 			validate: validateAniSongsConfig,
 			editor: openAniSongsModal
 		}],
+		migrate(m) {
+			m.legacy.del("daiya_anisongs_cache_v8");
+		},
 		setup(ctx) {
 			const API = "https://rs.animethemes.moe/graphql";
 			const ROOT = "daiya-anisongs";
@@ -4220,7 +4284,7 @@
 			});
 			function mount(state, overview) {
 				document.getElementById(ROOT)?.remove();
-				const config = getValidAniSongsConfig();
+				const config = getValidAniSongsConfig(ctx.get("aniSongsProviders"));
 				const presetMap = new Map();
 				config.presets.forEach((p) => presetMap.set(p.id, p));
 				const activePresets = config.active.map((id) => presetMap.get(id)).filter(Boolean);
@@ -4229,7 +4293,7 @@
 				root.dataset.animeId = state.id;
 				const cols = document.createElement("div");
 				cols.className = "daiya-anisongs-columns";
-				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP"), createSongGroup("Endings", state.themes.ED, activePresets, "ED"));
+				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP", ctx.listen), createSongGroup("Endings", state.themes.ED, activePresets, "ED", ctx.listen));
 				root.appendChild(cols);
 				overview.appendChild(root);
 			}
@@ -5527,6 +5591,10 @@
 	function setCoreSession(session) {
 		coreSession = session;
 	}
+	var coreStorage = null;
+	function setCoreStorage(storage) {
+		coreStorage = storage;
+	}
 	var fastLoadLog = null;
 	var fastLoadRpcLog = null;
 	function setFastLoadLogs(log, rpc) {
@@ -5581,18 +5649,22 @@
 		userMap.set(normName, id);
 		idToUserMap.set(id, normName);
 		attempt(() => {
-			const stored = JSON.parse(win.localStorage?.getItem("alfl:userMap") || "{}");
+			const raw = coreStorage?.get("userMap", null);
+			const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+			const stored = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? { ...parsed } : {};
 			if (stored[normName] !== id) {
 				stored[normName] = id;
 				const keys = Object.keys(stored);
 				if (keys.length > 300) delete stored[keys[0]];
-				win.localStorage?.setItem("alfl:userMap", JSON.stringify(stored));
+				coreStorage?.set("userMap", stored);
 			}
 		});
 	}
 	function initUserMap() {
 		attempt(() => {
-			const stored = JSON.parse(win.localStorage?.getItem("alfl:userMap") || "{}");
+			const raw = coreStorage?.get("userMap", null);
+			const stored = typeof raw === "string" ? JSON.parse(raw) : raw;
+			if (!stored || typeof stored !== "object") return;
 			for (const [k, v] of Object.entries(stored)) if (typeof v === "number" && v > 0) {
 				userMap.set(k.toLowerCase(), v);
 				idToUserMap.set(v, k.toLowerCase());
@@ -5942,7 +6014,7 @@
 			return JSON.parse(JSON.stringify(v));
 		}
 	};
-	var findWorkerUrl = () => workerUrl || performance.getEntriesByType("resource").map((e) => e.name).find((n) => /\.worker\.js(?:\?|$)/.test(n)) || attempt(() => win.localStorage?.getItem("alfl:workerUrl") || store$1.get("alfl:workerUrl", null)) || null;
+	var findWorkerUrl = () => workerUrl || performance.getEntriesByType("resource").map((e) => e.name).find((n) => /\.worker\.js(?:\?|$)/.test(n)) || attempt(() => coreStorage?.get("workerUrl", null)) || null;
 	var isRpcFetch = (d) => !!d && d.type === "RPC" && d.method === "fetch" && Array.isArray(d.params) && typeof d.params[1] === "string";
 	var rpcKey = (params) => {
 		const [endpoint, query, variables, headers] = params;
@@ -6064,10 +6136,10 @@
 		}
 		if (!userId && userName) userId = userMap.get(userName.toLowerCase()) || 0;
 		if (userId && !userName) userName = idToUserMap.get(userId) || void 0;
-		const raw = attempt(() => win.localStorage?.getItem("alfl:rpc:listTpl:v2") || store$1.get("alfl:rpc:listTpl:v2", null));
+		const raw = attempt(() => coreStorage?.get("rpc:listTpl:v2", null));
 		let tpl;
 		if (raw) try {
-			tpl = JSON.parse(raw);
+			tpl = typeof raw === "string" ? JSON.parse(raw) : raw;
 		} catch {}
 		if (!tpl) {
 			fastLoadRpcLog?.debug("Prefetch skipped: no list template yet");
@@ -6206,8 +6278,7 @@
 		w.addEventListener("error", (e) => {
 			fastLoadRpcLog?.debug("Prefetch worker error", e?.message);
 			attempt(() => {
-				win.localStorage?.removeItem("alfl:workerUrl");
-				store$1.del("alfl:workerUrl");
+				coreStorage?.del("workerUrl");
 			});
 			workerUrl = null;
 			finish();
@@ -6232,8 +6303,7 @@
 					if (urlStr.includes("worker.js") && !urlStr.includes("cloudflare")) {
 						attempt(() => {
 							workerUrl = new URL(urlStr, win.location.href).href;
-							win.localStorage?.setItem("alfl:workerUrl", workerUrl);
-							store$1.set("alfl:workerUrl", workerUrl);
+							coreStorage?.set("workerUrl", workerUrl);
 						});
 						workerOpts = options;
 						fastLoadRpcLog?.debug("Page worker created:", urlStr);
@@ -6331,8 +6401,7 @@
 								headers,
 								options: data.params[4]
 							});
-							win.localStorage?.setItem("alfl:rpc:listTpl:v2", tplStr);
-							store$1.set("alfl:rpc:listTpl:v2", tplStr);
+							coreStorage?.set("rpc:listTpl:v2", tplStr);
 						});
 						if (isMutation(q)) {
 							clearGlobalCache();
@@ -6529,7 +6598,7 @@
 		const auth = d.headers?.get?.("authorization") ? "a" : "";
 		return `${d.url}\u0001${auth}\u0001${normQuery}\u0001${normVars}`;
 	}
-	var TAXONOMY_STORAGE_KEY = "alfl:taxonomy:v1";
+	var TAXONOMY_STORAGE_KEY = "taxonomy:v1";
 	var TAXONOMY_TTL = 864e5;
 	function getQueryTtl(parsed) {
 		if (isTaxonomyQuery(parsed)) return TAXONOMY_TTL;
@@ -6539,9 +6608,9 @@
 	}
 	function loadStoredTaxonomy() {
 		try {
-			const raw = win.localStorage?.getItem(TAXONOMY_STORAGE_KEY);
+			const raw = coreStorage?.get(TAXONOMY_STORAGE_KEY, null);
 			if (!raw) return null;
-			const parsed = JSON.parse(raw);
+			const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
 			if (parsed && typeof parsed.time === "number" && typeof parsed.text === "string") return parsed;
 		} catch {}
 		return null;
@@ -6549,13 +6618,13 @@
 	function persistStoredTaxonomy(snap) {
 		attempt(() => {
 			const text = decoder.decode(snap.buf);
-			win.localStorage?.setItem(TAXONOMY_STORAGE_KEY, JSON.stringify({
+			coreStorage?.set(TAXONOMY_STORAGE_KEY, {
 				time: Date.now(),
 				text,
 				status: snap.status,
 				statusText: snap.statusText,
 				headers: snap.headers
-			}));
+			});
 		});
 	}
 	var note429 = (res) => {
@@ -6637,7 +6706,7 @@
 			const storedTax = loadStoredTaxonomy();
 			if (storedTax && now - storedTax.time < TAXONOMY_TTL) {
 				stats.cacheHits++;
-				fastLoadLog?.debug("Cache HIT (24h localStorage): GenreCollection & MediaTagCollection");
+				fastLoadLog?.debug("Cache HIT (24h storage): GenreCollection & MediaTagCollection");
 				const HeadersCtor = win.Headers || Headers;
 				const ResponseCtor = win.Response || Response;
 				return Promise.resolve(new ResponseCtor(storedTax.text, {
@@ -6846,7 +6915,7 @@
 		return count;
 	}
 	var learned = new Map();
-	var ROUTES_KEY = "alfl:routes:v4";
+	var ROUTES_KEY = "routes:v4";
 	var ROUTES_TTL = 2592e6;
 	var persistTimer = 0;
 	var persistRoutes = () => {
@@ -6859,18 +6928,16 @@
 				static: !!v.route.static,
 				reqs: v.reqs
 			};
-			win.localStorage?.setItem(ROUTES_KEY, JSON.stringify(out));
+			coreStorage?.set(ROUTES_KEY, out);
 		}), 1e3);
 	};
 	function loadRoutes() {
 		attempt(() => {
-			win.localStorage?.removeItem("alfl:routes:v1");
-			win.localStorage?.removeItem("alfl:routes:v2");
-			win.localStorage?.removeItem("alfl:routes:v3");
-			const raw = win.localStorage?.getItem(ROUTES_KEY);
-			if (raw) {
+			const raw = coreStorage?.get(ROUTES_KEY, null);
+			const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+			if (data && typeof data === "object") {
 				const now = Date.now();
-				for (const [shape, v] of Object.entries(JSON.parse(raw))) {
+				for (const [shape, v] of Object.entries(data)) {
 					if (!v || !Array.isArray(v.reqs) || typeof v.t !== "number" || now - v.t > ROUTES_TTL) continue;
 					const reqs = v.reqs.filter((r) => r && typeof r.body === "string" && typeof r.url === "string" && isGraphQL(r.url) && r.headers && typeof r.headers === "object");
 					if (reqs.length) learned.set(shape, {
@@ -7163,6 +7230,23 @@
 			name: "AniList Fast Load",
 			probe: () => !!(win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) && !isBuiltInRunning("fastLoad")
 		},
+		migrate(m) {
+			m.legacy.del("alfl:workerUrl");
+			m.legacy.del("alfl:rpc:listTpl:v2");
+			if (!m.storage.get("localStorageCleaned", false) && !detectFastLoad()) {
+				for (const k of [
+					"alfl:taxonomy:v1",
+					"alfl:routes:v1",
+					"alfl:routes:v2",
+					"alfl:routes:v3",
+					"alfl:routes:v4",
+					"alfl:userMap",
+					"alfl:workerUrl",
+					"alfl:rpc:listTpl:v2"
+				]) m.legacy.delLocal(k);
+				m.storage.set("localStorageCleaned", true);
+			}
+		},
 		setup(ctx) {
 			if (win.top !== win.self) return;
 			if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
@@ -7174,6 +7258,7 @@
 			markBuiltIn("fastLoad");
 			setCoreHooks(ctx.hooks);
 			setCoreSession(ctx.session);
+			setCoreStorage(ctx.storage);
 			setFastLoadLogs(ctx.log, ctx.log.channel("rpc"));
 			ctx.hooks.registerCacheBridge({
 				getGqlStore: () => store,
@@ -7262,6 +7347,7 @@
 			ctx.onCleanup(() => {
 				navListeners.length = 0;
 				setFastLoadLogs(null, null);
+				setCoreStorage(null);
 				setCoreSession(null);
 				setCoreHooks(null);
 			});
@@ -9829,33 +9915,62 @@
 	}
 	var TYPES = MEDIA_TYPES;
 	var typeLabel = (t) => t === "ANIME" ? "Anime" : "Manga";
-	var SYNC_STORAGE_PREFIX = "ala_mod_sync_";
-	var SYNC_KNOWN_KEYS = [
-		"schema",
-		"lock_heartbeat",
-		"sync_onboarded",
-		"sync_retry_at",
-		"sync_account",
-		"pending_deletes",
-		...TYPES.flatMap((t) => [
-			`last_sync_${t}`,
-			`last_run_${t}`,
-			`last_compare_${t}`
-		])
-	];
+	var fallbackMemory = new Map();
+	var fallbackStorage = {
+		get: (key, def) => fallbackMemory.has(key) ? fallbackMemory.get(key) : def,
+		set: (key, val) => {
+			fallbackMemory.set(key, val);
+		},
+		del: (key) => {
+			fallbackMemory.delete(key);
+		},
+		clear: () => {
+			fallbackMemory.clear();
+		},
+		watch: () => () => {}
+	};
+	var activeStorage = null;
+	function setSyncStorage(storage) {
+		activeStorage = storage;
+	}
+	var scoped = () => activeStorage ?? fallbackStorage;
 	var syncStore = {
-		get: (k, d) => store$1.get(`${SYNC_STORAGE_PREFIX}${k}`, d),
-		set: (k, v) => store$1.set(`${SYNC_STORAGE_PREFIX}${k}`, v),
-		del: (k) => store$1.del(`${SYNC_STORAGE_PREFIX}${k}`),
-		jsonGet: (k, d) => jsonGet(`${SYNC_STORAGE_PREFIX}${k}`, d),
-		jsonSet: (k, v) => jsonSet(`${SYNC_STORAGE_PREFIX}${k}`, v),
+		get: (k, d) => scoped().get(k, d),
+		set: (k, v) => scoped().set(k, v),
+		del: (k) => scoped().del(k),
+		jsonGet: (k, d) => {
+			const raw = scoped().get(k, null);
+			if (raw == null) return d;
+			if (typeof raw === "string") try {
+				return JSON.parse(raw);
+			} catch {
+				return d;
+			}
+			return raw;
+		},
+		jsonSet: (k, v) => scoped().set(k, v),
 		clearKnown: () => {
-			for (const k of SYNC_KNOWN_KEYS) store$1.del(`${SYNC_STORAGE_PREFIX}${k}`);
+			scoped().clear();
 		}
 	};
 	var syncLog = null;
 	function setSyncLog(log) {
 		syncLog = log;
+	}
+	var syncApi = null;
+	function setSyncApi(api) {
+		syncApi = api;
+	}
+	var defaultSyncGet = (key) => {
+		if (key === "syncScoreRounding") return "round";
+		if (key === "syncMode") return "update";
+		if (key === "syncIntervalAnime" || key === "syncIntervalManga") return 6;
+		if (key === "syncEnabled") return true;
+		return false;
+	};
+	var syncGet = defaultSyncGet;
+	function setSyncGet(getter) {
+		syncGet = getter ?? defaultSyncGet;
 	}
 	var SETTLED_TTL_MS = 3888e6;
 	var LOCK_STALE_MS = 45e3;
@@ -9916,14 +10031,26 @@
 			if (!Array.isArray(r) || !(Date.now() - r[2] < SETTLED_TTL_MS)) delete d[k];
 		}
 	};
-	var makeStores = (t) => ({
-		ids: persistent(`${SYNC_STORAGE_PREFIX}idmap_${t}`, pruneIds),
-		settled: persistent(`${SYNC_STORAGE_PREFIX}settled_${t}`, pruneSettled)
+	var makeEmptyStore = () => ({
+		data: {},
+		save: () => {}
 	});
 	var stores = {
-		ANIME: makeStores("ANIME"),
-		MANGA: makeStores("MANGA")
+		ANIME: {
+			ids: makeEmptyStore(),
+			settled: makeEmptyStore()
+		},
+		MANGA: {
+			ids: makeEmptyStore(),
+			settled: makeEmptyStore()
+		}
 	};
+	function initSyncStores(createPersistent) {
+		for (const t of TYPES) {
+			stores[t].ids = createPersistent(`idmap_${t}`, pruneIds);
+			stores[t].settled = createPersistent(`settled_${t}`, pruneSettled);
+		}
+	}
 	var clearCache = (c) => {
 		for (const k of Object.keys(c.data)) delete c.data[k];
 		c.save();
@@ -9995,9 +10122,8 @@
 		"num_chapters_read",
 		"num_volumes_read"
 	];
-	function convertScore(score100) {
+	function convertScore(score100, mode = syncGet("syncScoreRounding") || "round") {
 		if (!score100 || score100 <= 0) return 0;
-		const mode = Settings.get("syncScoreRounding");
 		return Math.max(1, Math.min(10, (mode === "ceil" ? Math.ceil : mode === "floor" ? Math.floor : Math.round)(Number(score100) / 10)));
 	}
 	var fuzzyToMalDate = (f) => f && f.year && f.month && f.day ? `${f.year}-${String(f.month).padStart(2, "0")}-${String(f.day).padStart(2, "0")}` : null;
@@ -10310,7 +10436,7 @@
 		const out = [];
 		for (let page = 1; page <= 400; page++) {
 			checkCancel();
-			const p = (await AniList.query(q, {
+			const p = (await syncApi?.query(q, {
 				userId,
 				type,
 				page
@@ -10327,14 +10453,14 @@
 		}
 		return out;
 	}
-	async function alFetchAll(userId, type) {
+	async function alFetchAll(userId, type, api = syncApi) {
 		const q = `query ($userId: Int, $type: MediaType, $chunk: Int, $perChunk: Int) {
     MediaListCollection(userId: $userId, type: $type, chunk: $chunk, perChunk: $perChunk) { hasNextChunk lists { entries { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } } }`;
 		const out = [];
 		const seen = new Set();
 		for (let chunk = 1; chunk <= 100; chunk++) {
 			checkCancel();
-			const c = (await AniList.query(q, {
+			const c = (await api?.query(q, {
 				userId,
 				type,
 				chunk,
@@ -10471,7 +10597,7 @@
 		};
 		const lastSync = Number(syncStore.get(`last_sync_${type}`, 0)) || 0;
 		const fullPass = full || !lastSync || Date.now() - Number(syncStore.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
-		const isExact = Settings.get("syncMode") === "exact";
+		const isExact = syncGet("syncMode") === "exact";
 		log(`${label}: starting ${fullPass ? "full library comparison" : "incremental sync"} — fetching AniList entries and your current MAL list.`);
 		syncLog?.debug(`${label}: starting sync pass:`, {
 			fullPass,
@@ -10565,8 +10691,8 @@
 		return m ? m[1].toUpperCase() : null;
 	};
 	async function confirmDecimalScores() {
-		if ((await tryOr(() => AniList.viewer()))?.scoreFormat !== "POINT_10_DECIMAL") return true;
-		const mode = Settings.get("syncScoreRounding");
+		if ((await tryOr(() => syncApi?.viewer() ?? Promise.resolve(null)))?.scoreFormat !== "POINT_10_DECIMAL") return true;
+		const mode = syncGet("syncScoreRounding");
 		return confirm(`Decimal scores detected on AniList.\n\nMAL uses whole-number scores, so your decimal scores will be converted using: ${{
 			ceil: "Ceil (always up)",
 			round: "Round (.1–.4 down, .5–.9 up)",
@@ -10578,7 +10704,7 @@
 		}[mode]}.\n\nThis will affect the scores written to MAL during this first sync.\n\nContinue with the first sync?`);
 	}
 	function handleAuthFailure(e) {
-		if (e.auth === "AniList") AniList.clearViewer();
+		if (e.auth === "AniList") syncApi?.clearViewer();
 		else clearMalAuth();
 		log(`⚠ ${e.message}`);
 	}
@@ -10586,7 +10712,7 @@
 		syncLog?.debug("runSync initiated for types:", types, "options:", opts);
 		if (syncStatus.syncing) return log("Sync already running.");
 		if (!onAniList()) return log("Open AniList to run a sync — it needs your AniList login.", "warn");
-		if (!AniList.hasAuth()) return log("Log in to AniList first.");
+		if (!syncApi?.hasAuth()) return log("Log in to AniList first.");
 		if (!isMalConnected()) return log("Connect MyAnimeList first.");
 		if (navigator.onLine === false) return log("You appear to be offline; sync skipped.");
 		syncStatus.syncing = true;
@@ -10607,7 +10733,7 @@
 		const startedAt = Date.now();
 		let allOk = false;
 		try {
-			const viewer = await AniList.viewer();
+			const viewer = await syncApi?.viewer();
 			if (!viewer) throw authError("AniList", "AniList is not logged in.");
 			const me = await malWhoAmI();
 			const account = `${viewer.id}:${me.id}`;
@@ -10666,15 +10792,15 @@
 		runSync([...TYPES], { full: true });
 	}
 	function maybeAutoSync() {
-		if (!onAniList() || !Settings.get("syncEnabled") || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
-		if (!AniList.hasAuth() || !isMalConnected()) return;
+		if (!onAniList() || !syncGet("syncEnabled") || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
+		if (!syncApi?.hasAuth() || !isMalConnected()) return;
 		const retryAt = Number(syncStore.get("sync_retry_at", 0)) || 0;
 		if (retryAt > 0 && Date.now() < retryAt) return;
 		const dueTypes = [];
 		for (const t of TYPES) {
 			const isAnime = t === "ANIME";
-			if (!Settings.get(isAnime ? "syncAutoAnime" : "syncAutoManga")) continue;
-			const hours = Math.max(1, Number(Settings.get(isAnime ? "syncIntervalAnime" : "syncIntervalManga")) || 6);
+			if (!syncGet(isAnime ? "syncAutoAnime" : "syncAutoManga")) continue;
+			const hours = Math.max(1, Number(syncGet(isAnime ? "syncIntervalAnime" : "syncIntervalManga")) || 6);
 			const last = Number(syncStore.get(`last_run_${t}`, 0)) || 0;
 			if (retryAt > 0 ? !last || Date.now() - last * 1e3 >= RETRY_AFTER_FAILURE_MS : !last || Date.now() - last * 1e3 >= hours * 36e5) dueTypes.push(t);
 		}
@@ -11152,7 +11278,7 @@
 		return qIdx === q.length;
 	}
 	var unmatchedMetaCache = new Map();
-	async function batchFetchUnmatchedMeta(ids, log) {
+	async function batchFetchUnmatchedMeta(ids, log, api = syncApi) {
 		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
 		if (!needed.length) return;
 		for (let i = 0; i < needed.length; i += 50) {
@@ -11167,7 +11293,7 @@
       }
     }`;
 			try {
-				const list = (await AniList.query(q, { ids: batch }))?.Page?.media || [];
+				const list = (await api?.query(q, { ids: batch }))?.Page?.media || [];
 				for (const m of list) {
 					const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
 					unmatchedMetaCache.set(m.id, {
@@ -11181,7 +11307,7 @@
 			}
 		}
 	}
-	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", addStyleFn, onUpdated) {
+	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", addStyleFn, onUpdated, api = syncApi) {
 		ensureOverridesStyle(addStyleFn);
 		const existing = document.getElementById(QUICK_MODAL_ID);
 		if (existing) existing.remove();
@@ -11241,7 +11367,7 @@
     }
   }`;
 		try {
-			const m = (await AniList.query(q, { id: mediaId }))?.Media;
+			const m = (await api?.query(q, { id: mediaId }))?.Media;
 			if (m) {
 				loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
 				loadedCover = m.coverImage?.medium || loadedCover;
@@ -11291,9 +11417,9 @@
 			close();
 		});
 	}
-	function openOverridesModal(ctxOrAddStyle) {
-		const ec = typeof ctxOrAddStyle === "object" ? ctxOrAddStyle : void 0;
-		ensureOverridesStyle(typeof ctxOrAddStyle === "function" ? ctxOrAddStyle : ec?.addStyle);
+	function openOverridesModal(ec) {
+		const api = ec.api ?? syncApi;
+		ensureOverridesStyle(ec.addStyle);
 		const existing = document.getElementById(MODAL_ID);
 		if (existing) existing.remove();
 		const staging = typeof ec?.onApply === "function";
@@ -11469,10 +11595,10 @@
 			}
 		};
 		const close = () => {
-			document.removeEventListener("keydown", onKey, true);
+			unlistenKey();
 			backdrop.remove();
 		};
-		document.addEventListener("keydown", onKey, true);
+		const unlistenKey = ec.listen(document, "keydown", onKey, true);
 		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
 		backdrop.querySelector("#ala-ov-btn-done")?.addEventListener("click", () => {
 			if (staging) ec.onApply(draftOverrides);
@@ -11562,7 +11688,7 @@
       }
     }`;
 			try {
-				const res = await AniList.query(q, { id });
+				const res = await api?.query(q, { id });
 				if (extractAlId(alInput.value) !== id) return;
 				const m = res?.Media;
 				if (!m) {
@@ -11625,7 +11751,7 @@
 			});
 			clearForm();
 			renderList();
-			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
+			if (title === `Media #${id}`) api?.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
 				const m = res?.Media;
 				if (m) {
 					const current = { ...readOverrides() };
@@ -11660,7 +11786,7 @@
 			});
 			clearForm();
 			renderList();
-			if (title === `Media #${id}`) AniList.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
+			if (title === `Media #${id}`) api?.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
 				const m = res?.Media;
 				if (m) {
 					const current = { ...readOverrides() };
@@ -11864,7 +11990,7 @@
 		function renderAudit() {
 			renderUnmatchedList();
 			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
-			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds, ec?.log).then(() => {
+			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds, ec.log, api).then(() => {
 				renderUnmatchedList();
 			});
 			renderOrphansList();
@@ -11959,7 +12085,7 @@
 			scanOrphansBtn.textContent = "Scanning...";
 			orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
 			try {
-				const viewer = await AniList.viewer();
+				const viewer = await api?.viewer();
 				if (!viewer) {
 					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
 					return;
@@ -11967,7 +12093,7 @@
 				const overrides = readOverrides();
 				const knownMalIds = new Set();
 				for (const t of ["ANIME", "MANGA"]) try {
-					const alEntries = await alFetchAll(viewer.id, t);
+					const alEntries = await alFetchAll(viewer.id, t, api);
 					for (const e of alEntries) {
 						const ov = overrides[String(e.mediaId)];
 						if (ov) {
@@ -12324,6 +12450,10 @@
 		},
 		setup(ctx) {
 			setSyncLog(ctx.log);
+			setSyncGet(ctx.get);
+			setSyncStorage(ctx.storage);
+			setSyncApi(ctx.api);
+			initSyncStores(ctx.persistent);
 			initDeletionInterceptor(ctx);
 			ctx.menuCommand("🗑️ AL→MAL Sync: Reset all data", () => {
 				syncStore.clearKnown();
@@ -12344,8 +12474,12 @@
 			});
 			if (location.hostname === "anilist.co") initSyncPanel(ctx);
 			ctx.onCleanup(() => {
-				setSyncLog(null);
 				if (syncStatus.syncing) syncStatus.cancelled = true;
+				releaseLock();
+				setSyncLog(null);
+				setSyncGet(null);
+				setSyncStorage(null);
+				setSyncApi(null);
 			});
 		}
 	});
@@ -12373,7 +12507,7 @@
 		},
 		setup(ctx) {
 			ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
-			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx.addStyle, () => ctx.events.emit("manualOverrides:changed", mediaId)));
+			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx.addStyle, () => ctx.events.emit("manualOverrides:changed", mediaId), ctx.api));
 		}
 	});
 	defineModule({
@@ -12780,7 +12914,7 @@
 			}
 		});
 		const closeModal = () => {
-			document.removeEventListener("keydown", onKey, true);
+			unlistenKey();
 			backdrop.remove();
 		};
 		const onKey = (e) => {
@@ -12789,7 +12923,7 @@
 				closeModal();
 			}
 		};
-		document.addEventListener("keydown", onKey, true);
+		const unlistenKey = ctx.listen(document, "keydown", onKey, true);
 		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
 		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
 		backdrop.addEventListener("click", (e) => {
@@ -12806,13 +12940,14 @@
 		});
 		renderTable(tiers);
 	}
-	function getValidTiers() {
-		const check = validateTiers(Settings.get("tierLabels"));
+	function getValidTiers(raw) {
+		if (raw === void 0) return DEFAULT_TIERS;
+		const check = validateTiers(raw);
 		return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 	}
 	function migrateLegacyTierLabels(m) {
 		try {
-			const legacy = localStorage.getItem("anilistTierLabelsSettings");
+			const legacy = m.legacy.getLocal("anilistTierLabelsSettings");
 			if (legacy) {
 				const parsed = JSON.parse(legacy);
 				if (Array.isArray(parsed.tiers) && parsed.tiers.length && !m.settings.has("tierLabels")) {
@@ -13047,7 +13182,7 @@
 				});
 			}
 			function applyTierLabels() {
-				const tiers = getValidTiers();
+				const tiers = getValidTiers(ctx.get("tierLabels"));
 				const colorScore = !!ctx.get("tierLabelsColorScore");
 				const showAverage = !!ctx.get("tierLabelsAverageScore");
 				const viewerScoreFormat = ctx.session.scoreFormat;
@@ -14487,6 +14622,12 @@
 					editorStyleDisposers.add(dispose);
 					return dispose;
 				};
+				const trackedListen = (target, type, listener, options) => {
+					target.addEventListener(type, listener, options);
+					const dispose = () => target.removeEventListener(type, listener, options);
+					editorStyleDisposers.add(dispose);
+					return dispose;
+				};
 				try {
 					r.editor({
 						value: TYPES$1.json.read(inputEl),
@@ -14501,6 +14642,8 @@
 							setStatus(`Updated. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply.`);
 						},
 						addStyle: trackedAddStyle,
+						listen: trackedListen,
+						api: host.api,
 						log: settingsLog
 					});
 				} finally {

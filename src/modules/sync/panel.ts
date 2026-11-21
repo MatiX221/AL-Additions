@@ -13,7 +13,7 @@ import type { FeatureContext } from '../../types';
 import { progress, syncStatus, syncStore, onProgressChange, onStateChange } from './state';
 import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';
 
-let panelCtx: FeatureContext<true> | null = null;
+let panelCtx: FeatureContext<true, 'mal'> | null = null;
 
 const PANEL_CSS = `
   #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
@@ -360,7 +360,7 @@ export function mountPanel(): void {
 }
 const mountSoon = debounce(mountPanel, 250);
 
-export function initSyncPanel(ctx: FeatureContext<true>): void {
+export function initSyncPanel(ctx: FeatureContext<true, 'mal'>): void {
   panelCtx = ctx;
   ctx.ownUi('#almal-panel');
   ctx.addStyle('almal-style', PANEL_CSS);

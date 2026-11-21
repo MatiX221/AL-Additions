@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
-import { bootModuleForTest } from '../src/core/registry';
+import { bootModuleForTest, runMigrations } from '../src/core/registry';
 import { CoreHooks } from '../src/core/bus';
 import { Settings } from '../src/settings/settings';
 import { store as gmStore } from '../src/utils/helpers';
@@ -533,9 +533,14 @@ describe('FastLoad: GraphQL Performance & Cache Engine', () => {
           }
         })
       );
+      gmStore.set('alfl:workerUrl', 'https://anilist.co/old.worker.js');
+      gmStore.set('alfl:rpc:listTpl:v2', '{}');
       learned.clear();
+      runMigrations();
       loadRoutes();
       expect(window.localStorage.getItem('alfl:routes:v3')).toBeNull();
+      expect(gmStore.get('alfl:workerUrl', null)).toBeNull();
+      expect(gmStore.get('alfl:rpc:listTpl:v2', null)).toBeNull();
       expect(learned.get('anime/')).toBeUndefined();
 
       history.replaceState({}, '', '/anime/206949');

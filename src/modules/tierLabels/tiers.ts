@@ -25,7 +25,6 @@ export function getTier(rating: number, tiers: TierConfig[]): TierConfig | null 
       return tier;
     }
   }
-  // Tolerant match for floating precision boundary gaps (e.g. 94.95 between 94.9 and 95)
   for (const tier of tiers) {
     if (rating >= tier.min - 0.05 && rating <= tier.max + 0.05) {
       return tier;
@@ -51,17 +50,14 @@ export function isValidColor(color: string): boolean {
   // Functional CSS: rgb(), rgba(), hsl(), hsla()
   if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
 
-  // Named colors
   if (NAMED_COLORS.has(s.toLowerCase())) return true;
 
-  // Browser CSS.supports if available
   if (typeof CSS !== 'undefined' && typeof CSS.supports === 'function') {
     try {
       if (CSS.supports('color', s)) return true;
     } catch (_) {}
   }
 
-  // Fallback via Option style
   if (typeof Option !== 'undefined') {
     try {
       const opt = new Option();

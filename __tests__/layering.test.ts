@@ -142,7 +142,6 @@ function isAllowedEdge(from: string, to: string): boolean {
       return toLayer === 'utils' || toLayer === 'api' || (toLayer === 'core' && to !== 'core/registry.ts');
     case 'module':
       if (toLayer === 'utils' || toLayer === 'api') return true;
-      if (to === 'settings/settings.ts') return true;
       if (to === 'core/registry.ts') return true;
       if (toLayer === 'module') return getModuleName(from) === getModuleName(to);
       return false;

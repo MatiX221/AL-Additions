@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import '../src/modules/tierLabels';
 import {
   DEFAULT_TIERS,
@@ -144,24 +144,19 @@ describe('Tier Labels: Schema Validation (validateTiers)', () => {
   });
 });
 
-describe('Tier Labels: Settings Integration (getValidTiers)', () => {
-  beforeEach(() => {
-    Settings.set('tierLabels', DEFAULT_TIERS);
-  });
-
-  it('returns DEFAULT_TIERS when no custom configuration is set', () => {
+describe('Tier Labels: Config Resolution (getValidTiers)', () => {
+  it('returns DEFAULT_TIERS when no custom configuration is passed', () => {
     const tiers = getValidTiers();
     expectTiersMatch(tiers, DEFAULT_TIERS);
   });
 
-  it('returns customized tiers when valid configuration is saved in Settings', () => {
+  it('returns customized tiers when valid configuration is passed', () => {
     const customTiers: TierConfig[] = [
       { min: 90, max: 100, label: 'GOAT', color: '#ffd700', textColor: '#000000' },
       { min: 0, max: 89.9, label: 'Mid', color: '#888888', textColor: '#ffffff' }
     ];
 
-    Settings.set('tierLabels', customTiers);
-    const tiers = getValidTiers();
+    const tiers = getValidTiers(customTiers);
 
     expect(tiers.length).toBe(2);
     expect(tiers[0].label).toBe('GOAT');
@@ -169,8 +164,7 @@ describe('Tier Labels: Settings Integration (getValidTiers)', () => {
   });
 
   it('falls back to DEFAULT_TIERS if stored settings value is corrupted or invalid', () => {
-    Settings.set('tierLabels', [{ min: 100, max: 0, label: 'Corrupted' }]);
-    const tiers = getValidTiers();
+    const tiers = getValidTiers([{ min: 100, max: 0, label: 'Corrupted' }]);
 
     expectTiersMatch(tiers, DEFAULT_TIERS);
   });

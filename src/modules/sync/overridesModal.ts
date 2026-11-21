@@ -1,6 +1,5 @@
-import { AniList } from '../../api/anilist';
 import { malFetchList, malDeleteEntry } from '../../api/mal';
-import { stores } from './state';
+import { stores, syncApi } from './state';
 import { alFetchAll } from './engine';
 import {
   getManualOverrides,
@@ -12,7 +11,7 @@ import {
   validateOverrides
 } from '../../api/malOverrides';
 import { SyncMediaType } from './types';
-import type { JsonEditorContext, ManualOverride, ManualOverrideStore } from '../../types';
+import type { AniListClient, JsonEditorContext, ManualOverride, ManualOverrideStore } from '../../types';
 
 const MODAL_ID = 'ala-overrides-backdrop';
 const QUICK_MODAL_ID = 'ala-quick-override-backdrop';
@@ -180,7 +179,8 @@ const unmatchedMetaCache = new Map<number, UnmatchedMediaMeta>();
 
 async function batchFetchUnmatchedMeta(
   ids: number[],
-  log?: JsonEditorContext['log']
+  log?: JsonEditorContext['log'],
+  api: AniListClient | null = syncApi
 ): Promise<void> {
   const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
   if (!needed.length) return;
@@ -197,7 +197,7 @@ async function batchFetchUnmatchedMeta(
       }
     }`;
     try {
-      const res = await AniList.query(q, { ids: batch });
+      const res = await api?.query(q, { ids: batch });
       const list = res?.Page?.media || [];
       for (const m of list) {
         const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
@@ -217,7 +217,8 @@ export async function openQuickOverrideModal(
   mediaId: number,
   mediaType: SyncMediaType = 'ANIME',
   addStyleFn?: (id: string, css: string) => void,
-  onUpdated?: () => void
+  onUpdated?: () => void,
+  api: AniListClient | null = syncApi
 ): Promise<void> {
   ensureOverridesStyle(addStyleFn);
   const existing = document.getElementById(QUICK_MODAL_ID);
@@ -291,7 +292,7 @@ export async function openQuickOverrideModal(
   }`;
 
   try {
-    const res = await AniList.query(q, { id: mediaId });
+    const res = await api?.query(q, { id: mediaId });
     const m = res?.Media;
     if (m) {
       loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
@@ -360,11 +361,9 @@ export async function openQuickOverrideModal(
   });
 }
 
-export function openOverridesModal(
-  ctxOrAddStyle?: Partial<JsonEditorContext> | ((id: string, css: string) => void)
-): void {
-  const ec = typeof ctxOrAddStyle === 'object' ? ctxOrAddStyle : undefined;
-  ensureOverridesStyle(typeof ctxOrAddStyle === 'function' ? ctxOrAddStyle : ec?.addStyle);
+export function openOverridesModal(ec: JsonEditorContext): void {
+  const api = ec.api ?? syncApi;
+  ensureOverridesStyle(ec.addStyle);
   const existing = document.getElementById(MODAL_ID);
   if (existing) existing.remove();
 
@@ -554,10 +553,10 @@ export function openOverridesModal(
     }
   };
   const close = () => {
-    document.removeEventListener('keydown', onKey, true);
+    unlistenKey();
     backdrop.remove();
   };
-  document.addEventListener('keydown', onKey, true);
+  const unlistenKey = ec.listen(document, 'keydown', onKey as EventListener, true);
   backdrop.querySelectorAll('.ala-ov-close').forEach((btn) => btn.addEventListener('click', close));
   backdrop.querySelector('#ala-ov-btn-done')?.addEventListener('click', () => {
     if (staging) ec!.onApply!(draftOverrides);
@@ -665,7 +664,7 @@ export function openOverridesModal(
     }`;
 
     try {
-      const res = await AniList.query(q, { id });
+      const res = await api?.query(q, { id });
       if (extractAlId(alInput.value) !== id) return;
 
       const m = res?.Media;
@@ -745,11 +744,11 @@ export function openOverridesModal(
     renderList();
 
     if (title === `Media #${id}`) {
-      AniList.query(
+      api?.query(
         `query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`,
         { id }
       )
-        .then((res) => {
+        .then((res: any) => {
           const m = res?.Media;
           if (m) {
             const current = { ...readOverrides() };
@@ -792,11 +791,11 @@ export function openOverridesModal(
     renderList();
 
     if (title === `Media #${id}`) {
-      AniList.query(
+      api?.query(
         `query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`,
         { id }
       )
-        .then((res) => {
+        .then((res: any) => {
           const m = res?.Media;
           if (m) {
             const current = { ...readOverrides() };
@@ -819,7 +818,6 @@ export function openOverridesModal(
     }
   });
 
-  // Filter chips in Tab 1
   backdrop.querySelectorAll<HTMLButtonElement>('[data-status-filter]').forEach((c) => {
     c.addEventListener('click', () => {
       backdrop.querySelectorAll('[data-status-filter]').forEach((o) => o.classList.toggle('is-active', o === c));
@@ -922,7 +920,6 @@ export function openOverridesModal(
     });
   }
 
-  // Tab 2: Audit Logic
   let unmatchedTypeFilter = 'all';
   let unmatchedSearchQuery = '';
   let orphansTypeFilter = 'all';
@@ -1040,7 +1037,7 @@ export function openOverridesModal(
     const raw = getRawUnmatched();
     const missingMetaIds = raw.map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
     if (missingMetaIds.length > 0) {
-      batchFetchUnmatchedMeta(missingMetaIds, ec?.log).then(() => {
+      batchFetchUnmatchedMeta(missingMetaIds, ec.log, api).then(() => {
         renderUnmatchedList();
       });
     }
@@ -1161,7 +1158,7 @@ export function openOverridesModal(
     orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
 
     try {
-      const viewer = await AniList.viewer();
+      const viewer = await api?.viewer();
       if (!viewer) {
         orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
         return;
@@ -1172,7 +1169,7 @@ export function openOverridesModal(
 
       for (const t of ['ANIME', 'MANGA'] as const) {
         try {
-          const alEntries = await alFetchAll(viewer.id, t);
+          const alEntries = await alFetchAll(viewer.id, t, api);
           for (const e of alEntries) {
             const ov = overrides[String(e.mediaId)];
             if (ov) {

@@ -1,4 +1,3 @@
-import { Settings } from '../../settings/settings';
 import type { JsonEditorContext } from '../../types';
 
 export interface SongProviderPreset {
@@ -141,8 +140,8 @@ export function validateAniSongsConfig(raw: unknown): {
   };
 }
 
-export function getValidAniSongsConfig(): AniSongsConfig {
-  const raw = Settings.get('aniSongsProviders');
+export function getValidAniSongsConfig(raw?: unknown): AniSongsConfig {
+  if (raw === undefined) return JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
   const check = validateAniSongsConfig(raw);
   return check.valid && check.config ? check.config : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
 }
@@ -391,7 +390,7 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
   document.body.appendChild(backdrop);
 
   const close = () => {
-    document.removeEventListener('keydown', onKey, true);
+    unlistenKey();
     backdrop.remove();
   };
   const onKey = (e: KeyboardEvent) => {
@@ -400,7 +399,7 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
       close();
     }
   };
-  document.addEventListener('keydown', onKey, true);
+  const unlistenKey = ctx.listen(document, 'keydown', onKey as EventListener, true);
 
   backdrop.querySelectorAll('.ala-as-close').forEach((btn) => btn.addEventListener('click', close));
   backdrop.addEventListener('click', (e) => {

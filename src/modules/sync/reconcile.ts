@@ -1,4 +1,4 @@
-import { Settings } from '../../settings/settings';
+import { syncGet } from './state';
 import { SyncMediaType, AniListSyncEntry } from './types';
 
 export const STATUS_MAP: Record<SyncMediaType, Record<string, string>> = {
@@ -22,9 +22,8 @@ export const STATUS_MAP: Record<SyncMediaType, Record<string, string>> = {
 
 export const PROGRESS_KEYS = ['num_watched_episodes', 'num_chapters_read', 'num_volumes_read'];
 
-export function convertScore(score100: any): number {
+export function convertScore(score100: any, mode: string = syncGet<string>('syncScoreRounding') || 'round'): number {
   if (!score100 || score100 <= 0) return 0;
-  const mode = Settings.get('syncScoreRounding');
   const fn = mode === 'ceil' ? Math.ceil : mode === 'floor' ? Math.floor : Math.round;
   return Math.max(1, Math.min(10, fn(Number(score100) / 10)));
 }

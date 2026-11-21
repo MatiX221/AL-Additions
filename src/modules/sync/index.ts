@@ -9,7 +9,18 @@ import {
 import { safe } from '../../utils/helpers';
 import type { SyncMediaType } from './types';
 import { TYPES } from './types';
-import { stores, syncStore, setSyncLog, clearCache, syncStatus } from './state';
+import {
+  stores,
+  initSyncStores,
+  syncStore,
+  setSyncLog,
+  setSyncGet,
+  setSyncStorage,
+  setSyncApi,
+  clearCache,
+  releaseLock,
+  syncStatus
+} from './state';
 import { initSyncPanel, renderPanel } from './panel';
 import { configureOverridesModalStyle, openQuickOverrideModal, openOverridesModal } from './overridesModal';
 import { initDeletionInterceptor } from './deletionInterceptor';
@@ -181,6 +192,10 @@ defineModule({
   },
   setup(ctx) {
     setSyncLog(ctx.log);
+    setSyncGet(ctx.get);
+    setSyncStorage(ctx.storage);
+    setSyncApi(ctx.api);
+    initSyncStores(ctx.persistent);
     initDeletionInterceptor(ctx);
 
     ctx.menuCommand('🗑️ AL→MAL Sync: Reset all data', () => {
@@ -207,8 +222,12 @@ defineModule({
     }
 
     ctx.onCleanup(() => {
-      setSyncLog(null);
       if (syncStatus.syncing) syncStatus.cancelled = true;
+      releaseLock();
+      setSyncLog(null);
+      setSyncGet(null);
+      setSyncStorage(null);
+      setSyncApi(null);
     });
   }
 });
@@ -243,8 +262,12 @@ defineModule({
   setup(ctx) {
     ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
     ctx.services.provide('quickEdit', (mediaId: number, mediaType: SyncMediaType = 'ANIME') =>
-      openQuickOverrideModal(mediaId, mediaType, ctx.addStyle, () =>
-        ctx.events.emit('manualOverrides:changed', mediaId)
+      openQuickOverrideModal(
+        mediaId,
+        mediaType,
+        ctx.addStyle,
+        () => ctx.events.emit('manualOverrides:changed', mediaId),
+        ctx.api
       )
     );
   }

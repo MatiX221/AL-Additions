@@ -1,5 +1,4 @@
 import { defineModule } from '../../core/registry';
-import { Settings } from '../../settings/settings';
 import type { MigrateContext } from '../../types';
 import { detectStandalone } from '../../utils/standalone';
 import { PROBE_ATTR, DEFAULT_TIERS, getTier, validateTiers, type TierConfig } from './tiers';
@@ -7,8 +6,8 @@ import { openTierEditor } from './tierModal';
 
 export { DEFAULT_TIERS, getTier, validateTiers, type TierConfig };
 
-export function getValidTiers(): TierConfig[] {
-  const raw = Settings.get('tierLabels');
+export function getValidTiers(raw?: unknown): TierConfig[] {
+  if (raw === undefined) return DEFAULT_TIERS;
   const check = validateTiers(raw);
   return check.valid && check.tiers ? check.tiers : DEFAULT_TIERS;
 }
@@ -16,7 +15,7 @@ export function getValidTiers(): TierConfig[] {
 function migrateLegacyTierLabels(m: MigrateContext): void {
   try {
     // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
-    const legacy = localStorage.getItem('anilistTierLabelsSettings');
+    const legacy = m.legacy.getLocal('anilistTierLabelsSettings');
     if (legacy) {
       const parsed = JSON.parse(legacy);
       if (Array.isArray(parsed.tiers) && parsed.tiers.length && !m.settings.has('tierLabels')) {
@@ -325,24 +324,21 @@ defineModule({
     }
 
     function applyTierLabels(): void {
-      const tiers: TierConfig[] = getValidTiers();
+      const tiers: TierConfig[] = getValidTiers(ctx.get('tierLabels'));
       const colorScore: boolean = !!ctx.get('tierLabelsColorScore');
       const showAverage: boolean = !!ctx.get('tierLabelsAverageScore');
       const viewerScoreFormat: string | null = ctx.session.scoreFormat;
 
-      // 1. List view & Compare view
       document
         .querySelectorAll<HTMLElement>('.score:not(.media-card .score):not(.entry-card .score)')
         .forEach((el) => {
           processScoreElement(el, tiers, colorScore, viewerScoreFormat, false, false);
         });
 
-      // 2. Block / Card view
       document.querySelectorAll<HTMLElement>('.entry-card .score').forEach((el) => {
         processScoreElement(el, tiers, colorScore, viewerScoreFormat, false, true);
       });
 
-      // 3. Weighted Score in data-sets (AniList replaced the average score with it)
       if (showAverage) {
         document.querySelectorAll<HTMLElement>('.data-set').forEach((dataSet) => {
           const label = dataSet.querySelector<HTMLElement>('.type');
@@ -353,12 +349,9 @@ defineModule({
         });
       }
 
-      // 4. Top 100 / Browse ranking
       processTop100Elements(tiers, colorScore);
     }
 
-    // Yield to the standalone AniList Tier Labels script when it is installed.
-    // The last probe result is remembered so a normal page load never waits on the probe.
     const HINT_KEY = 'standalone_seen';
     let paused = !!ctx.storage.get<boolean>(HINT_KEY, false);
     const runScan = (): void => {
@@ -368,7 +361,6 @@ defineModule({
     ctx.ready(() => {
       runScan();
       const unsubNav = ctx.onNav(() => {
-        // Clear cached compare formats on navigation
         document.querySelectorAll<HTMLElement & { _colFormats?: any }>('.compare').forEach((c) => {
           delete c._colFormats;
         });

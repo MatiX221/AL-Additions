@@ -3,18 +3,25 @@ import type { CleanupFn } from '../types';
 
 const styleRefCounts = new Map<string, number>();
 
+export function prefixAlaId(id: string): string {
+  const trimmed = id.trim();
+  if (!trimmed) return '';
+  return trimmed.startsWith('ala-') ? trimmed : `ala-${trimmed}`;
+}
+
 export function addStyle(id: string, css: string): CleanupFn {
+  const styleId = prefixAlaId(id) || 'ala-style';
   let disposed = false;
   let cancelReady: CleanupFn | null = null;
-  styleRefCounts.set(id, (styleRefCounts.get(id) || 0) + 1);
+  styleRefCounts.set(styleId, (styleRefCounts.get(styleId) || 0) + 1);
 
   const mount = () => {
     if (disposed) return;
     const parent = document.head || document.documentElement;
     if (!parent) return;
-    if (!document.getElementById(id)) {
+    if (!document.getElementById(styleId)) {
       const s = document.createElement('style');
-      s.id = id;
+      s.id = styleId;
       s.textContent = css;
       parent.appendChild(s);
     }
@@ -31,12 +38,12 @@ export function addStyle(id: string, css: string): CleanupFn {
     disposed = true;
     cancelReady?.();
     cancelReady = null;
-    const nextCount = (styleRefCounts.get(id) || 1) - 1;
+    const nextCount = (styleRefCounts.get(styleId) || 1) - 1;
     if (nextCount <= 0) {
-      styleRefCounts.delete(id);
-      document.getElementById(id)?.remove();
+      styleRefCounts.delete(styleId);
+      document.getElementById(styleId)?.remove();
     } else {
-      styleRefCounts.set(id, nextCount);
+      styleRefCounts.set(styleId, nextCount);
     }
   };
 }

@@ -3,6 +3,7 @@ import {
   doc,
   coreHooks,
   coreSession,
+  coreStorage,
   fastLoadLog,
   fastLoadRpcLog,
   userMap,
@@ -83,7 +84,7 @@ export function replacePageId(value: any, from: any, to: any): number {
 }
 
 export const learned = new Map<string, any>();
-const ROUTES_KEY = 'alfl:routes:v4';
+const ROUTES_KEY = 'routes:v4';
 const ROUTES_TTL = 30 * 86400e3;
 
 let persistTimer: any = 0;
@@ -95,7 +96,7 @@ export const persistRoutes = () => {
         const out: Record<string, any> = {};
         for (const [shape, v] of [...learned].slice(-40))
           out[shape] = { t: v.t, id: v.route.id, static: !!v.route.static, reqs: v.reqs };
-        win.localStorage?.setItem(ROUTES_KEY, JSON.stringify(out));
+        coreStorage?.set(ROUTES_KEY, out);
       }),
     1000
   );
@@ -103,14 +104,11 @@ export const persistRoutes = () => {
 
 export function loadRoutes() {
   attempt(() => {
-    // @migration(from: "v0.9.1", kind: "cleanup", sunset: "2-3 releases")
-    win.localStorage?.removeItem('alfl:routes:v1');
-    win.localStorage?.removeItem('alfl:routes:v2');
-    win.localStorage?.removeItem('alfl:routes:v3');
-    const raw = win.localStorage?.getItem(ROUTES_KEY);
-    if (raw) {
+    const raw = coreStorage?.get<any>(ROUTES_KEY, null);
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (data && typeof data === 'object') {
       const now = Date.now();
-      for (const [shape, v] of Object.entries(JSON.parse(raw)) as any) {
+      for (const [shape, v] of Object.entries(data) as any) {
         if (!v || !Array.isArray(v.reqs) || typeof v.t !== 'number' || now - v.t > ROUTES_TTL) continue;
         const reqs = v.reqs.filter(
           (r: any) =>

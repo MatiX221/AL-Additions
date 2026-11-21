@@ -2,6 +2,7 @@ import {
   win,
   coreHooks,
   coreSession,
+  coreStorage,
   fastLoadRpcLog,
   rpcCache,
   rpcInflight,
@@ -24,7 +25,6 @@ import {
   normalizeGqlQuery,
   stableStringify
 } from './helpers';
-import { store as gmStore } from '../../utils/helpers';
 
 export const workerPending = new WeakMap<
   object,
@@ -67,7 +67,7 @@ export const findWorkerUrl = (): string | null =>
   (performance.getEntriesByType('resource') as PerformanceResourceTiming[])
     .map((e) => e.name)
     .find((n) => /\.worker\.js(?:\?|$)/.test(n)) ||
-  attempt(() => win.localStorage?.getItem('alfl:workerUrl') || gmStore.get('alfl:workerUrl', null)) ||
+  attempt(() => coreStorage?.get<string | null>('workerUrl', null)) ||
   null;
 
 export const isRpcFetch = (d: any) =>
@@ -220,11 +220,11 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
     userName = idToUserMap.get(userId) || undefined;
   }
 
-  const raw = attempt(() => win.localStorage?.getItem('alfl:rpc:listTpl:v2') || gmStore.get('alfl:rpc:listTpl:v2', null));
+  const raw = attempt(() => coreStorage?.get<any>('rpc:listTpl:v2', null));
   let tpl: any;
   if (raw) {
     try {
-      tpl = JSON.parse(raw);
+      tpl = typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch {}
   }
   if (!tpl) {
@@ -360,8 +360,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
   w.addEventListener('error', (e: any) => {
     fastLoadRpcLog?.debug('Prefetch worker error', e?.message);
     attempt(() => {
-      win.localStorage?.removeItem('alfl:workerUrl');
-      gmStore.del('alfl:workerUrl');
+      coreStorage?.del('workerUrl');
     });
     workerUrl = null;
     finish();
@@ -384,8 +383,7 @@ export function hookWorker(yielded: () => boolean) {
           if (urlStr.includes('worker.js') && !urlStr.includes('cloudflare')) {
             attempt(() => {
               workerUrl = new URL(urlStr, win.location.href).href;
-              win.localStorage?.setItem('alfl:workerUrl', workerUrl);
-              gmStore.set('alfl:workerUrl', workerUrl);
+              coreStorage?.set('workerUrl', workerUrl);
             });
             workerOpts = options;
             fastLoadRpcLog?.debug('Page worker created:', urlStr);
@@ -484,8 +482,7 @@ export function hookWorker(yielded: () => boolean) {
                 headers,
                 options: data.params[4]
               });
-              win.localStorage?.setItem('alfl:rpc:listTpl:v2', tplStr);
-              gmStore.set('alfl:rpc:listTpl:v2', tplStr);
+              coreStorage?.set('rpc:listTpl:v2', tplStr);
             });
           }
           if (isMutation(q)) {

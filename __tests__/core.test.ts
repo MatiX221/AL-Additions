@@ -378,9 +378,18 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
       connect: () => {},
       disconnect: () => {}
     });
+    accounts.registerAccountProvider({
+      id: 'undeclared',
+      name: 'Undeclared',
+      secretKeys: ['undeclared_secret'],
+      isConnected: () => true,
+      connect: () => {},
+      disconnect: () => {}
+    });
 
     helpers.store.set('mal_token', 'abc');
     helpers.store.set('other_secret', 'xyz');
+    helpers.store.set('undeclared_secret', 'keep');
 
     let capturedCtx!: any;
     let routeAborted = false;
@@ -391,6 +400,7 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
       key: 'ctxSuiteEnabled',
       layer: 'feature',
       requiresReload: false,
+      accounts: ['mal', 'anilist'],
       title: 'Ctx Suite',
       help: 'Test',
       setup(ctx) {
@@ -403,13 +413,13 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
         expect(watchChanges).toEqual([['item', 42]]);
 
         const p = ctx.persistent<{ count: number }>('myCache');
-        expect(globalThis.GM_getValue).not.toHaveBeenCalledWith('myCache', expect.anything());
+        expect(globalThis.GM_getValue).not.toHaveBeenCalledWith('ala_mod_ctxSuite_myCache', expect.anything());
         vi.useFakeTimers();
         try {
           p.data.count = 7;
           p.save();
           vi.advanceTimersByTime(550);
-          expect(helpers.jsonGet('myCache', null)).toEqual({ count: 7 });
+          expect(helpers.jsonGet('ala_mod_ctxSuite_myCache', null)).toEqual({ count: 7 });
         } finally {
           vi.useRealTimers();
         }
@@ -429,7 +439,6 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
           position: 'beforeend',
           create: () => {
             const el = document.createElement('div');
-            el.id = 'ctx-test-mount';
             mountTargets.push(el);
             return el;
           }
@@ -441,17 +450,17 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
     settings.Settings.set('ctxSuiteEnabled', true);
     registry.startModules(false);
 
-    expect(document.getElementById('ctx-test-mount')).not.toBeNull();
+    expect(document.getElementById('ala-ctx-test-mount')).not.toBeNull();
 
     vi.useFakeTimers();
     try {
-      document.getElementById('ctx-test-mount')!.remove();
-      expect(document.getElementById('ctx-test-mount')).toBeNull();
+      document.getElementById('ala-ctx-test-mount')!.remove();
+      expect(document.getElementById('ala-ctx-test-mount')).toBeNull();
       const trigger = document.createElement('span');
       document.body.appendChild(trigger);
       await Promise.resolve();
       vi.advanceTimersByTime(60);
-      expect(document.getElementById('ctx-test-mount')).not.toBeNull();
+      expect(document.getElementById('ala-ctx-test-mount')).not.toBeNull();
       trigger.remove();
     } finally {
       vi.useRealTimers();
@@ -471,9 +480,11 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
     capturedCtx.accounts.clearSecrets('mal');
     expect(helpers.store.get('mal_token', null)).toBeNull();
     expect(helpers.store.get('other_secret', null)).toBe('xyz');
+    expect(helpers.store.get('undeclared_secret', null)).toBe('keep');
 
     capturedCtx.accounts.clearSecrets();
     expect(helpers.store.get('other_secret', null)).toBeNull();
+    expect(helpers.store.get('undeclared_secret', null)).toBe('keep');
 
     const abortFn = vi.fn();
     xhrSpy.mockImplementation(() => ({ abort: abortFn }) as any);
@@ -484,10 +495,11 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
 
     await expect(pendingReq).rejects.toThrow('Request aborted');
     expect(abortFn).toHaveBeenCalledTimes(1);
-    expect(document.getElementById('ctx-test-mount')).toBeNull();
+    expect(document.getElementById('ala-ctx-test-mount')).toBeNull();
 
     capturedCtx.storage.clear();
     expect(capturedCtx.storage.get('item', null)).toBeNull();
+    expect(helpers.jsonGet('ala_mod_ctxSuite_myCache', null)).toBeNull();
   });
 
   it('guards store.watch and store.list safely when GM_* globals are absent, and handles parseToggle("false") in malOverrides', async () => {

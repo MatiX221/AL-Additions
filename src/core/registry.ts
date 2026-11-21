@@ -42,7 +42,7 @@ import {
 import { CoreHooks, EventBus, ServiceRegistry } from './bus';
 import { registerMenuCommand } from './menu';
 import { Core } from './observer';
-import { addStyle } from './styles';
+import { addStyle, prefixAlaId } from './styles';
 import { showToast, toastError, toastSuccess } from './toast';
 
 const coreLog = createCoreLogger('core');
@@ -95,10 +95,11 @@ interface ModuleRecord {
   requiresReload: boolean;
   dependsOn: string[];
   after: string[];
+  accounts: string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleMeta['standalone'];
   migrate?: (m: MigrateContext) => void;
-  setup: (ctx: FeatureContext<any>) => void | Promise<void>;
+  setup: (ctx: FeatureContext<any, any>) => void | Promise<void>;
   legacyInit?: () => void | Promise<void>;
   invalidId: boolean;
   idCollision: boolean;
@@ -401,7 +402,11 @@ function runCleanupsReverse(id: string, cleanups: CleanupFn[]): void {
   cleanups.length = 0;
 }
 
-function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: AbortController): FeatureContext<any> {
+function createContextForRecord(
+  rec: ModuleRecord,
+  cleanups: CleanupFn[],
+  ac: AbortController
+): FeatureContext<any, any> {
   let disposed = false;
   let localClearingDepth = 0;
   const noop: CleanupFn = () => {};
@@ -444,12 +449,19 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
   });
 
   const storagePrefix = `ala_mod_${rec.id}_`;
+  const allowedAccounts = new Set(rec.accounts);
+  const assertAccountAllowed = (id: string): void => {
+    if (!allowedAccounts.has(id)) {
+      throw new Error(`Module "${rec.id}" cannot access account provider "${id}" without declaring it in accounts`);
+    }
+  };
 
   const addMount = (spec: MountSpec, pushCleanup: (fn: CleanupFn) => void, signal?: AbortSignal): CleanupFn => {
     if (disposed || signal?.aborted) return noop;
     let mountedEl: HTMLElement | null = null;
     let mountDisposed = false;
     let ownDisposer: CleanupFn | null = null;
+    const resolvedId = spec.id ? prefixAlaId(spec.id) : '';
 
     const tryMount = () => {
       if (mountDisposed || disposed || signal?.aborted) return;
@@ -461,8 +473,8 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
         return;
       }
       if (mountedEl?.isConnected) return;
-      if (spec.id) {
-        const existing = document.getElementById(spec.id);
+      if (resolvedId) {
+        const existing = document.getElementById(resolvedId);
         if (existing?.isConnected) {
           mountedEl = existing;
           return;
@@ -471,11 +483,15 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       const anchor = typeof spec.anchor === 'string' ? document.querySelector(spec.anchor) : spec.anchor();
       if (!anchor) return;
       const el = spec.create();
-      if (spec.id && !el.id) el.id = spec.id;
+      if (resolvedId) {
+        el.id = resolvedId;
+      } else if (el.id) {
+        el.id = prefixAlaId(el.id);
+      }
       anchor.insertAdjacentElement(spec.position ?? 'afterend', el);
       mountedEl = el;
       if (spec.ownUi && !ownDisposer) {
-        const sel = el.id ? `#${el.id}` : spec.id ? `#${spec.id}` : '';
+        const sel = el.id ? `#${el.id}` : resolvedId ? `#${resolvedId}` : '';
         if (sel) ownDisposer = Core.registerOwnUi(sel);
       }
     };
@@ -869,14 +885,15 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
   const eventOwner = Symbol(`events:${rec.id}`);
   let retainedTracked = false;
 
-  const ctx: FeatureContext<any> = {
+  const ctx: FeatureContext<any, any> = {
     id: rec.id,
     title: rec.title,
     help: rec.help,
     get: (key) => Settings.get(key),
     set: (key, val) => Settings.set(key, val),
     storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
-    persistent: (key, prune) => persistent(key, prune),
+    persistent: <T extends Record<string, any>>(key: string, prune?: (data: T) => void) =>
+      persistent<T>(`${storagePrefix}${key}`, prune),
     ready: (cb) => whenAlive(() => Core.ready(cb)),
     onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
     onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
@@ -917,13 +934,34 @@ function createContextForRecord(rec: ModuleRecord, cleanups: CleanupFn[], ac: Ab
       return getSessionWrapper();
     },
     accounts: {
-      get: (id: string): AccountProvider | undefined => getAccountProvider(id),
-      isConnected: (id: string): boolean => !!getAccountProvider(id)?.isConnected(),
-      connect: (id: string) => getAccountProvider(id)?.connect(),
-      disconnect: (id: string) => getAccountProvider(id)?.disconnect(),
-      clearSecrets: (providerId?: string) => clearAccountSecrets(providerId),
-      watch: (id: string, cb: (connected: boolean) => void): CleanupFn =>
-        whenAlive(() => watchAccountProvider(id, cb))
+      get: (id: string): AccountProvider | undefined => {
+        assertAccountAllowed(id);
+        return getAccountProvider(id);
+      },
+      isConnected: (id: string): boolean => {
+        assertAccountAllowed(id);
+        return !!getAccountProvider(id)?.isConnected();
+      },
+      connect: (id: string) => {
+        assertAccountAllowed(id);
+        if (!disposed) getAccountProvider(id)?.connect();
+      },
+      disconnect: (id: string) => {
+        assertAccountAllowed(id);
+        if (!disposed) getAccountProvider(id)?.disconnect();
+      },
+      clearSecrets: (providerId?: string) => {
+        if (providerId !== undefined) {
+          assertAccountAllowed(providerId);
+          clearAccountSecrets(providerId);
+          return;
+        }
+        for (const id of allowedAccounts) clearAccountSecrets(id);
+      },
+      watch: (id: string, cb: (connected: boolean) => void): CleanupFn => {
+        assertAccountAllowed(id);
+        return whenAlive(() => watchAccountProvider(id, cb));
+      }
     },
     toast: {
       show: showToast,
@@ -1108,8 +1146,9 @@ function registerRecord(rec: ModuleRecord): void {
 
 export function defineModule<
   TId extends string = string,
-  const TDebug extends ModuleDebugDef<any> | undefined = undefined
->(meta: ModuleMeta<TId, TDebug>): void {
+  const TDebug extends ModuleDebugDef<any> | undefined = undefined,
+  const TAccounts extends readonly string[] = readonly []
+>(meta: ModuleMeta<TId, TDebug, TAccounts>): void {
   if (!ID_RE.test(meta.id)) {
     coreLog.error(`Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
     invalidIds.set(meta.id, { active: false, reason: 'invalid-id' });
@@ -1129,6 +1168,7 @@ export function defineModule<
   const hosts = meta.hosts?.length ? meta.hosts.slice() : ['anilist.co'];
   const dependsOn = (meta.dependsOn || []).slice();
   const after = (meta.after || []).slice();
+  const accounts = meta.accounts ? [...meta.accounts] : [];
 
   Settings.register({
     id: meta.id,
@@ -1145,7 +1185,7 @@ export function defineModule<
     requiresReload: meta.requiresReload,
     dependsOn,
     after,
-    accounts: meta.accounts,
+    accounts: accounts.length ? accounts : undefined,
     debug: meta.debug,
     standalone: meta.standalone
   });
@@ -1161,10 +1201,11 @@ export function defineModule<
     requiresReload: !!meta.requiresReload,
     dependsOn,
     after,
+    accounts,
     debug: meta.debug,
     standalone: meta.standalone,
     migrate: meta.migrate,
-    setup: meta.setup as (ctx: FeatureContext<any>) => void | Promise<void>,
+    setup: meta.setup as (ctx: FeatureContext<any, any>) => void | Promise<void>,
     invalidId: false,
     idCollision: false,
     standalonePaused: false,
@@ -1206,6 +1247,7 @@ export function registerShellModule(
     requiresReload: true,
     dependsOn: [],
     after: [],
+    accounts: [],
     setup: () => init(),
     legacyInit: init,
     invalidId: false,
@@ -1246,6 +1288,19 @@ export function runMigrations(): void {
           },
           del: (key) => {
             if (!migrateDone) store.del(key);
+          },
+          getLocal: (key) => {
+            try {
+              return localStorage.getItem(key);
+            } catch {
+              return null;
+            }
+          },
+          delLocal: (key) => {
+            if (migrateDone) return;
+            try {
+              localStorage.removeItem(key);
+            } catch {}
           }
         }
       };
@@ -1319,6 +1374,9 @@ export async function bootModuleForTest(id: string): Promise<void> {
 
 export function createModuleHost(): ModuleHost {
   return {
+    get api(): AniListClient | undefined {
+      return configuredServices?.api;
+    },
     reload(ids: string[]): void {
       const targetSet = new Set(ids);
       const graph = resolveAllStates();

@@ -1,5 +1,5 @@
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
-import type { AniListSession, ChannelLogger, CoreHooksApi, Logger } from '../../types';
+import type { AniListSession, ChannelLogger, CoreHooksApi, Logger, StorageScope } from '../../types';
 import { stats, attempt } from './config';
 
 export const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as any;
@@ -13,6 +13,11 @@ export function setCoreHooks(hooks: CoreHooksApi | null): void {
 export let coreSession: AniListSession | null = null;
 export function setCoreSession(session: AniListSession | null): void {
   coreSession = session;
+}
+
+export let coreStorage: StorageScope | null = null;
+export function setCoreStorage(storage: StorageScope | null): void {
+  coreStorage = storage;
 }
 
 export let fastLoadLog: Logger<true> | null = null;
@@ -75,19 +80,23 @@ export function rememberUser(name: string, id: number) {
   userMap.set(normName, id);
   idToUserMap.set(id, normName);
   attempt(() => {
-    const stored = JSON.parse(win.localStorage?.getItem('alfl:userMap') || '{}');
+    const raw = coreStorage?.get<any>('userMap', null);
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const stored = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? { ...parsed } : {};
     if (stored[normName] !== id) {
       stored[normName] = id;
       const keys = Object.keys(stored);
       if (keys.length > 300) delete stored[keys[0]];
-      win.localStorage?.setItem('alfl:userMap', JSON.stringify(stored));
+      coreStorage?.set('userMap', stored);
     }
   });
 }
 
 export function initUserMap() {
   attempt(() => {
-    const stored = JSON.parse(win.localStorage?.getItem('alfl:userMap') || '{}');
+    const raw = coreStorage?.get<any>('userMap', null);
+    const stored = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!stored || typeof stored !== 'object') return;
     for (const [k, v] of Object.entries(stored)) {
       if (typeof v === 'number' && v > 0) {
         userMap.set(k.toLowerCase(), v);

@@ -23,6 +23,10 @@ defineModule({
     debug: false,
     label: 'Airing Dots'
   },
+  migrate(m) {
+    // @migration(from: "v0.9.1", kind: "cleanup", sunset: "2-3 releases")
+    m.legacy.del('daiya-anilist-airing-cache-v5');
+  },
   setup(ctx) {
     const CLASS = 'daiya-behind-dot';
     const ORANGE = 'rgb(255, 152, 0)';

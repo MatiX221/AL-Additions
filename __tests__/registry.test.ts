@@ -124,7 +124,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(document.getElementById('stale-route-widget')).toBeNull();
+      expect(document.getElementById('ala-stale-route-widget')).toBeNull();
       expect(mountedLog).toEqual([]);
       expect(readySpy).not.toHaveBeenCalled();
       expect(navSpy).not.toHaveBeenCalled();
@@ -134,10 +134,10 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       history.pushState({}, '', '/manga/55');
       expect(typeof manualUnmount).toBe('function');
       expect(addSpy).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
-      expect(document.getElementById('manual-route-widget')).not.toBeNull();
+      expect(document.getElementById('ala-manual-route-widget')).not.toBeNull();
       manualUnmount();
       expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
-      expect(document.getElementById('manual-route-widget')).toBeNull();
+      expect(document.getElementById('ala-manual-route-widget')).toBeNull();
       expect(errSpy).toHaveBeenCalledTimes(1);
     } finally {
       errSpy.mockRestore();
@@ -193,6 +193,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
         id: 'ctxReloadMod',
         key: 'ctxReloadEnabled',
         layer: 'feature',
+        accounts: ['mal'],
         title: 'Ctx Reload',
         help: 'Test',
         setup(ctx) {
@@ -319,7 +320,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       expect(navSpy).not.toHaveBeenCalled();
       expect(bodySpy).not.toHaveBeenCalled();
       expect(ownUiSpy).not.toHaveBeenCalled();
-      expect(document.getElementById('stale-style-id')).toBeNull();
+      expect(document.getElementById('ala-stale-style-id')).toBeNull();
       expect(gqlSpy).not.toHaveBeenCalled();
       expect(rpcSpy).not.toHaveBeenCalled();
       expect(prefetchSpy).not.toHaveBeenCalled();
@@ -943,5 +944,80 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  it('auto-prefixes mount and addStyle IDs with ala- (idempotently) and enforces declared accounts at compile time and runtime', async () => {
+    const { registry, settings, accounts, helpers } = await loadFreshKernel();
+    const styles = await import('../src/core/styles');
+
+    const disposeA = styles.addStyle('shared-box', '.x{color:red}');
+    const disposeB = styles.addStyle('ala-shared-box', '.x{color:blue}');
+    expect(document.getElementById('ala-shared-box')).not.toBeNull();
+    expect(document.getElementById('shared-box')).toBeNull();
+    disposeA();
+    expect(document.getElementById('ala-shared-box')).not.toBeNull();
+    disposeB();
+    expect(document.getElementById('ala-shared-box')).toBeNull();
+
+    accounts.registerAccountProvider({
+      id: 'mal',
+      name: 'MAL',
+      secretKeys: ['mal_tok'],
+      isConnected: () => !!helpers.store.get('mal_tok', null),
+      connect: () => {},
+      disconnect: () => helpers.store.del('mal_tok')
+    });
+    helpers.store.set('mal_tok', 'secret');
+
+    let noAccCtx!: any;
+    let malAccCtx!: any;
+    document.body.innerHTML = '<div id="host-spot"></div>';
+
+    registry.defineModule({
+      id: 'noAccMod',
+      key: 'noAccEnabled',
+      title: 'No Accounts',
+      help: 'Test',
+      setup(ctx) {
+        noAccCtx = ctx;
+        ctx.mount({
+          id: 'ala-already-prefixed',
+          anchor: '#host-spot',
+          create: () => document.createElement('div')
+        });
+        if (false as boolean) {
+          // @ts-expect-error undeclared account provider blocked at compile time
+          ctx.accounts.isConnected('mal');
+        }
+      }
+    });
+
+    registry.defineModule({
+      id: 'malAccMod',
+      key: 'malAccEnabled',
+      accounts: ['mal'],
+      title: 'MAL Accounts',
+      help: 'Test',
+      setup(ctx) {
+        malAccCtx = ctx;
+        expect(ctx.accounts.isConnected('mal')).toBe(true);
+        if (false as boolean) {
+          // @ts-expect-error undeclared provider blocked at compile time
+          ctx.accounts.isConnected('other');
+        }
+      }
+    });
+
+    settings.Settings.set('noAccEnabled', true);
+    settings.Settings.set('malAccEnabled', true);
+    registry.startModules(false);
+
+    expect(document.getElementById('ala-already-prefixed')).not.toBeNull();
+    expect(document.getElementById('ala-ala-already-prefixed')).toBeNull();
+    expect(() => noAccCtx.accounts.isConnected('mal')).toThrow(/without declaring it in accounts/);
+    expect(() => noAccCtx.accounts.watch('mal', () => {})).toThrow(/without declaring it in accounts/);
+    noAccCtx.accounts.clearSecrets();
+    expect(helpers.store.get('mal_tok', null)).toBe('secret');
+    expect(() => malAccCtx.accounts.get('other')).toThrow(/without declaring it in accounts/);
   });
 });

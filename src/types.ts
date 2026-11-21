@@ -57,6 +57,13 @@ export interface JsonEditorContext {
   value: any;
   onApply: (nextValue: any) => void;
   addStyle: (id: string, css: string) => CleanupFn;
+  listen: (
+    target: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions
+  ) => CleanupFn;
+  api?: AniListClient;
   log?: AnyLogger;
 }
 
@@ -175,6 +182,8 @@ export interface MigrateContext {
     get: <T = any>(key: string, def?: T) => T;
     set: <T = any>(key: string, val: T) => void;
     del: (key: string) => void;
+    getLocal: (key: string) => string | null;
+    delLocal: (key: string) => void;
   };
 }
 
@@ -193,7 +202,7 @@ export interface FeatureMeta {
   requiresReload?: boolean;
   dependsOn?: string[];
   after?: string[];
-  accounts?: string[];
+  accounts?: readonly string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
 }
@@ -209,7 +218,8 @@ export type LocalServices<TId extends string> = {
 
 export interface ModuleMeta<
   TId extends string = string,
-  TDebug extends ModuleDebugDef<any> | undefined = undefined
+  TDebug extends ModuleDebugDef<any> | undefined = undefined,
+  TAccounts extends readonly string[] = readonly []
 > {
   id: TId;
   key: string;
@@ -223,12 +233,12 @@ export interface ModuleMeta<
   requiresReload?: boolean;
   dependsOn?: string[];
   after?: string[];
-  accounts?: string[];
+  accounts?: TAccounts;
   debug?: TDebug;
   standalone?: ModuleStandaloneDef;
   migrate?: (m: MigrateContext) => void;
   setup: (
-    ctx: ScopedFeatureContext<TId, CanModuleDebug<TDebug>, ModuleChannels<TDebug>>
+    ctx: ScopedFeatureContext<TId, CanModuleDebug<TDebug>, ModuleChannels<TDebug>, TAccounts[number]>
   ) => void | Promise<void>;
 }
 
@@ -244,7 +254,7 @@ export interface RegisteredFeature {
   requiresReload?: boolean;
   dependsOn?: string[];
   after?: string[];
-  accounts?: string[];
+  accounts?: readonly string[];
   debug?: ModuleDebugDef;
   standalone?: ModuleStandaloneDef;
 }
@@ -270,6 +280,7 @@ export interface ModuleStatus {
 }
 
 export interface ModuleHost {
+  readonly api?: AniListClient;
   reload(ids: string[]): void;
   getStatus(id: string): ModuleStatus;
   resolveStagedStates(stagedEnabled: Record<string, boolean>): Record<string, ModuleStatus>;
@@ -438,7 +449,19 @@ export interface FeatureEvents {
   onRetained<K extends keyof EventMap>(event: K, cb: (payload: EventMap[K]) => void): CleanupFn;
 }
 
-export interface FeatureContext<TCanDebug extends boolean = false> {
+export interface FeatureAccounts<TAccountId extends string = never> {
+  get: (id: TAccountId) => AccountProvider | undefined;
+  isConnected: (id: TAccountId) => boolean;
+  connect: (id: TAccountId) => void;
+  disconnect: (id: TAccountId) => void;
+  clearSecrets: (providerId?: TAccountId) => void;
+  watch: (id: TAccountId, cb: (connected: boolean) => void) => CleanupFn;
+}
+
+export interface FeatureContext<
+  TCanDebug extends boolean = false,
+  TAccountId extends string = never
+> {
   readonly id: string;
   readonly title: string;
   readonly help: string;
@@ -479,14 +502,7 @@ export interface FeatureContext<TCanDebug extends boolean = false> {
   };
   api: AniListClient;
   session: AniListSession;
-  accounts: {
-    get: (id: string) => AccountProvider | undefined;
-    isConnected: (id: string) => boolean;
-    connect: (id: string) => void;
-    disconnect: (id: string) => void;
-    clearSecrets: (providerId?: string) => void;
-    watch: (id: string, cb: (connected: boolean) => void) => CleanupFn;
-  };
+  accounts: FeatureAccounts<TAccountId>;
   toast: {
     show: (msg: string, opts?: { type?: 'info' | 'success' | 'error'; durationMs?: number; closeTab?: boolean }) => void;
     success: (msg: string, opts?: { durationMs?: number; closeTab?: boolean }) => void;
@@ -503,8 +519,9 @@ export interface FeatureContext<TCanDebug extends boolean = false> {
 export interface ScopedFeatureContext<
   TId extends string,
   TCanDebug extends boolean = false,
-  TChannels extends Record<string, ModuleDebugChannelDef> = {}
-> extends Omit<FeatureContext<TCanDebug>, 'id' | 'log' | 'services'> {
+  TChannels extends Record<string, ModuleDebugChannelDef> = {},
+  TAccountId extends string = never
+> extends Omit<FeatureContext<TCanDebug, TAccountId>, 'id' | 'log' | 'services'> {
   readonly id: TId;
   services: {
     provide<K extends keyof LocalServices<TId>>(localName: K, impl: LocalServices<TId>[K]): CleanupFn;

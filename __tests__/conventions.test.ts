@@ -21,6 +21,49 @@ function toRelPosix(absPath: string): string {
   return path.relative(SRC_ROOT, absPath).replace(/\\/g, '/');
 }
 
+const REGEX_PREV_KEYWORDS = new Set([
+  'return', 'case', 'throw', 'in', 'of', 'typeof', 'void', 'delete', 'new', 'yield', 'await', 'else', 'do'
+]);
+
+function isRegexStart(source: string, slashIdx: number): boolean {
+  let j = slashIdx - 1;
+  while (j >= 0 && /\s/.test(source[j])) j--;
+  if (j < 0) return true;
+  const prev = source[j];
+  if (prev === '+' && source[j - 1] === '+') return false;
+  if (prev === '-' && source[j - 1] === '-') return false;
+  if ('([{},;:?=!&|^~+-*%<>'.includes(prev)) return true;
+  if (/[a-zA-Z0-9_$]/.test(prev)) {
+    let start = j;
+    while (start > 0 && /[a-zA-Z0-9_$]/.test(source[start - 1])) start--;
+    return REGEX_PREV_KEYWORDS.has(source.slice(start, j + 1));
+  }
+  return false;
+}
+
+function findRegexEnd(source: string, start: number): number {
+  let i = start + 1;
+  let inClass = false;
+  const len = source.length;
+  while (i < len) {
+    const c = source[i];
+    if (c === '\n' || c === '\r') return -1;
+    if (c === '\\') {
+      i += 2;
+      continue;
+    }
+    if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) {
+      i++;
+      while (i < len && /[a-z]/i.test(source[i])) i++;
+      return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
 function stripCommentsPreservingStrings(source: string): string {
   let out = '';
   let i = 0;
@@ -61,6 +104,14 @@ function stripCommentsPreservingStrings(source: string): string {
         i++;
       }
       continue;
+    }
+    if (ch === '/' && isRegexStart(source, i)) {
+      const end = findRegexEnd(source, i);
+      if (end !== -1) {
+        out += source.slice(i, end);
+        i = end;
+        continue;
+      }
     }
     out += ch;
     i++;
@@ -120,6 +171,13 @@ function extractComments(source: string): Array<{ text: string; line: number }> 
       }
       continue;
     }
+    if (ch === '/' && isRegexStart(source, i)) {
+      const end = findRegexEnd(source, i);
+      if (end !== -1) {
+        i = end;
+        continue;
+      }
+    }
     i++;
   }
   return comments;
@@ -130,8 +188,6 @@ const ALL_FILES = collectTsFiles(SRC_ROOT).map((abs) => ({
   rel: toRelPosix(abs),
   raw: fs.readFileSync(abs, 'utf8')
 }));
-
-const ALLOWLIST_MODULE_PREFIX = new Set(['modules/sync/state.ts']);
 
 describe('Conventions: Module Encapsulation & Raw Access Guards', () => {
   const moduleFiles = ALL_FILES.filter((f) => f.rel.startsWith('modules/'));
@@ -152,22 +208,53 @@ describe('Conventions: Module Encapsulation & Raw Access Guards', () => {
     },
     {
       name: 'hardcoded ala_mod_ prefix in module',
-      re: /['"`]ala_mod_/,
-      allow: ALLOWLIST_MODULE_PREFIX
+      re: /['"`]ala_mod_/
     },
     {
       name: 'importing PREFIX from settings/settings',
       re: /import\s*\{[^}]*\bPREFIX\b[^}]*\}\s*from\s*['"][^'"]*settings\/settings['"]/
     },
     {
+      name: 'direct Settings import/access in module (use ctx.get / ctx.set)',
+      re: /from\s*['"][^'"]*settings\/settings['"]|\bSettings\.(?:get|set|has|register|migrate)\b/
+    },
+    {
+      name: 'direct AniList singleton import in module (use ctx.api)',
+      re: /import\s*\{[^}]*\bAniList\b[^}]*\}\s*from\s*['"][^'"]*api\/anilist['"]/
+    },
+    {
       name: 'raw GM_* API call in module',
       re: /\bGM_(?:download|xmlhttpRequest|getValue|setValue|deleteValue|listValues|addValueChangeListener|removeValueChangeListener|registerMenuCommand)\b/
+    },
+    {
+      name: 'raw persistent() usage in module (use ctx.persistent)',
+      re: /import\s*\{[^}]*\bpersistent\b[^}]*\}\s*from\s*['"][^'"]*utils\/helpers['"]|(?<!\.)\bpersistent\s*\(/
+    },
+    {
+      name: 'raw store / jsonGet / jsonSet usage in module (use ctx.storage)',
+      re: /import\s*\{[^}]*\b(?:store|jsonGet|jsonSet)\b[^}]*\}\s*from\s*['"][^'"]*utils\/helpers['"]|(?<!\.)\b(?:jsonGet|jsonSet)\s*\(/
+    },
+    {
+      name: 'raw gm / downloadFile usage in module (use ctx.http)',
+      re: /import\s*\{[^}]*\b(?:gm|downloadFile)\b[^}]*\}\s*from\s*['"][^'"]*utils\/helpers['"]|\bgm\.(?:request|text|json)\s*\(|\bdownloadFile\s*\(/
+    },
+    {
+      name: 'raw localStorage / sessionStorage access in module (use ctx.storage)',
+      re: /\b(?:localStorage|sessionStorage)\b/
+    },
+    {
+      name: 'raw window/document addEventListener in module (use ctx.listen / rc.listen)',
+      re: /\b(?:window|document)\.addEventListener\s*\(/
     },
     { name: 'legacy ctx.debug usage (use ctx.log)', re: /\bctx\.debug\b/ },
     { name: 'removed logDebug helper', re: /\blogDebug\b/ },
     { name: 'removed isDebug helper', re: /\bisDebug\b/ },
     { name: 'removed registerDebugChannel helper', re: /\bregisterDebugChannel\b/ },
-    { name: 'createCoreLogger in feature module (use ctx.log)', re: /\bcreateCoreLogger\b/ }
+    { name: 'createCoreLogger in feature module (use ctx.log)', re: /\bcreateCoreLogger\b/ },
+    {
+      name: 'internal logger helpers in module (use ctx.log)',
+      re: /\b(?:createLogger|isDebugEnabled|getDebuggableChannels)\b/
+    }
   ];
 
   it('forbids raw keys, prefixes, GM_* APIs, and legacy/core logging bypasses in src/modules/**', () => {

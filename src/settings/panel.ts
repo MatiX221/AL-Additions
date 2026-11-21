@@ -890,6 +890,17 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
         editorStyleDisposers.add(dispose);
         return dispose;
       };
+      const trackedListen = (
+        target: EventTarget,
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions
+      ) => {
+        target.addEventListener(type, listener, options);
+        const dispose = () => target.removeEventListener(type, listener, options);
+        editorStyleDisposers.add(dispose);
+        return dispose;
+      };
       try {
         r.editor!({
           value: TYPES.json.read(inputEl),
@@ -913,6 +924,8 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
             setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
           },
           addStyle: trackedAddStyle,
+          listen: trackedListen,
+          api: host.api,
           log: settingsLog
         });
       } finally {

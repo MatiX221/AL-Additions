@@ -201,7 +201,7 @@ export function openTierEditor(ctx: JsonEditorContext): void {
   });
 
   const closeModal = () => {
-    document.removeEventListener('keydown', onKey, true);
+    unlistenKey();
     backdrop.remove();
   };
 
@@ -211,7 +211,7 @@ export function openTierEditor(ctx: JsonEditorContext): void {
       closeModal();
     }
   };
-  document.addEventListener('keydown', onKey, true);
+  const unlistenKey = ctx.listen(document, 'keydown', onKey as EventListener, true);
 
   backdrop.querySelector('.ala-tier-close')?.addEventListener('click', closeModal);
   backdrop.querySelector('#ala-tier-btn-cancel')?.addEventListener('click', closeModal);

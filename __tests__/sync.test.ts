@@ -10,8 +10,8 @@ import {
 } from '../src/modules/sync/reconcile';
 import { dedupeTargets, buildTitleIndex, localMatch } from '../src/modules/sync/targets';
 import {
-  SYNC_STORAGE_PREFIX,
   syncStore,
+  setSyncGet,
   stores,
   acquireLock,
   releaseLock,
@@ -24,33 +24,39 @@ import { Settings } from '../src/settings/settings';
 import { runMigrations, bootModuleForTest, disposeFeature } from '../src/core/registry';
 import { clearAccountSecrets } from '../src/core/accounts';
 import { isMalConnected } from '../src/api/mal';
+import * as menu from '../src/core/menu';
 import { mountPanel } from '../src/modules/sync/panel';
 import { store } from '../src/utils/helpers';
 import type { AniListSyncEntry, SyncTarget, SyncCounters } from '../src/modules/sync/types';
 
+const SYNC_STORAGE_PREFIX = 'ala_mod_sync_';
+
 describe('Sync Engine: Score Conversion', () => {
   it('converts scores using "round" mode by default', () => {
-    Settings.set('syncScoreRounding', 'round');
+    setSyncGet(Settings.get);
     expect(convertScore(0)).toBe(0);
     expect(convertScore(null)).toBe(0);
     expect(convertScore(74)).toBe(7);
     expect(convertScore(75)).toBe(8);
     expect(convertScore(95)).toBe(10);
     expect(convertScore(100)).toBe(10);
+    setSyncGet(null);
   });
 
   it('converts scores using "ceil" mode', () => {
-    Settings.set('syncScoreRounding', 'ceil');
+    setSyncGet(() => 'ceil' as any);
     expect(convertScore(71)).toBe(8);
     expect(convertScore(10)).toBe(1);
     expect(convertScore(91)).toBe(10);
+    setSyncGet(null);
   });
 
   it('converts scores using "floor" mode', () => {
-    Settings.set('syncScoreRounding', 'floor');
+    setSyncGet(() => 'floor' as any);
     expect(convertScore(79)).toBe(7);
     expect(convertScore(85)).toBe(8);
     expect(convertScore(99)).toBe(9);
+    setSyncGet(null);
   });
 });
 
@@ -320,7 +326,7 @@ describe('Sync Engine: Pending Deletions Queue', () => {
 });
 
 describe('Sync Module: Scoped Storage, Schema < 3 Migration, Reset & Lock Unwind', () => {
-  it('matches SYNC_STORAGE_PREFIX with ala_mod_sync_ and migrates schema < 2 and < 3 cleanly with idempotent second run', () => {
+  it('matches SYNC_STORAGE_PREFIX with ala_mod_sync_ and migrates schema < 2 and < 3 cleanly with idempotent second run', async () => {
     expect(SYNC_STORAGE_PREFIX).toBe('ala_mod_sync_');
 
     store.set('sync_schema', 1);
@@ -347,6 +353,8 @@ describe('Sync Module: Scoped Storage, Schema < 3 Migration, Reset & Lock Unwind
     expect(store.get('sync_idmap_ANIME', null)).toBeNull();
     expect(store.get('sync_pending_deletes', null)).toBeNull();
 
+    await bootModuleForTest('sync');
+
     expect(syncStore.get('schema', 0)).toBe(3);
     expect(syncStore.get('last_sync_ANIME', 0)).toBe(1000);
     expect(syncStore.get('last_run_ANIME', 0)).toBe(1000);
@@ -358,10 +366,11 @@ describe('Sync Module: Scoped Storage, Schema < 3 Migration, Reset & Lock Unwind
     expect(stores.MANGA.settled.data['2']?.[1]).toBe('dead');
     expect(getPendingDeletes()).toHaveLength(1);
 
-    syncStore.set('last_sync_ANIME', 9999);
+    disposeFeature('sync');
+    store.set(`${SYNC_STORAGE_PREFIX}last_sync_ANIME`, 9999);
     store.set('last_sync_ANIME', 1111);
     runMigrations();
-    expect(syncStore.get('last_sync_ANIME', 0)).toBe(9999);
+    expect(store.get(`${SYNC_STORAGE_PREFIX}last_sync_ANIME`, 0)).toBe(9999);
   });
 
   it('wipes MAL credentials cleanly via clearAccountSecrets("mal") and updates isMalConnected()', () => {
@@ -381,14 +390,14 @@ describe('Sync Module: Scoped Storage, Schema < 3 Migration, Reset & Lock Unwind
   });
 
   it('clears all scoped data, caches, and credentials via Reset all data menu command and releases lock after unload', async () => {
-    const regSpy = vi.spyOn(globalThis, 'GM_registerMenuCommand');
+    const regSpy = vi.spyOn(menu, 'registerMenuCommand');
     try {
       Settings.set('syncEnabled', true);
-      syncStore.set('last_sync_ANIME', 12345);
       store.set('mal_token', 'mal_tok');
-      stores.ANIME.ids.data['10'] = { m: 20, t: Date.now() };
 
       await bootModuleForTest('sync');
+      syncStore.set('last_sync_ANIME', 12345);
+      stores.ANIME.ids.data['10'] = { m: 20, t: Date.now() };
 
       const resetCall = regSpy.mock.calls.find(([label]) => String(label).includes('Reset all data'));
       expect(resetCall).toBeDefined();

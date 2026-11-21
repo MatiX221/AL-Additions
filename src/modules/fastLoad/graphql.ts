@@ -1,6 +1,7 @@
 import {
   win,
   coreHooks,
+  coreStorage,
   fastLoadLog,
   store,
   inflight,
@@ -133,7 +134,7 @@ export function makeKey(d: any, parsed: any): string {
   return `${d.url}\u0001${auth}\u0001${normQuery}\u0001${normVars}`;
 }
 
-const TAXONOMY_STORAGE_KEY = 'alfl:taxonomy:v1';
+const TAXONOMY_STORAGE_KEY = 'taxonomy:v1';
 const TAXONOMY_TTL = 24 * 3600 * 1000;
 
 function getQueryTtl(parsed: any): number {
@@ -151,9 +152,9 @@ function loadStoredTaxonomy(): {
   headers: [string, string][];
 } | null {
   try {
-    const raw = win.localStorage?.getItem(TAXONOMY_STORAGE_KEY);
+    const raw = coreStorage?.get<any>(TAXONOMY_STORAGE_KEY, null);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (parsed && typeof parsed.time === 'number' && typeof parsed.text === 'string') return parsed;
   } catch {}
   return null;
@@ -162,16 +163,13 @@ function loadStoredTaxonomy(): {
 function persistStoredTaxonomy(snap: any) {
   attempt(() => {
     const text = decoder.decode(snap.buf);
-    win.localStorage?.setItem(
-      TAXONOMY_STORAGE_KEY,
-      JSON.stringify({
-        time: Date.now(),
-        text,
-        status: snap.status,
-        statusText: snap.statusText,
-        headers: snap.headers
-      })
-    );
+    coreStorage?.set(TAXONOMY_STORAGE_KEY, {
+      time: Date.now(),
+      text,
+      status: snap.status,
+      statusText: snap.statusText,
+      headers: snap.headers
+    });
   });
 }
 
@@ -286,7 +284,7 @@ export function cachedFetch(
     const storedTax = loadStoredTaxonomy();
     if (storedTax && now - storedTax.time < TAXONOMY_TTL) {
       stats.cacheHits++;
-      fastLoadLog?.debug('Cache HIT (24h localStorage): GenreCollection & MediaTagCollection');
+      fastLoadLog?.debug('Cache HIT (24h storage): GenreCollection & MediaTagCollection');
       const HeadersCtor = win.Headers || Headers;
       const ResponseCtor = win.Response || Response;
       return Promise.resolve(
