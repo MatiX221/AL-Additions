@@ -2,6 +2,7 @@ import { Settings, TYPES, ROWS, features } from './settings';
 import { DEV_MODE_DEF } from './devMode';
 import { creditsHtml } from './credits';
 import { addStyle } from '../core/styles';
+import { createModal } from '../core/modal';
 import { listAccountProviders } from '../core/accounts';
 import { findExactText, icon } from '../utils/dom';
 import { debounce, esc, createCoreLogger, getDebuggableChannels } from '../utils/helpers';
@@ -9,12 +10,17 @@ import { Core } from '../core/observer';
 import { createBackup, createRawBackup, downloadBackupFile, importBackup, readFileAsBytes } from './backup';
 import { promptPasswordModal, closePasswordModal } from './passwordModal';
 import type {
+  AddStyleFn,
+  CleanupFn,
+  CssSource,
   DebugSettingsMap,
   SettingRow,
   RegisteredFeature,
   ModuleDebugEnabledDef,
   ModuleHost,
-  ModuleStatus
+  ModuleStatus,
+  ModalHandle,
+  ModalOptions
 } from '../types';
 
 const settingsLog = createCoreLogger('settings');
@@ -885,7 +891,26 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       const inputEl = panel.querySelector<HTMLInputElement>(`input[data-key="${key}"]`);
       if (!inputEl) return;
       const beforeBodyChildren = new Set<Element>(Array.from(document.body.children));
-      const trackedAddStyle = (styleId: string, css: string) => {
+      let edIdSeq = 0;
+      let edStyleSeq = 0;
+      let edModalSeq = 0;
+      const edGetId = (name?: string): string => {
+        const trimmed = name?.trim();
+        if (!trimmed) return `ala-editor-${key}-${++edIdSeq}`;
+        return trimmed.startsWith('ala-') ? trimmed : `ala-editor-${key}-${trimmed}`;
+      };
+      const trackedAddStyle: AddStyleFn = (idOrCss: CssSource, maybeCss?: CssSource): CleanupFn => {
+        const isOneArg = maybeCss === undefined;
+        const css = isOneArg ? idOrCss : maybeCss;
+        let styleId: string;
+        if (isOneArg) {
+          styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
+        } else {
+          const raw = String(idOrCss || '').trim();
+          if (!raw) styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
+          else if (raw.startsWith('ala-')) styleId = raw;
+          else styleId = `ala-editor-${key}-${raw}${raw.endsWith('-style') ? '' : '-style'}`;
+        }
         const dispose = addStyle(styleId, css);
         editorStyleDisposers.add(dispose);
         return dispose;
@@ -900,6 +925,18 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
         const dispose = () => target.removeEventListener(type, listener, options);
         editorStyleDisposers.add(dispose);
         return dispose;
+      };
+      const trackedTimeout = (fn: () => void, ms: number): CleanupFn => {
+        const timerId = setTimeout(fn, ms);
+        const dispose = () => clearTimeout(timerId);
+        editorStyleDisposers.add(dispose);
+        return dispose;
+      };
+      const trackedModal = (opts: ModalOptions): ModalHandle => {
+        const modalId = edGetId(opts.id ?? `modal-${++edModalSeq}`);
+        const handle = createModal({ ...opts, id: modalId });
+        editorStyleDisposers.add(handle.close);
+        return handle;
       };
       try {
         r.editor!({
@@ -923,8 +960,11 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
             const plan = syncAll();
             setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
           },
+          getId: edGetId,
           addStyle: trackedAddStyle,
           listen: trackedListen,
+          timeout: trackedTimeout,
+          modal: trackedModal,
           api: host.api,
           log: settingsLog
         });

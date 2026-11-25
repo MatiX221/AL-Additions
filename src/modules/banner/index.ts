@@ -21,9 +21,7 @@ defineModule({
     }
   ],
   setup(ctx) {
-    ctx.addStyle(
-      'ala-banner-style',
-      `
+    ctx.addStyle(`
       .banner{position:relative}
       .ala-banner-dl{position:absolute;right:12px;bottom:12px;z-index:5;display:inline-flex;align-items:center;justify-content:center;height:34px;min-width:34px;padding:0 8px;border:0;border-radius:17px;background:transparent;color:rgba(255,255,255,.8);font-family:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;overflow:hidden;-webkit-tap-highlight-color:transparent;transition:background .15s,color .15s}
       .ala-banner-dl[hidden]{display:none}
@@ -104,12 +102,12 @@ defineModule({
       activeSlug = mediaId || userSeg || 'anilist';
       scan();
       rc.timeout(scan, 300);
+      rc.onCleanup(ctx.onBodyMutation(scanSoon));
       return () => {
         activeSlug = null;
         scan();
       };
     });
-    ctx.onBodyMutation(scanSoon);
     ctx.onCleanup(() => {
       activeSlug = null;
       document.querySelectorAll('.ala-banner-dl').forEach((el) => el.remove());

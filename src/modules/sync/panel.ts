@@ -8,16 +8,18 @@ import {
 } from '../../api/mal';
 import { tryOr, esc, debounce } from '../../utils/helpers';
 import { icon } from '../../utils/dom';
-import type { FeatureContext } from '../../types';
+import type { CleanupFn, FeatureContext } from '../../types';
 import { progress, syncStatus, syncStore, onProgressChange, onStateChange } from './state';
 import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';
 
 let panelCtx: FeatureContext<true, 'mal'> | null = null;
+let routeOwner: string | null = null;
+const panelId = (): string => panelCtx?.getId('panel') ?? 'ala-sync-panel';
 
-const PANEL_CSS = `
-  #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
-  #almal-panel *{box-sizing:border-box}
-  #almal-panel :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+const buildPanelCss = (sel: string): string => `
+  ${sel}{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
+  ${sel} *{box-sizing:border-box}
+  ${sel} :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
   .almal-head{display:flex;justify-content:center;margin-bottom:12px}
   .almal-flow{display:flex;align-items:center;gap:8px;min-width:0}
   .almal-arrow{flex:0 0 auto;color:rgb(var(--color-text-lighter));transition:color .2s,opacity .2s}
@@ -85,20 +87,20 @@ const PANEL_CSS = `
   @media (prefers-reduced-motion:reduce){.almal-arrow-line,#almal-progress-fill.indeterminate{animation:none}}`;
 
 const ui = { manual: false, showLogs: false };
-let progressTimer: ReturnType<typeof setTimeout> | 0 = 0;
+let progressTimer: CleanupFn | null = null;
 
 export function updateProgressUI(force = false): void {
   if (!force) {
-    if (!progressTimer)
-      progressTimer = setTimeout(() => {
-        progressTimer = 0;
+    if (!progressTimer && panelCtx)
+      progressTimer = panelCtx.timeout(() => {
+        progressTimer = null;
         updateProgressUI(true);
       }, 120);
     return;
   }
   const fill = document.getElementById('almal-progress-fill');
   const text = document.getElementById('almal-progress-text');
-  renderRateLimitWarning(document.getElementById('almal-panel'));
+  renderRateLimitWarning(document.getElementById(panelId()));
   if (!fill || !text) return;
   if (progress.phase === 'fetching') {
     fill.style.width = '100%';
@@ -136,8 +138,8 @@ export function renderRateLimitWarning(panelEl: HTMLElement | null): void {
         `<b>${name} API limit reached.</b> Requests resume in <b>${Math.ceil((Number(at) - now) / 1000)}s</b>.`
     )
     .join('<br>');
-  clearTimeout((panelEl as any)._limitTimer);
-  (panelEl as any)._limitTimer = setTimeout(() => renderRateLimitWarning(panelEl), 1000);
+  (panelEl as any)._limitCancel?.();
+  (panelEl as any)._limitCancel = panelCtx?.timeout(() => renderRateLimitWarning(panelEl), 1000) ?? null;
 }
 
 const LOGOS = {
@@ -174,7 +176,7 @@ const timeEl = (sec: number): string =>
   `<time data-ts="${sec || 0}" title="${sec ? esc(new Date(sec * 1000).toLocaleString()) : ''}">${ago(sec)}</time>`;
 
 const refreshTimes = (): void =>
-  document.querySelectorAll<HTMLElement>('#almal-panel time[data-ts]').forEach((el) => {
+  document.getElementById(panelId())?.querySelectorAll<HTMLElement>('time[data-ts]').forEach((el) => {
     el.textContent = ago(Number(el.dataset.ts));
   });
 
@@ -194,7 +196,7 @@ function connItem(connected: boolean): string {
 }
 
 export function renderPanel(): void {
-  const panelEl = document.getElementById('almal-panel');
+  const panelEl = document.getElementById(panelId());
   if (!panelEl || !panelCtx) return;
   const alOk = panelCtx.api.hasAuth();
   const malOk = panelCtx.accounts.isConnected('mal');
@@ -319,13 +321,11 @@ let lastMountTry = 0;
 let retryCancel: (() => void) | null = null;
 let selfLookup = false;
 
-function listRouteOwner(): string {
-  const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
-  if (!m) return '';
+function decodeOwner(raw: string): string {
   try {
-    return decodeURIComponent(m[1]);
+    return decodeURIComponent(raw);
   } catch {
-    return m[1];
+    return raw;
   }
 }
 
@@ -344,8 +344,12 @@ function findPanelAnchor(): HTMLElement | null {
 }
 
 function isOwnList(): boolean {
-  const owner = listRouteOwner();
-  if (!owner) return false;
+  let owner = routeOwner || '';
+  if (!owner) {
+    const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
+    if (!m) return false;
+    owner = decodeOwner(m[1]);
+  }
   const me = panelCtx?.session.username || '';
   if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
     selfLookup = true;
@@ -360,7 +364,8 @@ const onListRoute = (): boolean =>
 export function mountPanel(): void {
   retryCancel?.();
   retryCancel = null;
-  if (!panelCtx || !onListRoute() || document.getElementById('almal-panel')) return;
+  const id = panelId();
+  if (!panelCtx || !onListRoute() || document.getElementById(id)) return;
   lastMountTry = Date.now();
   const anchor = findPanelAnchor();
   if (!anchor) {
@@ -368,7 +373,7 @@ export function mountPanel(): void {
     return;
   }
   const panelEl = document.createElement('div');
-  panelEl.id = 'almal-panel';
+  panelEl.id = id;
   panelEl.addEventListener('click', (e) => {
     const a = (e.target as Element | null)?.closest<HTMLElement>('[data-act]');
     if (a && a.dataset.act && ACTIONS[a.dataset.act]) ACTIONS[a.dataset.act]();
@@ -384,8 +389,10 @@ const mountSoon = debounce(mountPanel, 250);
 
 export function initSyncPanel(ctx: FeatureContext<true, 'mal'>): void {
   panelCtx = ctx;
-  ctx.ownUi('#almal-panel');
-  ctx.addStyle('almal-style', PANEL_CSS);
+  const rootId = ctx.getId('panel');
+  const rootSel = `#${rootId}`;
+  ctx.ownUi(rootSel);
+  ctx.addStyle(() => buildPanelCss(rootSel));
   ctx.onCleanup(
     setMalUiSink({
       onLog: () => {
@@ -401,39 +408,57 @@ export function initSyncPanel(ctx: FeatureContext<true, 'mal'>): void {
   );
   ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
   ctx.onCleanup(onStateChange(renderPanel));
-  ctx.accounts.watch('mal', () => renderPanel());
 
-  ctx.onBodyMutation(() => {
-    if (!document.getElementById('almal-panel') && Date.now() - lastMountTry > 1000 && onListRoute()) mountSoon();
-  });
-  ctx.onNav(() => {
+  ctx.interval(() => maybeAutoSync(), 60_000);
+  ctx.ready(() => maybeAutoSync());
+
+  ctx.onRoute(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i, (rc) => {
+    routeOwner = decodeOwner(rc.match![1]);
     retryCancel?.();
     retryCancel = null;
-    document.getElementById('almal-panel')?.remove();
+    document.getElementById(rootId)?.remove();
     mountSoon();
-  });
-  mountSoon();
 
-  let lastAl: boolean | null = null;
-  let lastMal: boolean | null = null;
-  ctx.interval(() => {
-    const al = ctx.api.hasAuth();
-    const mal = ctx.accounts.isConnected('mal');
-    if (al !== lastAl || mal !== lastMal) {
-      lastAl = al;
-      lastMal = mal;
-      renderPanel();
-    }
-    refreshTimes();
-    if (onListRoute() && !document.getElementById('almal-panel')) mountSoon();
-    maybeAutoSync();
-  }, 2000);
+    rc.onCleanup(ctx.accounts.watch('mal', () => renderPanel()));
+    rc.onCleanup(
+      ctx.onBodyMutation(() => {
+        if (!rc.signal.aborted && !document.getElementById(rootId) && Date.now() - lastMountTry > 1000 && onListRoute()) {
+          mountSoon();
+        }
+      })
+    );
+
+    let lastAl: boolean | null = null;
+    let lastMal: boolean | null = null;
+    rc.interval(() => {
+      const al = ctx.api.hasAuth();
+      const mal = ctx.accounts.isConnected('mal');
+      if (al !== lastAl || mal !== lastMal) {
+        lastAl = al;
+        lastMal = mal;
+        renderPanel();
+      }
+      refreshTimes();
+      if (onListRoute() && !document.getElementById(rootId)) mountSoon();
+      maybeAutoSync();
+    }, 2000);
+
+    return () => {
+      retryCancel?.();
+      retryCancel = null;
+      routeOwner = null;
+      document.getElementById(rootId)?.remove();
+    };
+  });
 
   ctx.onCleanup(() => {
     retryCancel?.();
     retryCancel = null;
+    progressTimer?.();
+    progressTimer = null;
+    routeOwner = null;
     selfLookup = false;
-    document.getElementById('almal-panel')?.remove();
+    document.getElementById(rootId)?.remove();
     if (panelCtx === ctx) panelCtx = null;
   });
 }

@@ -248,7 +248,7 @@ export async function loadAllEntriesViaMediaList(
   state.prefetchRelease?.();
   state.prefetchRelease = ctx.hooks.setPrefetchPaused(true);
 
-  state.indicatorTimer = setTimeout(() => {
+  state.indicatorTimer = ctx.timeout(() => {
     if (!abortState.abort && isComparePage()) {
       setLoadIndicator(state, sidebar, 'Loading full compare list...');
     }

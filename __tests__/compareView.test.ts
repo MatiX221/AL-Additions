@@ -266,6 +266,10 @@ describe('compareView: ctx.session integration & ctx.log usage', () => {
     const makeMockCtx = (overrides: Record<string, any> = {}) =>
       ({
         session: AniList.session,
+        timeout: (fn: () => void, ms: number) => {
+          const id = setTimeout(fn, ms);
+          return () => clearTimeout(id);
+        },
         hooks: {
           getCacheBridge: () => null,
           setPrefetchPaused: () => () => {}

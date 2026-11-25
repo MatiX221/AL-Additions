@@ -1,5 +1,3 @@
-export const COMPARE_CSS_ID = 'ala-compare-style';
-
 export const COMPARE_CSS = `
       .content.container.ala-compare-page-container {
         padding-left: 18px !important;

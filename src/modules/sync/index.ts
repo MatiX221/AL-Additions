@@ -22,7 +22,7 @@ import {
   syncStatus
 } from './state';
 import { initSyncPanel, renderPanel } from './panel';
-import { configureOverridesModalStyle, openQuickOverrideModal, openOverridesModal } from './overridesModal';
+import { openQuickOverrideModal, openOverridesModal } from './overridesModal';
 import { initDeletionInterceptor } from './deletionInterceptor';
 
 declare module '../../types' {
@@ -260,15 +260,8 @@ defineModule({
     }
   },
   setup(ctx) {
-    ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
     ctx.services.provide('quickEdit', (mediaId: number, mediaType: SyncMediaType = 'ANIME') =>
-      openQuickOverrideModal(
-        mediaId,
-        mediaType,
-        ctx.addStyle,
-        () => ctx.events.emit('manualOverrides:changed', mediaId),
-        ctx.api
-      )
+      openQuickOverrideModal(mediaId, mediaType, ctx, () => ctx.events.emit('manualOverrides:changed', mediaId))
     );
   }
 });

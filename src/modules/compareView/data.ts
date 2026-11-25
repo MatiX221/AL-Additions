@@ -12,6 +12,8 @@ export type SortDir = 'asc' | 'desc';
 
 export const STATUSES = ['Completed', 'Planning', 'Current', 'Paused', 'Dropped'] as const;
 
+import type { CleanupFn } from '../../types';
+
 export interface CompareState {
   activeSortCol: SortCol;
   activeSortDir: SortDir;
@@ -25,7 +27,7 @@ export interface CompareState {
   disposed: boolean;
   loadAbortState: { abort: boolean } | null;
   resizeCleanup: (() => void) | null;
-  indicatorTimer: ReturnType<typeof setTimeout> | null;
+  indicatorTimer: CleanupFn | null;
   prefetchRelease: (() => void) | null;
 }
 

@@ -738,8 +738,13 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
       dispatchEvent: () => false
     }));
 
+    const testTimeout = (fn: () => void, ms: number) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    };
+
     try {
-      const singleCard = createSongCard(singleSong, [], 'OP');
+      const singleCard = createSongCard(singleSong, [], 'OP', testTimeout);
       expect(singleCard.classList.contains('has-video')).toBe(true);
       expect(singleCard.querySelector('.daiya-anisongs-versions')).toBeNull();
 
@@ -768,7 +773,7 @@ describe('AniSongs: Episode Sorting, Formatting & Multi-Version Theme Cards', ()
         ]
       };
 
-      const multiCard = createSongCard(multiSong, [], 'ED');
+      const multiCard = createSongCard(multiSong, [], 'ED', testTimeout);
       expect(multiCard.classList.contains('has-versions')).toBe(true);
       expect(multiCard.classList.contains('has-video')).toBe(false);
 

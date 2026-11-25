@@ -199,7 +199,7 @@ export function updateStatusCounts(state: CompareState, sidebar: HTMLElement, en
 
 export function setLoadIndicator(state: CompareState, sidebar: HTMLElement, text: string | null): void {
   if (state.indicatorTimer) {
-    clearTimeout(state.indicatorTimer);
+    state.indicatorTimer();
     state.indicatorTimer = null;
   }
   let indicator = sidebar.querySelector<HTMLElement>('#ala-compare-load-indicator');
@@ -261,7 +261,7 @@ export function cleanupCompareView(state: CompareState): void {
     state.prefetchRelease = null;
   }
   if (state.indicatorTimer) {
-    clearTimeout(state.indicatorTimer);
+    state.indicatorTimer();
     state.indicatorTimer = null;
   }
   if (state.loadAbortState) {

@@ -1,8 +1,6 @@
 import type { MediaListResult } from "../../api/anilist";
 import { defineModule } from "../../core/registry";
 
-const STYLE_ID = "ala-date-backfill-style";
-const MODAL_ID = "ala-date-backfill-modal";
 const TARGETED_BATCH_SIZE = 10;
 
 export type ScanMode = "TARGETED" | "FEED";
@@ -389,36 +387,30 @@ defineModule({
     help: "Log list scans, activity pagination, and entry updates.",
   },
   setup(ctx) {
+    const MODAL_ID = ctx.getId("modal");
     let activeModalAbort: AbortController | null = null;
 
     ctx.onCleanup(() => {
       activeModalAbort?.abort();
       activeModalAbort = null;
-      document.getElementById(MODAL_ID)?.remove();
     });
 
     ctx.addStyle(
-      STYLE_ID,
       `@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
       @keyframes alaDbfIndeterminate {0%{transform:translateX(-100%);}100%{transform:translateX(350%);}}
       @keyframes alaDbfPulse {0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.85);}}
-      #${MODAL_ID} {position:fixed;inset:0;z-index:99999;background:rgba(11,22,34,0.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px;overflow-x:hidden;}
-      #${MODAL_ID} * {box-sizing:border-box;}
-      #${MODAL_ID} .ala-dbf-card {width:min(960px,100%);max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border:1px solid rgba(var(--color-text),0.1);border-radius:10px;box-shadow:0 20px 50px rgba(0,0,0,0.5);overflow:hidden;font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
-      #${MODAL_ID} .ala-dbf-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-shrink:0;}
+      #${MODAL_ID} .ala-core-sheet {max-height:88vh;border:1px solid rgba(var(--color-text),0.1);font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
+      #${MODAL_ID} .ala-core-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);align-items:flex-start;}
       #${MODAL_ID} .ala-dbf-title-wrap {display:flex;flex-direction:column;gap:4px;min-width:0;}
-      #${MODAL_ID} .ala-dbf-title {font-size:1.65rem;font-weight:700;letter-spacing:-0.01em;color:rgb(var(--color-text));}
       #${MODAL_ID} .ala-dbf-subtitle {font-size:1.2rem;color:rgb(var(--color-text-lighter));line-height:1.35;}
-      #${MODAL_ID} .ala-dbf-close {width:32px;height:32px;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:6px;cursor:pointer;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));font-size:1.5rem;line-height:1;transition:background 0.15s,color 0.15s;}
-      #${MODAL_ID} .ala-dbf-close:hover {background:rgba(var(--color-red),0.16);color:rgb(var(--color-red));}
       #${MODAL_ID} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
       #${MODAL_ID} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
       #${MODAL_ID} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
       #${MODAL_ID} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-body {padding:18px 22px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;}
-      #${MODAL_ID} .ala-dbf-body::-webkit-scrollbar {width:8px;}
-      #${MODAL_ID} .ala-dbf-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
-      #${MODAL_ID} .ala-dbf-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
+      #${MODAL_ID} .ala-core-body {padding:18px 22px;}
+      #${MODAL_ID} .ala-core-body::-webkit-scrollbar {width:8px;}
+      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
+      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
       #${MODAL_ID} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
       #${MODAL_ID} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
       #${MODAL_ID} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
@@ -466,7 +458,7 @@ defineModule({
       #${MODAL_ID} .ala-dbf-source.assumed {color:rgb(235,168,52);}
       #${MODAL_ID} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
       #${MODAL_ID} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
-      #${MODAL_ID} .ala-dbf-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;flex-shrink:0;}
+      #${MODAL_ID} .ala-core-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);justify-content:space-between;gap:12px;flex-wrap:wrap;}
       #${MODAL_ID} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
       #${MODAL_ID} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
       #${MODAL_ID} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
@@ -483,16 +475,16 @@ defineModule({
       #${MODAL_ID} button:disabled {opacity:0.45;cursor:not-allowed;}
       @media (max-width:640px) {
         #${MODAL_ID} {padding:10px;}
-        #${MODAL_ID} .ala-dbf-card {max-height:92vh;}
-        #${MODAL_ID} .ala-dbf-head {padding:12px 14px;}
-        #${MODAL_ID} .ala-dbf-body {padding:12px 14px;}
+        #${MODAL_ID} .ala-core-sheet {max-height:92vh;}
+        #${MODAL_ID} .ala-core-head {padding:12px 14px;}
+        #${MODAL_ID} .ala-core-body {padding:12px 14px;}
         #${MODAL_ID} .ala-dbf-mode-grid {grid-template-columns:1fr;}
         #${MODAL_ID} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
         #${MODAL_ID} .ala-dbf-search {font-size:16px;}
-        #${MODAL_ID} .ala-dbf-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
+        #${MODAL_ID} .ala-core-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
         #${MODAL_ID} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
         #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
-        #${MODAL_ID} .ala-dbf-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
+        #${MODAL_ID} .ala-core-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
         #${MODAL_ID} table,#${MODAL_ID} tbody,#${MODAL_ID} tr,#${MODAL_ID} td {display:block;width:100%;}
         #${MODAL_ID} thead {display:none;}
         #${MODAL_ID} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
@@ -524,17 +516,6 @@ defineModule({
         activeScanAbort?.abort();
         activeScanAbort = null;
       });
-
-      document.getElementById(MODAL_ID)?.remove();
-      const overlay = document.createElement("div");
-      overlay.id = MODAL_ID;
-      const untrackOwnUi = ctx.ownUi(`#${MODAL_ID}`);
-
-      const closeModal = () => {
-        modalAbort.abort();
-        untrackOwnUi();
-        overlay.remove();
-      };
 
       const renderIdleScreenHtml = () => {
         const scopeSetting = ctx.get<string>("dateBackfillScope");
@@ -578,41 +559,48 @@ defineModule({
         `;
       };
 
-      overlay.innerHTML = `
-        <div class="ala-dbf-card" role="dialog" aria-modal="true" aria-label="Missing Date Backfill">
-          <div class="ala-dbf-head">
-            <div class="ala-dbf-title-wrap">
-              <div class="ala-dbf-title">Missing Date Backfill</div>
-              <div class="ala-dbf-subtitle">Recover missing start and completion dates from your AniList activity logs</div>
-            </div>
-            <button type="button" class="ala-dbf-close" data-act="close" title="Close">✕</button>
+      const modal = ctx.modal({
+        id: MODAL_ID,
+        title: "Missing Date Backfill",
+        maxWidth: "960px",
+        bodyHtml: renderIdleScreenHtml(),
+        footerHtml: `
+          <div class="ala-dbf-status">
+            <span class="ala-dbf-dot" data-role="dot"></span>
+            <span data-role="status">Ready to scan</span>
           </div>
-          <div class="ala-dbf-progress-track">
-            <div class="ala-dbf-progress-fill" data-role="progress"></div>
+          <div class="ala-dbf-actions" data-role="footer-actions" hidden>
+            <button type="button" class="ala-dbf-btn secondary" data-act="primary-action">Pause</button>
+            <button type="button" class="ala-dbf-btn apply" data-act="apply" disabled>Apply Selected (0)</button>
           </div>
-          <div class="ala-dbf-body" data-role="body">
-            ${renderIdleScreenHtml()}
-          </div>
-          <div class="ala-dbf-foot">
-            <div class="ala-dbf-status">
-              <span class="ala-dbf-dot" data-role="dot"></span>
-              <span data-role="status">Ready to scan</span>
-            </div>
-            <div class="ala-dbf-actions" data-role="footer-actions" hidden>
-              <button type="button" class="ala-dbf-btn secondary" data-act="primary-action">Pause</button>
-              <button type="button" class="ala-dbf-btn apply" data-act="apply" disabled>Apply Selected (0)</button>
-            </div>
-          </div>
-        </div>
-      `;
+        `,
+        onClose: () => modalAbort.abort(),
+      });
 
-      document.body.appendChild(overlay);
+      const overlay = modal.backdrop;
+      const bodyEl = modal.body;
+      const statusEl = modal.footer.querySelector('[data-role="status"]') as HTMLElement;
+      const dotEl = modal.footer.querySelector('[data-role="dot"]') as HTMLElement;
+      const footerActionsEl = modal.footer.querySelector('[data-role="footer-actions"]') as HTMLElement;
 
-      const bodyEl = overlay.querySelector('[data-role="body"]') as HTMLElement;
-      const statusEl = overlay.querySelector('[data-role="status"]') as HTMLElement;
-      const dotEl = overlay.querySelector('[data-role="dot"]') as HTMLElement;
-      const progressEl = overlay.querySelector('[data-role="progress"]') as HTMLElement;
-      const footerActionsEl = overlay.querySelector('[data-role="footer-actions"]') as HTMLElement;
+      const headEl = modal.sheet.querySelector(".ala-core-head");
+      const h2 = headEl?.querySelector("h2");
+      if (h2) {
+        const wrap = document.createElement("div");
+        wrap.className = "ala-dbf-title-wrap";
+        h2.parentNode?.insertBefore(wrap, h2);
+        wrap.appendChild(h2);
+        const sub = document.createElement("div");
+        sub.className = "ala-dbf-subtitle";
+        sub.textContent = "Recover missing start and completion dates from your AniList activity logs";
+        wrap.appendChild(sub);
+      }
+
+      const track = document.createElement("div");
+      track.className = "ala-dbf-progress-track";
+      track.innerHTML = '<div class="ala-dbf-progress-fill" data-role="progress"></div>';
+      modal.sheet.insertBefore(track, bodyEl);
+      const progressEl = track.querySelector('[data-role="progress"]') as HTMLElement;
       const primaryActionBtn = overlay.querySelector('[data-act="primary-action"]') as HTMLButtonElement;
       const applyBtn = overlay.querySelector('[data-act="apply"]') as HTMLButtonElement;
 
@@ -843,14 +831,9 @@ defineModule({
         const target = (ev.target as HTMLElement).closest(
           "[data-act]",
         ) as HTMLElement | null;
-        if (!target) {
-          if (ev.target === overlay) closeModal();
-          return;
-        }
+        if (!target) return;
         const act = target.dataset.act;
-        if (act === "close") {
-          closeModal();
-        } else if (act === "scan-fast") {
+        if (act === "scan-fast") {
           void runScan("TARGETED");
         } else if (act === "scan-full") {
           void runScan("FEED");

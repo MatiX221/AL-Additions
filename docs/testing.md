@@ -70,9 +70,9 @@ describe('example module', () => {
 Things to know:
 
 - `bootModuleForTest` disposes any earlier instance, boots a fresh one, and does not check the enabled toggle. Still set the toggle, because `reload` decides what to stop from it.
-- Assert against the **final** element ids. Ids passed to `mount` and `addStyle` get an `ala-` prefix, see [Mounting DOM Elements](./context-api.md#mounting-dom-elements).
+- **Assert against the resolved element ids.** IDs passed to `ctx.getId(name)` / `mount({ id })` namespace to `ala-<moduleId>-<name>`, and 2-arg `addStyle(name, css)` appends `-style` unless already present (names already starting with `ala-` stay as written), see [Element IDs](./context-api.md#element-ids) and [Mounting DOM Elements](./context-api.md#mounting-dom-elements).
 - `host.getStatus(id)` returns `{ active: true }` or `{ active: false, reason }` and is the way to assert on dependency, host, standalone, and error behavior, see [Status reasons](./define-module.md#status-reasons).
-- `disposeFeature(id)` from the registry stops a module and everything that depends on it.
+- `MountHandle.unmount()` detaches a mount early, and `disposeFeature(id)` from the registry stops a module and everything that depends on it.
 - Module-level state in your files survives between tests in the same file. Reset it in cleanups, or call `vi.resetModules()` and import again for a fresh copy.
 
 ### Timers and mutations

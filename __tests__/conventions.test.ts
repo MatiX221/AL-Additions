@@ -192,7 +192,11 @@ const ALL_FILES = collectTsFiles(SRC_ROOT).map((abs) => ({
 describe('Conventions: Module Encapsulation & Raw Access Guards', () => {
   const moduleFiles = ALL_FILES.filter((f) => f.rel.startsWith('modules/'));
 
-  const FORBIDDEN_MODULE_PATTERNS: Array<{ name: string; re: RegExp; allow?: Set<string> }> = [
+  const FORBIDDEN_MODULE_PATTERNS: Array<{
+    name: string;
+    re: RegExp;
+    allow?: Set<string> | ((rel: string) => boolean);
+  }> = [
     { name: "raw session/auth key ('al_user_id')", re: /['"`]al_user_id['"`]/ },
     { name: "raw session/auth key ('al_username')", re: /['"`]al_username['"`]/ },
     { name: "raw session/auth key ('al_score_format')", re: /['"`]al_score_format['"`]/ },
@@ -254,6 +258,15 @@ describe('Conventions: Module Encapsulation & Raw Access Guards', () => {
     {
       name: 'internal logger helpers in module (use ctx.log)',
       re: /\b(?:createLogger|isDebugEnabled|getDebuggableChannels)\b/
+    },
+    {
+      name: 'hardcoded legacy style or mount ID prefix in module (use ctx.getId / ctx.addStyle)',
+      re: /\baddStyle\s*\(\s*['"`](?:ala|daiya|almal)-|\bmount\s*\(\s*\{[^}]*\bid\s*:\s*['"`](?:ala|daiya|almal)-/s
+    },
+    {
+      name: 'raw setTimeout / setInterval in module (use ctx.timeout / ctx.interval / rc.timeout / rc.interval)',
+      re: /\b(?:setTimeout|setInterval)\s*\(/,
+      allow: (rel) => rel.startsWith('modules/fastLoad/') || rel === 'modules/sync/state.ts'
     }
   ];
 
@@ -263,7 +276,7 @@ describe('Conventions: Module Encapsulation & Raw Access Guards', () => {
     for (const file of moduleFiles) {
       const code = stripCommentsPreservingStrings(file.raw);
       for (const rule of FORBIDDEN_MODULE_PATTERNS) {
-        if (rule.allow?.has(file.rel)) continue;
+        if (typeof rule.allow === 'function' ? rule.allow(file.rel) : rule.allow?.has(file.rel)) continue;
         if (rule.re.test(code)) {
           violations.push(`${file.rel}: ${rule.name}`);
         }

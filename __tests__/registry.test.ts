@@ -46,7 +46,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
 
     let resolveAsyncData!: () => void;
     let routeRc!: any;
-    let manualUnmount!: () => void;
+    let manualUnmount!: any;
     let addSpy!: ReturnType<typeof vi.spyOn>;
     let removeSpy!: ReturnType<typeof vi.spyOn>;
     let matcherShouldThrow = true;
@@ -124,7 +124,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(document.getElementById('ala-stale-route-widget')).toBeNull();
+      expect(document.getElementById('ala-routeMountMod-stale-route-widget')).toBeNull();
       expect(mountedLog).toEqual([]);
       expect(readySpy).not.toHaveBeenCalled();
       expect(navSpy).not.toHaveBeenCalled();
@@ -132,12 +132,12 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       expect(ownUiSpy).not.toHaveBeenCalled();
 
       history.pushState({}, '', '/manga/55');
-      expect(typeof manualUnmount).toBe('function');
+      expect(typeof manualUnmount?.unmount).toBe('function');
       expect(addSpy).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
-      expect(document.getElementById('ala-manual-route-widget')).not.toBeNull();
-      manualUnmount();
+      expect(document.getElementById('ala-routeMountMod-manual-route-widget')).not.toBeNull();
+      manualUnmount.unmount();
       expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
-      expect(document.getElementById('ala-manual-route-widget')).toBeNull();
+      expect(document.getElementById('ala-routeMountMod-manual-route-widget')).toBeNull();
       expect(errSpy).toHaveBeenCalledTimes(1);
     } finally {
       errSpy.mockRestore();
@@ -320,7 +320,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
       expect(navSpy).not.toHaveBeenCalled();
       expect(bodySpy).not.toHaveBeenCalled();
       expect(ownUiSpy).not.toHaveBeenCalled();
-      expect(document.getElementById('ala-stale-style-id')).toBeNull();
+      expect(document.getElementById('ala-ctxReloadMod-stale-style-id-style')).toBeNull();
       expect(gqlSpy).not.toHaveBeenCalled();
       expect(rpcSpy).not.toHaveBeenCalled();
       expect(prefetchSpy).not.toHaveBeenCalled();

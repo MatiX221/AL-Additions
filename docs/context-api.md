@@ -112,7 +112,8 @@ The handler receives a route context `rc`:
 | `rc.signal` | An `AbortSignal` that aborts at teardown. Pass it to async work. |
 | `rc.onCleanup(fn)` | Run `fn` at teardown (immediately if already torn down). |
 | `rc.listen`, `rc.interval`, `rc.timeout` | Same as the `ctx` versions, scoped to this route run. |
-| `rc.mount(spec)` | [Mount](#mounting-dom-elements) an element for this route run. |
+| `rc.mount(spec)` | [Mount](#mounting-dom-elements) an element for this route run. Returns a `MountHandle`. |
+| `rc.addStyle(...)` | Inject [styles](#styles) scoped to this route run. |
 | `rc.waitForSelector(sel, ms?)` | Like `ctx.waitForSelector`, also resolves `null` at teardown. |
 
 A handler may return a cleanup function or a promise of one. For async handlers, always re-check `rc.signal.aborted` after an `await`. Mounts and listeners created after teardown are ignored automatically, but your own state changes are not:
@@ -149,37 +150,56 @@ Notes:
 
 ---
 
-## Mounting DOM Elements
+## Element IDs
 
-`ctx.mount(spec)` and `rc.mount(spec)` place an element and keep it in place. `ctx.mount` lasts until the module unloads, `rc.mount` until the route run ends. Both return a function that removes the mount early.
+`ctx.getId(name?)` generates module-namespaced DOM IDs:
 
 ```ts
-rc.mount({
-  id: 'ala-example',
+ctx.getId('panel');        // "ala-<id>-panel"
+ctx.getId('ala-panel');    // "ala-panel" (kept as-is if already prefixed with ala-)
+ctx.getId();               // "ala-<id>-1", "ala-<id>-2", ...
+```
+
+Use `ctx.getId(...)` instead of hardcoding `'ala-'`, `'daiya-'`, or `'almal-'` string literals in modules.
+
+---
+
+## Mounting DOM Elements
+
+`ctx.mount(spec)` and `rc.mount(spec)` place an element, inject optional styles, and keep the element in place. `ctx.mount` lasts until the module unloads, `rc.mount` until the route run ends. Both return a `MountHandle` (`{ id, selector, el(), unmount }`).
+
+```ts
+const badge = rc.mount({
+  id: 'badge',
   anchor: '.sidebar > .data',
   position: 'beforebegin',
   match: () => someCondition(),
   ownUi: true,
+  style: (sel) => `${sel} { color: rgb(var(--color-text)); }`,
   create: () => document.createElement('div')
 });
+// badge.id === 'ala-<modId>-badge', badge.selector === '#ala-<modId>-badge'
+// badge.el() returns the live HTMLElement | null; badge.unmount() removes it early
 ```
 
 | Field | Description |
 | :--- | :--- |
-| `id` | Element id. Prefixed with `ala-` unless it already starts with it. Used to detect an existing element and to register own UI. |
+| `id` | Optional local id. Resolved with `ctx.getId(id)`, or `ala-<modId>-mount-<n>` when omitted. Assigned to the element's `.id` and used for `ownUi`. |
 | `anchor` | A CSS selector or a function returning the element to insert relative to. |
 | `position` | An `insertAdjacentElement` position. Defaults to `afterend`. |
-| `create` | Returns the element to insert. |
+| `create` | Returns the element to insert, or `null` to skip mounting. |
 | `match` | Optional gate. When it returns `false` an existing element is removed. |
-| `ownUi` | Register `#<final id>` as [own UI](#observer-exclusions). Needs an element id. |
+| `ownUi` | Register `#<final id>` as [own UI](#observer-exclusions). |
+| `style` | Optional `string \| ((selector: string) => string)` (`MountStyleSource`). Injected as `<id>-style` right before DOM insertion and removed when unmounted. |
 
 Behavior:
 
 - The mount is attempted at DOM ready, on every navigation, and after every batch of page mutations.
-- With an `id`, the inserted element's id is set to the prefixed id, replacing whatever `create()` assigned. Without an `id`, an id set by `create()` is prefixed the same way.
-- If the element is still connected, nothing happens. If an element with the final id already exists, it is adopted instead of duplicated.
+- The resolved id is assigned to `el.id`, replacing whatever `create()` set.
+- If the element is still connected, nothing happens. If an element with the resolved id already exists, it is adopted instead of duplicated.
+- If `style` is given, its `<style>` tag is injected before insertion and preserved across mid-route re-render repairs. Calling `handle.unmount()` or leaving the route removes both the element and its mount style.
 - If the page removes your element, `create()` runs again and the element is re-inserted. Keep `create()` cheap.
-- An existing element is never updated. To change its content, update it yourself or remove the mount and add a new one.
+- An existing element is never updated. To change its content, update it yourself or unmount and remount.
 - If the anchor never appears, the mount waits silently and retries as the page changes.
 
 Selectors for AniList's own markup are not shared. Keep them as constants at the top of your module so a site change touches one line.
@@ -189,12 +209,14 @@ Selectors for AniList's own markup are not shared. Keep them as constants at the
 ## Styles
 
 ```ts
-ctx.addStyle('ala-example-style', `.ala-example { color: rgb(var(--color-text)); }`);
+ctx.addStyle(`.ala-example { color: rgb(var(--color-text)); }`);
+ctx.addStyle('modal', (/* or a function: () => string */) => `${modalSel} { padding: 16px; }`);
 ```
 
-- Adds a `<style id="...">` to `<head>` (waiting for it if needed). The tag is removed when the last user of that id unloads.
-- The id gets an `ala-` prefix unless it already starts with it, so `example-style` becomes `ala-example-style`. An empty id becomes `ala-style`.
-- Ids are shared and reference counted across modules. If a tag with the final id already exists, it is reused and the new CSS text is not applied. Use unique ids, and prefix class names (`ala-`) to avoid colliding with AniList.
+- Pass one argument `addStyle(css)` (`CssSource`: `string | (() => string)`) to allocate an automatic stylesheet id (`ala-<id>-style-<n>` on `ctx`, or `ala-<id>-route-style-<n>` on `rc`).
+- Pass two arguments `addStyle(name, css)` to name a shared or updatable tag. Names starting with `ala-` are preserved; other names become `ala-<id>-<name>-style` (avoiding double `-style`).
+- Lazy CSS functions are evaluated when `<head>` is mounted. If a `<style>` with the resolved id already exists, its `textContent` is updated in place without duplicating the tag, and reference counts keep it alive until the last user cleans up.
+- Do not pass hardcoded `'ala-'`, `'daiya-'`, or `'almal-'` string literals to `ctx.addStyle` or `mount({ id })` in feature modules; `conventions.test.ts` rejects them.
 - Use AniList's CSS variables so themes keep working: `--color-foreground`, `--color-background`, `--color-text`, `--color-text-lighter`, `--color-blue`, `--color-green`, `--color-red`. They hold comma-free RGB triplets, so wrap them as `rgb(var(--color-text))` or `rgba(var(--color-blue), .3)`.
 
 ---
@@ -220,7 +242,7 @@ The shared body observer would otherwise report your own DOM updates back to eve
 | `ctx.interval(fn, ms)` | `setInterval` cleared on unload. |
 | `ctx.timeout(fn, ms)` | `setTimeout` cleared on unload. |
 
-Each returns a function that cancels it early. Prefer these over raw `setInterval` and `addEventListener`, which would survive a hot-reload and run the old code alongside the new.
+Each returns a function that cancels it early. Raw `setTimeout` and `setInterval` are rejected in modules (outside `fastLoad/*` and `sync/state.ts`'s lock heartbeat), because raw timers survive hot-reloads and route changes.
 
 Calling `window.addEventListener(...)` or `document.addEventListener(...)` directly in a module is rejected by the convention tests. Listeners on elements you created yourself (`button.addEventListener(...)`) are fine, because they disappear with the element. For global listeners inside helper code or modal builders, accept a `listen` function as a parameter and pass `ctx.listen` (or `rc.listen`, or the `listen` member of a JSON editor context).
 
@@ -258,6 +280,27 @@ ctx.toast.show('Working...', { type: 'info', durationMs: 3000 });
 - There is one shared toast element, so a new toast replaces the current one.
 - `durationMs` defaults to 6000. `0` keeps it until replaced.
 - `closeTab: true` closes the browser tab 1.8 seconds later. It is meant for OAuth tabs that finished their job.
+
+---
+
+## Modals
+
+`ctx.modal(opts)` opens a managed dialog modal wired with backdrop dismissal, `Escape` key handling, a close button, `.ala-core-backdrop`/`.ala-core-sheet` styling, `ownUi` registration, and automatic close on module unload:
+
+```ts
+const modal = ctx.modal({
+  id: 'details',
+  title: 'Item Details',
+  maxWidth: '640px',
+  bodyHtml: '<p>Loading...</p>',
+  footerHtml: '<button class="ala-btn ala-btn--primary" data-act="ok" type="button">Done</button>',
+  onClose: () => controller.abort()
+});
+```
+
+- `id` is optional and resolved via `ctx.getId(opts.id ?? 'modal-<n>')`.
+- Returns a `ModalHandle` with `{ backdrop, sheet, body, footer, close }`. Call `modal.close()` to dismiss programmatically (`onClose` fires once).
+- `JsonEditorContext` exposes the same `modal(...)` helper for Settings editors, auto-closing any open dialog when the Settings panel closes.
 
 ---
 

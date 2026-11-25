@@ -198,57 +198,47 @@ export function buildProviderUrl(template: string, params: SongParams): string {
     .replace(/\{query\}/gi, format(query));
 }
 
-const MODAL_ID = 'ala-anisongs-modal-backdrop';
+const buildAniSongsModalCss = (sel: string): string => `
+  ${sel} .ala-core-sheet{height:100%}
+  ${sel} .ala-as-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  ${sel} .ala-as-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s}
+  ${sel} .ala-as-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
+  ${sel} .ala-as-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
 
-const MODAL_CSS = `
-  #${MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID} .ala-as-sheet{display:flex;flex-direction:column;width:min(660px,100%);height:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  .ala-as-sheet *{box-sizing:border-box}
-  .ala-as-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  .ala-as-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-as-head h2{margin:0;font-size:18px;font-weight:600}
-  .ala-as-body{flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
-  .ala-as-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+  ${sel} .ala-as-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:16px}
+  ${sel} .ala-as-title{margin:0 0 8px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
+  ${sel} .ala-as-help{font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px;line-height:1.4}
 
-  .ala-as-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .ala-as-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s}
-  .ala-as-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
-  .ala-as-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
+  ${sel} .ala-as-list{display:grid;gap:6px;margin-bottom:12px;min-width:0}
+  ${sel} .ala-as-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-foreground));border:1px solid rgba(var(--color-text-lighter),.12);min-width:0;max-width:100%}
+  ${sel} .ala-as-item-icon{width:22px;height:22px;object-fit:contain;border-radius:3px;flex-shrink:0}
+  ${sel} .ala-as-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+  ${sel} .ala-as-item-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
+  ${sel} .ala-as-item-url{font-size:11px;color:rgb(var(--color-text-lighter));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace}
+  ${sel} .ala-as-item-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
 
-  .ala-as-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:16px}
-  .ala-as-title{margin:0 0 8px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
-  .ala-as-help{font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px;line-height:1.4}
+  ${sel} .ala-as-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:14px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:12px;cursor:pointer;transition:all .15s}
+  ${sel} .ala-as-chip:hover{border-color:rgb(var(--color-blue));color:rgb(var(--color-blue))}
+  ${sel} .ala-as-chip-group{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 
-  .ala-as-list{display:grid;gap:6px;margin-bottom:12px;min-width:0}
-  .ala-as-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-foreground));border:1px solid rgba(var(--color-text-lighter),.12);min-width:0;max-width:100%}
-  .ala-as-item-icon{width:22px;height:22px;object-fit:contain;border-radius:3px;flex-shrink:0}
-  .ala-as-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-  .ala-as-item-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
-  .ala-as-item-url{font-size:11px;color:rgb(var(--color-text-lighter));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace}
-  .ala-as-item-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
+  ${sel} .ala-as-form{display:grid;gap:8px;margin-top:8px}
+  ${sel} .ala-as-form-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  ${sel} .ala-as-field{display:flex;flex-direction:column;gap:4px}
+  ${sel} .ala-as-field label{font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-as-input{width:100%;height:34px;padding:0 8px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:12px}
+  ${sel} .ala-as-input:focus{outline:none;border-color:rgb(var(--color-blue))}
 
-  .ala-as-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:14px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:12px;cursor:pointer;transition:all .15s}
-  .ala-as-chip:hover{border-color:rgb(var(--color-blue));color:rgb(var(--color-blue))}
-  .ala-as-chip-group{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  ${sel} .ala-as-var-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;max-height:120px;overflow-y:auto;padding-bottom:2px}
+  ${sel} .ala-as-var-tag{padding:3px 7px;border-radius:3px;font-family:monospace;font-size:11px;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue));cursor:pointer;user-select:none;touch-action:manipulation}
+  ${sel} .ala-as-var-tag:hover{background:rgb(var(--color-blue));color:#fff}
 
-  .ala-as-form{display:grid;gap:8px;margin-top:8px}
-  .ala-as-form-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .ala-as-field{display:flex;flex-direction:column;gap:4px}
-  .ala-as-field label{font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter))}
-  .ala-as-input{width:100%;height:34px;padding:0 8px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:12px}
-  .ala-as-input:focus{outline:none;border-color:rgb(var(--color-blue))}
+  ${sel} .ala-as-textarea{width:100%;height:280px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
+  ${sel} .ala-as-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
+  ${sel} .ala-as-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
+  ${sel} .ala-as-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
 
-  .ala-as-var-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;max-height:120px;overflow-y:auto;padding-bottom:2px}
-  .ala-as-var-tag{padding:3px 7px;border-radius:3px;font-family:monospace;font-size:11px;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue));cursor:pointer;user-select:none;touch-action:manipulation}
-  .ala-as-var-tag:hover{background:rgb(var(--color-blue));color:#fff}
-
-  .ala-as-textarea{width:100%;height:280px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
-  .ala-as-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
-  .ala-as-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
-  .ala-as-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
-
-  .ala-as-sheet .ala-btn:disabled,
-  .ala-as-sheet .ala-icon-btn:disabled {
+  ${sel} .ala-btn:disabled,
+  ${sel} .ala-icon-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
     pointer-events: none;
@@ -256,155 +246,131 @@ const MODAL_CSS = `
   }
 
   @media (max-width:700px){
-    #${MODAL_ID}{align-items:flex-end;padding:0}
-    #${MODAL_ID} .ala-as-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    .ala-as-head{padding:14px 16px}
-    .ala-as-body{padding:12px 16px}
-    .ala-as-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px));flex-direction:column-reverse;gap:8px}
-    .ala-as-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
+    ${sel}{align-items:flex-end;padding:0}
+    ${sel} .ala-core-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel} .ala-core-head{padding:14px 16px}
+    ${sel} .ala-core-body{padding:12px 16px}
+    ${sel} .ala-core-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px));flex-direction:column-reverse;gap:8px}
+    ${sel} .ala-core-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
 
-    .ala-as-form-row{grid-template-columns:1fr;gap:6px}
-    .ala-as-input{height:38px;font-size:14px}
+    ${sel} .ala-as-form-row{grid-template-columns:1fr;gap:6px}
+    ${sel} .ala-as-input{height:38px;font-size:14px}
 
-    .ala-as-item{flex-wrap:wrap;align-items:flex-start;gap:8px;padding:10px}
-    .ala-as-item-info{flex:1 1 calc(100% - 36px);min-width:0}
-    .ala-as-item-url{white-space:normal;word-break:break-all;font-size:10px}
-    .ala-as-item-actions{width:100%;display:flex;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
-    .ala-as-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;font-size:12px}
-    .ala-as-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
+    ${sel} .ala-as-item{flex-wrap:wrap;align-items:flex-start;gap:8px;padding:10px}
+    ${sel} .ala-as-item-info{flex:1 1 calc(100% - 36px);min-width:0}
+    ${sel} .ala-as-item-url{white-space:normal;word-break:break-all;font-size:10px}
+    ${sel} .ala-as-item-actions{width:100%;display:flex;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
+    ${sel} .ala-as-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;font-size:12px}
+    ${sel} .ala-as-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
 
-    .ala-as-form-actions{flex-direction:column;gap:8px;width:100%}
-    .ala-as-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
+    ${sel} .ala-as-form-actions{flex-direction:column;gap:8px;width:100%}
+    ${sel} .ala-as-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
 
-    .ala-as-json-actions{flex-direction:column;gap:8px}
-    .ala-as-json-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center}
-    .ala-as-textarea{height:200px}
+    ${sel} .ala-as-json-actions{flex-direction:column;gap:8px}
+    ${sel} .ala-as-json-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center}
+    ${sel} .ala-as-textarea{height:200px}
   }
   `;
 
 export function openAniSongsModal(ctx: JsonEditorContext): void {
-  ctx.addStyle('ala-anisongs-modal-style', MODAL_CSS);
-  const existing = document.getElementById(MODAL_ID);
-  if (existing) existing.remove();
-
   const checkInit = validateAniSongsConfig(ctx.value);
   let stateConfig: AniSongsConfig =
     checkInit.valid && checkInit.config
       ? JSON.parse(JSON.stringify(checkInit.config))
       : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
 
-  const backdrop = document.createElement('div');
-  backdrop.id = MODAL_ID;
-  backdrop.innerHTML = `
-    <div class="ala-as-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-as-modal-title">
-      <header class="ala-as-head">
-        <h2 id="ala-as-modal-title">Customize Song Search Providers</h2>
-        <button class="ala-icon-btn ala-as-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-as-body">
-        <div class="ala-as-tabs">
-          <button class="ala-as-tab is-active" data-tab="presets" type="button">Shortcuts &amp; Presets</button>
-          <button class="ala-as-tab" data-tab="json" type="button">Import / Export JSON</button>
+  const modal = ctx.modal({
+    id: 'anisongs-modal',
+    title: 'Customize Song Search Providers',
+    maxWidth: '660px',
+    bodyHtml: `
+      <div class="ala-as-tabs">
+        <button class="ala-as-tab is-active" data-tab="presets" type="button">Shortcuts &amp; Presets</button>
+        <button class="ala-as-tab" data-tab="json" type="button">Import / Export JSON</button>
+      </div>
+
+      <div id="ala-as-view-presets">
+        <div class="ala-as-box">
+          <h3 class="ala-as-title">Active Shortcuts</h3>
+          <p class="ala-as-help">These search icons appear directly next to each song on anime pages. Use arrows to reorder.</p>
+          <div id="ala-as-active-list" class="ala-as-list"></div>
+          <div style="font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter));margin-top:8px">Add inactive preset to shortcuts:</div>
+          <div id="ala-as-available-chips" class="ala-as-chip-group"></div>
         </div>
 
-        <div id="ala-as-view-presets">
-          <div class="ala-as-box">
-            <h3 class="ala-as-title">Active Shortcuts</h3>
-            <p class="ala-as-help">These search icons appear directly next to each song on anime pages. Use arrows to reorder.</p>
-            <div id="ala-as-active-list" class="ala-as-list"></div>
-            <div style="font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter));margin-top:8px">Add inactive preset to shortcuts:</div>
-            <div id="ala-as-available-chips" class="ala-as-chip-group"></div>
-          </div>
+        <div class="ala-as-box">
+          <h3 class="ala-as-title">All Presets</h3>
+          <p class="ala-as-help">Manage available music and video providers.</p>
+          <div id="ala-as-preset-list" class="ala-as-list"></div>
 
-          <div class="ala-as-box">
-            <h3 class="ala-as-title">All Presets</h3>
-            <p class="ala-as-help">Manage available music and video providers.</p>
-            <div id="ala-as-preset-list" class="ala-as-list"></div>
-
-            <div style="border-top:1px solid rgba(var(--color-text-lighter),.12);padding-top:12px;margin-top:12px">
-              <h4 id="ala-as-form-heading" style="margin:0 0 8px;font-size:12px;color:rgb(var(--color-blue))">Add Custom Preset</h4>
-              <div class="ala-as-form">
-                <div class="ala-as-form-row">
-                  <div class="ala-as-field">
-                    <label for="ala-as-in-name">Name</label>
-                    <input type="text" id="ala-as-in-name" class="ala-as-input" placeholder="e.g. Deezer">
-                  </div>
-                  <div class="ala-as-field">
-                    <label for="ala-as-in-icon">Favicon / Icon URL</label>
-                    <input type="text" id="ala-as-in-icon" class="ala-as-input" placeholder="e.g. https://www.deezer.com/favicon.ico">
-                  </div>
+          <div style="border-top:1px solid rgba(var(--color-text-lighter),.12);padding-top:12px;margin-top:12px">
+            <h4 id="ala-as-form-heading" style="margin:0 0 8px;font-size:12px;color:rgb(var(--color-blue))">Add Custom Preset</h4>
+            <div class="ala-as-form">
+              <div class="ala-as-form-row">
+                <div class="ala-as-field">
+                  <label for="ala-as-in-name">Name</label>
+                  <input type="text" id="ala-as-in-name" class="ala-as-input" placeholder="e.g. Deezer">
                 </div>
                 <div class="ala-as-field">
-                  <label for="ala-as-in-url">URL Search Template</label>
-                  <input type="text" id="ala-as-in-url" class="ala-as-input" placeholder="e.g. https://www.deezer.com/search/{title}%20{artist}">
-                  <div class="ala-as-var-tags">
-                    <span class="ala-as-var-tag" data-var="{title}">{title}</span>
-                    <span class="ala-as-var-tag" data-var="{title_jp}">{title_jp}</span>
-                    <span class="ala-as-var-tag" data-var="{title_romaji}">{title_romaji}</span>
-                    <span class="ala-as-var-tag" data-var="{artist}">{artist}</span>
-                    <span class="ala-as-var-tag" data-var="{artists}">{artists}</span>
-                    <span class="ala-as-var-tag" data-var="{anime}">{anime}</span>
-                    <span class="ala-as-var-tag" data-var="{anime_jp}">{anime_jp}</span>
-                    <span class="ala-as-var-tag" data-var="{anime_romaji}">{anime_romaji}</span>
-                    <span class="ala-as-var-tag" data-var="{anime_en}">{anime_en}</span>
-                    <span class="ala-as-var-tag" data-var="{theme}">{theme}</span>
-                    <span class="ala-as-var-tag" data-var="{type}">{type}</span>
-                    <span class="ala-as-var-tag" data-var="{number}">{number}</span>
-                    <span class="ala-as-var-tag" data-var="{year}">{year}</span>
-                    <span class="ala-as-var-tag" data-var="{season}">{season}</span>
-                    <span class="ala-as-var-tag" data-var="{query}">{query}</span>
-                    <span class="ala-as-var-tag" data-var="{query_anime}">{query_anime}</span>
-                    <span class="ala-as-var-tag" data-var="{query_jp}">{query_jp}</span>
-                  </div>
+                  <label for="ala-as-in-icon">Favicon / Icon URL</label>
+                  <input type="text" id="ala-as-in-icon" class="ala-as-input" placeholder="e.g. https://www.deezer.com/favicon.ico">
                 </div>
-                <div class="ala-as-form-actions" style="display:flex;gap:8px;margin-top:6px">
-                  <button type="button" class="ala-btn ala-btn--sm ala-btn--primary" id="ala-as-btn-save-preset">Add Preset</button>
-                  <button type="button" class="ala-btn ala-btn--sm" id="ala-as-btn-cancel-preset" style="display:none">Cancel</button>
+              </div>
+              <div class="ala-as-field">
+                <label for="ala-as-in-url">URL Search Template</label>
+                <input type="text" id="ala-as-in-url" class="ala-as-input" placeholder="e.g. https://www.deezer.com/search/{title}%20{artist}">
+                <div class="ala-as-var-tags">
+                  <span class="ala-as-var-tag" data-var="{title}">{title}</span>
+                  <span class="ala-as-var-tag" data-var="{title_jp}">{title_jp}</span>
+                  <span class="ala-as-var-tag" data-var="{title_romaji}">{title_romaji}</span>
+                  <span class="ala-as-var-tag" data-var="{artist}">{artist}</span>
+                  <span class="ala-as-var-tag" data-var="{artists}">{artists}</span>
+                  <span class="ala-as-var-tag" data-var="{anime}">{anime}</span>
+                  <span class="ala-as-var-tag" data-var="{anime_jp}">{anime_jp}</span>
+                  <span class="ala-as-var-tag" data-var="{anime_romaji}">{anime_romaji}</span>
+                  <span class="ala-as-var-tag" data-var="{anime_en}">{anime_en}</span>
+                  <span class="ala-as-var-tag" data-var="{theme}">{theme}</span>
+                  <span class="ala-as-var-tag" data-var="{type}">{type}</span>
+                  <span class="ala-as-var-tag" data-var="{number}">{number}</span>
+                  <span class="ala-as-var-tag" data-var="{year}">{year}</span>
+                  <span class="ala-as-var-tag" data-var="{season}">{season}</span>
+                  <span class="ala-as-var-tag" data-var="{query}">{query}</span>
+                  <span class="ala-as-var-tag" data-var="{query_anime}">{query_anime}</span>
+                  <span class="ala-as-var-tag" data-var="{query_jp}">{query_jp}</span>
                 </div>
+              </div>
+              <div class="ala-as-form-actions" style="display:flex;gap:8px;margin-top:6px">
+                <button type="button" class="ala-btn ala-btn--sm ala-btn--primary" id="ala-as-btn-save-preset">Add Preset</button>
+                <button type="button" class="ala-btn ala-btn--sm" id="ala-as-btn-cancel-preset" style="display:none">Cancel</button>
               </div>
             </div>
           </div>
         </div>
+      </div>
 
-        <div id="ala-as-view-json" style="display:none">
-          <div class="ala-as-box">
-            <h3 class="ala-as-title">Raw JSON Configuration</h3>
-            <p class="ala-as-help">View, export, or paste preset definitions and active provider arrays.</p>
-            <textarea id="ala-as-json-area" class="ala-as-textarea" spellcheck="false"></textarea>
-            <div id="ala-as-json-status" class="ala-as-status"></div>
-            <div class="ala-as-json-actions" style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-as-btn-apply-json">Apply JSON</button>
-              <button type="button" class="ala-btn" id="ala-as-btn-copy-json">Copy to Clipboard</button>
-              <button type="button" class="ala-btn" id="ala-as-btn-reset-defaults" style="margin-left:auto">Reset Defaults</button>
-            </div>
+      <div id="ala-as-view-json" style="display:none">
+        <div class="ala-as-box">
+          <h3 class="ala-as-title">Raw JSON Configuration</h3>
+          <p class="ala-as-help">View, export, or paste preset definitions and active provider arrays.</p>
+          <textarea id="ala-as-json-area" class="ala-as-textarea" spellcheck="false"></textarea>
+          <div id="ala-as-json-status" class="ala-as-status"></div>
+          <div class="ala-as-json-actions" style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-as-btn-apply-json">Apply JSON</button>
+            <button type="button" class="ala-btn" id="ala-as-btn-copy-json">Copy to Clipboard</button>
+            <button type="button" class="ala-btn" id="ala-as-btn-reset-defaults" style="margin-left:auto">Reset Defaults</button>
           </div>
         </div>
       </div>
-      <footer class="ala-as-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-as-btn-done" type="button">Apply &amp; Save</button>
-        <button class="ala-btn ala-as-close" type="button">Cancel</button>
-      </footer>
-    </div>
-  `;
-
-  document.body.appendChild(backdrop);
-
-  const close = () => {
-    unlistenKey();
-    backdrop.remove();
-  };
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
-  };
-  const unlistenKey = ctx.listen(document, 'keydown', onKey as EventListener, true);
+    `,
+    footerHtml: `
+      <button class="ala-btn ala-btn--primary" id="ala-as-btn-done" type="button">Apply &amp; Save</button>
+      <button class="ala-btn ala-as-close" type="button">Cancel</button>
+    `
+  });
+  ctx.addStyle('anisongs-modal', () => buildAniSongsModalCss(`#${modal.backdrop.id}`));
+  const { backdrop, close } = modal;
 
   backdrop.querySelectorAll('.ala-as-close').forEach((btn) => btn.addEventListener('click', close));
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
-  });
 
   const tabs = backdrop.querySelectorAll<HTMLButtonElement>('.ala-as-tab');
   const viewPresets = backdrop.querySelector('#ala-as-view-presets') as HTMLElement;

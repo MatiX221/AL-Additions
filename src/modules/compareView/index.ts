@@ -1,6 +1,6 @@
 import { defineModule } from '../../core/registry';
 import { debounce } from '../../utils/helpers';
-import { COMPARE_CSS, COMPARE_CSS_ID } from './styles';
+import { COMPARE_CSS } from './styles';
 import { createCompareState, isComparePage, resetCompareFilters } from './data';
 import { cleanupCompareView, setupCompareView } from './dom';
 import { createCompareRpcBlocker, loadAllEntriesViaMediaList } from './loader';
@@ -28,29 +28,14 @@ defineModule({
     help: 'Log list comparison data loading, score diffs, sorting, and filtering passes.'
   },
   setup(ctx) {
-    ctx.addStyle(COMPARE_CSS_ID, COMPARE_CSS);
+    ctx.addStyle(COMPARE_CSS);
     ctx.ownUi('#ala-compare-sidebar');
 
     const state = createCompareState();
     ctx.hooks.blockRpc(createCompareRpcBlocker(state));
 
     const checkView = debounce(() => {
-      if (state.disposed || state.isMutatingDOM) return;
-      const path = location.pathname;
-      if (!isComparePage()) {
-        if (state.currentRoute) {
-          cleanupCompareView(state);
-          state.currentRoute = '';
-        }
-        return;
-      }
-
-      if (path !== state.currentRoute) {
-        state.currentRoute = path;
-        resetCompareFilters(state);
-        cleanupCompareView(state);
-      }
-
+      if (state.disposed || state.isMutatingDOM || !isComparePage()) return;
       if (state.isCompareLoaded) return;
 
       const compareRoot = document.querySelector<HTMLElement>('.compare:not(#ala-compare-table)');
@@ -67,26 +52,27 @@ defineModule({
       }
     }, 60);
 
-    ctx.onRoute(() => isComparePage(), (rc) => {
-      if (state.disposed) return;
-      if (rc.url.pathname !== state.currentRoute) {
-        state.currentRoute = rc.url.pathname;
+    ctx.onRoute(
+      () => isComparePage(),
+      (rc) => {
+        if (state.disposed) return;
+        state.currentRoute = rc.pathname;
         resetCompareFilters(state);
         cleanupCompareView(state);
+        rc.onCleanup(ctx.ready(checkView));
+        rc.onCleanup(
+          ctx.onBodyMutation(() => {
+            if (!rc.signal.aborted && !state.disposed && !state.isMutatingDOM) {
+              checkView();
+            }
+          })
+        );
+        return () => {
+          state.currentRoute = '';
+          cleanupCompareView(state);
+        };
       }
-      checkView();
-      return () => {
-        state.currentRoute = '';
-        cleanupCompareView(state);
-      };
-    });
-    ctx.ready(checkView);
-    ctx.onNav(checkView);
-    ctx.onBodyMutation(() => {
-      if (!state.disposed && isComparePage() && !state.isMutatingDOM) {
-        checkView();
-      }
-    });
+    );
     ctx.onCleanup(() => {
       state.disposed = true;
       state.currentRoute = '';

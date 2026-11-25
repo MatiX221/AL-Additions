@@ -2,16 +2,20 @@ import { GM_xmlhttpRequest } from 'vite-plugin-monkey/dist/client';
 import { Settings } from '../settings/settings';
 import {
   type AccountProvider,
+  type AddStyleFn,
   type AniListClient,
   type AniListSession,
   type ChannelLogger,
   type CleanupFn,
   type CoreHooksApi,
+  type CssSource,
   type FeatureContext,
   type FeatureLayer,
   type HttpDownloadOptions,
   type HttpRequestOptions,
   type MigrateContext,
+  type ModalHandle,
+  type ModalOptions,
   type ModuleDebugDef,
   type ModuleDef,
   type ModuleDisableReason,
@@ -19,6 +23,7 @@ import {
   type ModuleLayer,
   type ModuleMeta,
   type ModuleStatus,
+  type MountHandle,
   type MountSpec,
   type RouteContext,
   type ServiceMap,
@@ -41,8 +46,9 @@ import {
 } from './accounts';
 import { CoreHooks, EventBus, ServiceRegistry } from './bus';
 import { registerMenuCommand } from './menu';
+import { createModal } from './modal';
 import { Core } from './observer';
-import { addStyle, prefixAlaId } from './styles';
+import { addStyle } from './styles';
 import { showToast, toastError, toastSuccess } from './toast';
 
 const coreLog = createCoreLogger('core');
@@ -456,12 +462,51 @@ function createContextForRecord(
     }
   };
 
-  const addMount = (spec: MountSpec, pushCleanup: (fn: CleanupFn) => void, signal?: AbortSignal): CleanupFn => {
-    if (disposed || signal?.aborted) return noop;
-    let mountedEl: HTMLElement | null = null;
+  let idSeq = 0;
+  let styleSeq = 0;
+  let mountSeq = 0;
+  let modalSeq = 0;
+
+  const getId = (name?: string): string => {
+    const trimmed = name?.trim();
+    if (!trimmed) return `ala-${rec.id}-${++idSeq}`;
+    return trimmed.startsWith('ala-') ? trimmed : `ala-${rec.id}-${trimmed}`;
+  };
+
+  const makeAddStyle =
+    (push: (fn: CleanupFn) => void, signal: AbortSignal, autoPrefix: 'style' | 'route-style'): AddStyleFn =>
+    (idOrCss: CssSource, maybeCss?: CssSource): CleanupFn => {
+      if (disposed || signal.aborted) return noop;
+      const isOneArg = maybeCss === undefined;
+      const css = isOneArg ? idOrCss : maybeCss;
+      let styleId: string;
+      if (isOneArg) {
+        styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
+      } else {
+        const raw = String(idOrCss || '').trim();
+        if (!raw) {
+          styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
+        } else if (raw.startsWith('ala-')) {
+          styleId = raw;
+        } else {
+          styleId = `ala-${rec.id}-${raw}${raw.endsWith('-style') ? '' : '-style'}`;
+        }
+      }
+      const clean = addStyle(styleId, css);
+      push(clean);
+      return clean;
+    };
+
+  const addMount = (spec: MountSpec, pushCleanup: (fn: CleanupFn) => void, signal?: AbortSignal): MountHandle => {
+    const resolvedId = spec.id ? getId(spec.id) : `ala-${rec.id}-mount-${++mountSeq}`;
+    const selector = `#${resolvedId}`;
+    if (disposed || signal?.aborted) {
+      return { id: resolvedId, selector, el: () => null, unmount: noop };
+    }
+    let mountedEl: Element | null = null;
     let mountDisposed = false;
     let ownDisposer: CleanupFn | null = null;
-    const resolvedId = spec.id ? prefixAlaId(spec.id) : '';
+    let mountStyleDisposer: CleanupFn | null = null;
 
     const tryMount = () => {
       if (mountDisposed || disposed || signal?.aborted) return;
@@ -473,26 +518,27 @@ function createContextForRecord(
         return;
       }
       if (mountedEl?.isConnected) return;
-      if (resolvedId) {
-        const existing = document.getElementById(resolvedId);
-        if (existing?.isConnected) {
-          mountedEl = existing;
-          return;
-        }
+      const existing = document.getElementById(resolvedId);
+      if (existing?.isConnected) {
+        mountedEl = existing;
+        return;
       }
       const anchor = typeof spec.anchor === 'string' ? document.querySelector(spec.anchor) : spec.anchor();
       if (!anchor) return;
       const el = spec.create();
-      if (resolvedId) {
-        el.id = resolvedId;
-      } else if (el.id) {
-        el.id = prefixAlaId(el.id);
+      if (!el) return;
+      el.id = resolvedId;
+      if (spec.style !== undefined && !mountStyleDisposer) {
+        const styleCss = spec.style;
+        mountStyleDisposer = addStyle(
+          `${resolvedId}-style`,
+          typeof styleCss === 'function' ? () => styleCss(selector) : styleCss
+        );
       }
       anchor.insertAdjacentElement(spec.position ?? 'afterend', el);
       mountedEl = el;
       if (spec.ownUi && !ownDisposer) {
-        const sel = el.id ? `#${el.id}` : resolvedId ? `#${resolvedId}` : '';
-        if (sel) ownDisposer = Core.registerOwnUi(sel);
+        ownDisposer = Core.registerOwnUi(selector);
       }
     };
 
@@ -509,6 +555,8 @@ function createContextForRecord(
       unsubBody();
       ownDisposer?.();
       ownDisposer = null;
+      mountStyleDisposer?.();
+      mountStyleDisposer = null;
       mountedEl?.remove();
       mountedEl = null;
     };
@@ -518,14 +566,23 @@ function createContextForRecord(
     unsubBody = Core.onBodyMutation(tryMount);
     if (disposed || signal?.aborted) {
       disposeMount();
-      return noop;
+      return { id: resolvedId, selector, el: () => null, unmount: noop };
     }
     signal?.addEventListener('abort', disposeMount, { once: true });
     pushCleanup(disposeMount);
-    return disposeMount;
+    return {
+      id: resolvedId,
+      selector,
+      el: () => document.getElementById(resolvedId),
+      unmount: disposeMount
+    };
   };
 
-  const makeScopedHelpers = (push: (fn: CleanupFn) => void, signal: AbortSignal) => ({
+  const makeScopedHelpers = (
+    push: (fn: CleanupFn) => void,
+    signal: AbortSignal,
+    stylePrefix: 'style' | 'route-style'
+  ) => ({
     listen: (
       target: EventTarget,
       type: string,
@@ -552,14 +609,15 @@ function createContextForRecord(
       push(cleanup);
       return cleanup;
     },
-    mount: (spec: MountSpec): CleanupFn => addMount(spec, push, signal),
+    mount: (spec: MountSpec): MountHandle => addMount(spec, push, signal),
+    addStyle: makeAddStyle(push, signal, stylePrefix),
     waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs = 8000): Promise<T | null> => {
       if (disposed || signal.aborted) return Promise.resolve(null);
       return Core.waitForSelector<T>(selector, timeoutMs, signal);
     }
   });
 
-  const rootScoped = makeScopedHelpers(track, ac.signal);
+  const rootScoped = makeScopedHelpers(track, ac.signal, 'style');
 
   const onRoute = (
     matchOrHandler:
@@ -606,7 +664,7 @@ function createContextForRecord(
           routeAc = localAc;
           const localCleanups: CleanupFn[] = [];
           routeCleanups = localCleanups;
-          const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal);
+          const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal, 'route-style');
 
           const rc: RouteContext = {
             url,
@@ -885,10 +943,28 @@ function createContextForRecord(
   const eventOwner = Symbol(`events:${rec.id}`);
   let retainedTracked = false;
 
+  const openModuleModal = (opts: ModalOptions): ModalHandle => {
+    if (disposed) {
+      const deadEl = document.createElement('div');
+      return {
+        backdrop: deadEl,
+        sheet: deadEl,
+        body: deadEl,
+        footer: deadEl,
+        close: noop
+      };
+    }
+    const modalId = getId(opts.id ?? `modal-${++modalSeq}`);
+    const handle = createModal({ ...opts, id: modalId });
+    track(handle.close);
+    return handle;
+  };
+
   const ctx: FeatureContext<any, any> = {
     id: rec.id,
     title: rec.title,
     help: rec.help,
+    getId,
     get: (key) => Settings.get(key),
     set: (key, val) => Settings.set(key, val),
     storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
@@ -899,7 +975,8 @@ function createContextForRecord(
     onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
     onRoute,
     mount: rootScoped.mount,
-    addStyle: (id, css) => whenAlive(() => addStyle(id, css)),
+    addStyle: rootScoped.addStyle,
+    modal: openModuleModal,
     listen: rootScoped.listen,
     interval: rootScoped.interval,
     timeout: rootScoped.timeout,

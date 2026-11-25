@@ -115,9 +115,7 @@ defineModule({
   ],
   migrate: migrateLegacyTierLabels,
   setup(ctx) {
-    ctx.addStyle(
-      'ala-tier-labels-css',
-      `
+    ctx.addStyle(`
       .ala-tier-badge {
         display: inline-block;
         font-weight: 700;

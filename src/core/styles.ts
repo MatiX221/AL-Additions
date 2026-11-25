@@ -1,5 +1,5 @@
 import { Core } from './observer';
-import type { CleanupFn } from '../types';
+import type { CleanupFn, CssSource } from '../types';
 
 const styleRefCounts = new Map<string, number>();
 
@@ -9,7 +9,7 @@ export function prefixAlaId(id: string): string {
   return trimmed.startsWith('ala-') ? trimmed : `ala-${trimmed}`;
 }
 
-export function addStyle(id: string, css: string): CleanupFn {
+export function addStyle(id: string, css: CssSource): CleanupFn {
   const styleId = prefixAlaId(id) || 'ala-style';
   let disposed = false;
   let cancelReady: CleanupFn | null = null;
@@ -19,12 +19,16 @@ export function addStyle(id: string, css: string): CleanupFn {
     if (disposed) return;
     const parent = document.head || document.documentElement;
     if (!parent) return;
-    if (!document.getElementById(styleId)) {
-      const s = document.createElement('style');
-      s.id = styleId;
-      s.textContent = css;
-      parent.appendChild(s);
+    const text = typeof css === 'function' ? css() : css;
+    const existing = document.getElementById(styleId);
+    if (existing) {
+      if (existing.textContent !== text) existing.textContent = text;
+      return;
     }
+    const s = document.createElement('style');
+    s.id = styleId;
+    s.textContent = text;
+    parent.appendChild(s);
   };
 
   if (document.head) {

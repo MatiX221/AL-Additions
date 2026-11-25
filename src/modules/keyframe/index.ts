@@ -11,20 +11,10 @@ defineModule({
   title: 'Keyframe Staff List Links',
   help: 'Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List.',
   setup(ctx) {
-    const ID = 'ala-keyframe-link';
     const BASE = 'https://keyframe-staff-list.com';
     const LABEL = 'Keyframe Staff List';
     const SLOT = '.filters';
     const PATHS: Record<string, string> = { staff: 'person', studio: 'studio' };
-
-    ctx.addStyle(
-      'ala-keyframe-style',
-      `
-      #${ID}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
-      #${ID}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
-      #${ID}.ala-kf-plain:hover{background:rgb(var(--color-blue));color:#fff}
-      #${ID} .icon{flex:0 0 auto}`
-    );
 
     const copyScope = (from: Element, to: Element): void => {
       for (const at of Array.from(from.attributes)) {
@@ -60,13 +50,17 @@ defineModule({
       const kind = rc.match![1] as 'staff' | 'studio';
       const id = rc.match![2];
 
-      rc.mount({
-        id: ID,
+      const link = rc.mount({
+        id: 'link',
         anchor: SLOT,
         position: 'afterbegin',
+        style: (sel) => `
+          ${sel}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
+          ${sel}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
+          ${sel}.ala-kf-plain:hover{background:rgb(var(--color-blue));color:#fff}
+          ${sel} .icon{flex:0 0 auto}`,
         create: () => {
           const a = document.createElement('a');
-          a.id = ID;
           a.className = 'ala-kf-plain';
           a.href = `${BASE}/${PATHS[kind]}/${id}`;
           a.target = '_blank';
@@ -80,7 +74,7 @@ defineModule({
         }
       });
 
-      rc.onCleanup(ctx.onBodyMutation(() => skin(document.getElementById(ID))));
+      rc.onCleanup(ctx.onBodyMutation(() => skin(link.el())));
     });
   }
 });

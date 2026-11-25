@@ -1,5 +1,6 @@
 import { defineModule } from '../../core/registry';
-import { memo } from '../../utils/helpers';
+import { memo, sleep } from '../../utils/helpers';
+import type { CleanupFn } from '../../types';
 import {
   DEFAULT_ANISONGS_CONFIG,
   validateAniSongsConfig,
@@ -411,7 +412,25 @@ function createCollapsibleVideo(videoUrl: string): { wrap: HTMLDivElement; video
   return { wrap, video };
 }
 
-export function createSongCard(song: SongEntry, activePresets: SongProviderPreset[], groupType: 'OP' | 'ED'): HTMLDivElement {
+type TimeoutFn = (fn: () => void, ms: number) => CleanupFn;
+
+function scheduleFallback(fn: () => void, ms: number, timeout?: TimeoutFn): CleanupFn {
+  if (timeout) return timeout(fn, ms);
+  let cancelled = false;
+  void sleep(ms).then(() => {
+    if (!cancelled) fn();
+  });
+  return () => {
+    cancelled = true;
+  };
+}
+
+export function createSongCard(
+  song: SongEntry,
+  activePresets: SongProviderPreset[],
+  groupType: 'OP' | 'ED',
+  timeout?: TimeoutFn
+): HTMLDivElement {
   const el = document.createElement('div');
   el.className = 'daiya-anisong-entry';
 
@@ -469,10 +488,11 @@ export function createSongCard(song: SongEntry, activePresets: SongProviderPrese
     player.wrap.classList.remove('is-open');
 
     let done = false;
+    let cancelTimer: CleanupFn = () => {};
     const detach = () => {
       if (done) return false;
       done = true;
-      clearTimeout(timer);
+      cancelTimer();
       player.wrap.removeEventListener('transitionend', onEnd);
       cancelClosingMap.delete(player.wrap);
       if (closingByRow.get(player.row) === player) closingByRow.delete(player.row);
@@ -484,7 +504,7 @@ export function createSongCard(song: SongEntry, activePresets: SongProviderPrese
     const onEnd = (e: TransitionEvent) => {
       if (e.target === player.wrap && e.propertyName === 'grid-template-rows') finish();
     };
-    const timer = setTimeout(finish, COLLAPSE_FALLBACK_MS);
+    cancelTimer = scheduleFallback(finish, COLLAPSE_FALLBACK_MS, timeout);
     player.wrap.addEventListener('transitionend', onEnd);
     cancelClosingMap.set(player.wrap, detach);
   }
@@ -596,7 +616,8 @@ function followElementWhileCollapsing(
   startScrollY: number,
   startDocHeight: number,
   startAnchorDocTop: number,
-  listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void
+  listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void,
+  timeout?: TimeoutFn
 ): () => void {
   if (typeof window === 'undefined' || typeof window.scrollBy !== 'function') return () => {};
 
@@ -620,11 +641,12 @@ function followElementWhileCollapsing(
   let active = true;
   let unlistenWheel = () => {};
   let unlistenTouch = () => {};
+  let cancelTimer: CleanupFn = () => {};
   const stop = () => {
     if (!active) return;
     active = false;
     if (rafId) cancelAnimationFrame(rafId);
-    clearTimeout(timer);
+    cancelTimer();
     collapsible.removeEventListener('transitionend', onEnd);
     unlistenWheel();
     unlistenTouch();
@@ -641,10 +663,10 @@ function followElementWhileCollapsing(
     rafId = requestAnimationFrame(tick);
   };
 
-  const timer = setTimeout(() => {
+  cancelTimer = scheduleFallback(() => {
     stepScroll();
     stop();
-  }, COLLAPSE_FALLBACK_MS);
+  }, COLLAPSE_FALLBACK_MS, timeout);
 
   collapsible.addEventListener('transitionend', onEnd);
   if (listen) {
@@ -660,7 +682,8 @@ export function createSongGroup(
   songs: SongEntry[],
   activePresets: SongProviderPreset[],
   groupType: 'OP' | 'ED',
-  listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void
+  listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void,
+  timeout?: TimeoutFn
 ): HTMLDivElement {
   const g = document.createElement('div');
   g.className = 'daiya-anisongs-group';
@@ -686,7 +709,7 @@ export function createSongGroup(
   extraWrap.className = 'daiya-anisong-collapsible daiya-anisongs-extra';
   const extraInner = document.createElement('div');
   extraInner.className = 'daiya-anisong-collapsible-inner';
-  rest.forEach((s) => extraInner.appendChild(createSongCard(s, activePresets, groupType)));
+  rest.forEach((s) => extraInner.appendChild(createSongCard(s, activePresets, groupType, timeout)));
   extraWrap.appendChild(extraInner);
   g.appendChild(extraWrap);
 
@@ -713,7 +736,7 @@ export function createSongGroup(
     btn.textContent = expanded ? 'Show less' : showAllLabel;
     btn.setAttribute('aria-expanded', String(expanded));
     if (!expanded) {
-      stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen);
+      stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen, timeout);
     }
   });
 
@@ -795,14 +818,12 @@ defineModule({
   },
   setup(ctx) {
     const API = 'https://rs.animethemes.moe/graphql';
-    const ROOT = 'daiya-anisongs';
+    const ROOT = ctx.getId('root');
     const TTL = 7 * 86400e3;
     const EMPTY_TTL = 12 * 3600e3;
 
     ctx.ownUi(`#${ROOT}`);
-    ctx.addStyle(
-      'daiya-anisongs-style',
-      `
+    ctx.addStyle(`
       #${ROOT}{width:100%;margin-top:30px}
       #${ROOT} .daiya-anisongs-columns{display:flex;gap:30px;width:100%}
       #${ROOT} .daiya-anisongs-group{flex:1 1 0;min-width:0}
@@ -942,7 +963,12 @@ defineModule({
       return data;
     });
 
-    function mount(state: { id: string; themes: ThemesGroup }, overview: HTMLElement): void {
+    function mount(
+      state: { id: string; themes: ThemesGroup },
+      overview: HTMLElement,
+      listen: typeof ctx.listen = ctx.listen,
+      timeout: typeof ctx.timeout = ctx.timeout
+    ): void {
       document.getElementById(ROOT)?.remove();
       const config = getValidAniSongsConfig(ctx.get('aniSongsProviders'));
       const presetMap = new Map<string, SongProviderPreset>();
@@ -955,8 +981,8 @@ defineModule({
       const cols = document.createElement('div');
       cols.className = 'daiya-anisongs-columns';
       cols.append(
-        createSongGroup('Openings', state.themes.OP, activePresets, 'OP', ctx.listen),
-        createSongGroup('Endings', state.themes.ED, activePresets, 'ED', ctx.listen)
+        createSongGroup('Openings', state.themes.OP, activePresets, 'OP', listen, timeout),
+        createSongGroup('Endings', state.themes.ED, activePresets, 'ED', listen, timeout)
       );
       root.appendChild(cols);
       overview.appendChild(root);
@@ -976,12 +1002,12 @@ defineModule({
         mine.themes = themes;
         const overview = await rc.waitForSelector('.overview', 10000);
         if (rc.signal.aborted || !overview) return;
-        mount(mine as { id: string; themes: ThemesGroup }, overview);
+        mount(mine as { id: string; themes: ThemesGroup }, overview, rc.listen, rc.timeout);
         rc.onCleanup(
           ctx.onBodyMutation(() => {
             if (!rc.signal.aborted && !document.getElementById(ROOT)) {
               const ov = document.querySelector<HTMLElement>('.overview');
-              if (ov) mount(mine as { id: string; themes: ThemesGroup }, ov);
+              if (ov) mount(mine as { id: string; themes: ThemesGroup }, ov, rc.listen, rc.timeout);
             }
           })
         );

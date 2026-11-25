@@ -189,7 +189,7 @@ options: [
 
 ### JSON options
 
-A `json` option shows a **Customize** button that calls `editor(ctx)`. The editor receives a `JsonEditorContext` with `value` (the staged value), `onApply(next)`, `addStyle`, `listen`, an optional `api` (the AniList client), and an optional `log`. Use `listen` instead of `document.addEventListener`, which modules cannot call. Styles and listeners created through it are removed when the Settings panel closes. Edits are staged in the panel and only saved when the user presses Save. `validate(value)` may return a boolean or an object such as `{ valid: true, config }`. When it returns an object, the value used is the first of `value`, `tiers`, `config`, or `overrides` that is present, otherwise the original input. A throwing validator is treated as invalid.
+A `json` option shows a **Customize** button that calls `editor(ctx)`. The editor receives a `JsonEditorContext` with `value` (the staged value), `onApply(next)`, `getId(name?)`, `addStyle` (1-arg or 2-arg `CssSource`), `listen`, `timeout`, `modal(opts)`, an optional `api` (the AniList client), and an optional `log`. Use `listen`, `timeout`, and `modal` instead of raw `document.addEventListener`, `setTimeout`, or custom backdrop DOM — cleanups run automatically when the Settings panel closes. Edits are staged in the panel and only saved when the user presses Save. `validate(value)` may return a boolean or an object such as `{ valid: true, config }`. When it returns an object, the value used is the first of `value`, `tiers`, `config`, or `overrides` that is present, otherwise the original input. A throwing validator is treated as invalid.
 
 For a complete editor, see [Staged JSON Modal Editors](./recipes.md#staged-json-modal-editors).
 

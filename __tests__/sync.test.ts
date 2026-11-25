@@ -437,7 +437,7 @@ describe('Sync Module: Scoped Storage, Schema < 3 Migration, Reset & Lock Unwind
       await bootModuleForTest('sync');
       mountPanel();
 
-      const panelEl = document.getElementById('almal-panel');
+      const panelEl = document.getElementById('ala-sync-panel');
       expect(panelEl).not.toBeNull();
       const disconnectedHtml = panelEl!.innerHTML;
       expect(disconnectedHtml).not.toContain('almal-meta-row');

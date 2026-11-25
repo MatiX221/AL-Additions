@@ -77,6 +77,8 @@ Top-level code should only declare constants, pure helper functions, and the `de
 | `gm` or `downloadFile` from `utils/helpers` | `src/modules/**` | [ctx.http](./context-api.md#networking) |
 | `localStorage` or `sessionStorage` | `src/modules/**` | [ctx.storage](./context-api.md#storage), or `m.legacy.getLocal` and `delLocal` in migrations |
 | `window.addEventListener` or `document.addEventListener` | `src/modules/**` | [ctx.listen or rc.listen](./context-api.md#timers-and-listeners) |
+| Raw `setTimeout` or `setInterval` (outside allowlisted files) | `src/modules/**` | `ctx.timeout` / `ctx.interval` / `rc.timeout` / `rc.interval`, see [Timers and Listeners](./context-api.md#timers-and-listeners) |
+| Hardcoded `'ala-'`, `'daiya-'`, or `'almal-'` string literals in `addStyle` or `mount({ id })` | `src/modules/**` | [ctx.getId](./context-api.md#element-ids) and 1-arg or namespaced [ctx.addStyle](./context-api.md#styles) |
 | `ctx.debug`, `logDebug`, `isDebug`, `registerDebugChannel`, `createCoreLogger`, `createLogger`, `isDebugEnabled`, `getDebuggableChannels` | `src/modules/**` | [ctx.log](./context-api.md#logging) |
 | Raw `console.log`, `debug`, `warn`, `error` | `core/`, `settings/`, `api/`, `modules/` | `ctx.log` in modules, [createCoreLogger](./platform-apis.md#core-logging) elsewhere |
 | A `migrate` hook or helper without a valid `@migration(...)` tag | `src/**` | Add `// @migration(from: "...", kind: "...", sunset: "...")` (`kind` is `storage`, `import`, or `cleanup`), see [Migrations](./define-module.md#migrations) |

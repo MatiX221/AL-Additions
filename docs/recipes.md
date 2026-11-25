@@ -59,8 +59,11 @@ The editor receives a `JsonEditorContext`. It has no `ctx`, so everything comes 
 | :--- | :--- |
 | `value` | The staged value to start from. Clone it. |
 | `onApply(next)` | Hand the edited value back to the Settings panel. |
-| `addStyle(id, css)` | Inject CSS. Returns a cleanup. |
+| `getId(name?)` | Allocate a namespaced element id. |
+| `addStyle(css)` / `addStyle(id, css)` | Inject CSS (`CssSource`: string or lazy function). Returns a cleanup. |
 | `listen(target, type, fn, options?)` | Add a listener on `document` or `window`. Returns a cleanup. |
+| `timeout(fn, ms)` | Tracked `setTimeout` cleared on panel close. Returns a cleanup. |
+| `modal(opts)` | Open a managed modal dialog (`{ backdrop, sheet, body, footer, close }`), auto-closed on panel close. |
 | `api` | The AniList client, if the editor needs to look things up. May be missing. |
 | `log` | An optional logger with `warn` and `error`. |
 

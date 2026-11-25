@@ -11,128 +11,97 @@ import {
   validateOverrides
 } from '../../api/malOverrides';
 import { SyncMediaType } from './types';
-import type { AniListClient, JsonEditorContext, ManualOverride, ManualOverrideStore } from '../../types';
+import type {
+  AniListClient,
+  CleanupFn,
+  FeatureContext,
+  JsonEditorContext,
+  ManualOverride,
+  ManualOverrideStore
+} from '../../types';
 
-const MODAL_ID = 'ala-overrides-backdrop';
-const QUICK_MODAL_ID = 'ala-quick-override-backdrop';
+const buildOverridesCss = (sel: string, fullHeight: boolean): string => `
+  ${fullHeight ? `${sel} .ala-core-sheet{height:100%}` : ''}
+  ${sel} .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
+  ${sel} .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+  ${sel} .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
+  ${sel} .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
 
-const OVERRIDES_CSS = `
-  #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  .ala-ov-sheet *{box-sizing:border-box}
-  .ala-ov-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  .ala-ov-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-ov-head h2{margin:0;font-size:18px;font-weight:600}
-  .ala-ov-body {flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable;}
-  .ala-ov-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+  ${sel} .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
+  ${sel} .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
+  ${sel} .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
+  ${sel} .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
 
-  .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
-  .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-  .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
-  .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
+  ${sel} .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
+  ${sel} .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
 
-  .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
-  .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
-  .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
-  .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
-  .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
+  ${sel} .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
+  ${sel} .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
 
-  .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
-  .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
+  ${sel} .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
+  ${sel} .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  ${sel} .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  ${sel} .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
+  ${sel} .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
 
-  .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
-  .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
-  .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
+  ${sel} .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 
-  .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
-  .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
-  .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
-  .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
-  .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+  ${sel} .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
+  ${sel} .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  ${sel} .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
+  ${sel} .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
 
-  .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  ${sel} .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
+  ${sel} .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
 
-  .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
-  .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
-  .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-  .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
-  .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
+  ${sel} .ala-ov-list{display:grid;gap:8px;min-width:0;}
+  ${sel} .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
+  ${sel} .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
+  ${sel} .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
+  ${sel} .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  ${sel} .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
+  ${sel} .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
+  ${sel} .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
+  ${sel} .ala-ov-item-meta a:hover{text-decoration:underline}
+  ${sel} .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
 
-  .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
-  .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
+  ${sel} .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
 
-  .ala-ov-list{display:grid;gap:8px;min-width:0;}
-  .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
-  .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
-  .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
-  .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
-  .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
-  .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
-  .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
-  .ala-ov-item-meta a:hover{text-decoration:underline}
-  .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
-
-  .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
-
-  .ala-ov-audit-section{margin-bottom:20px}
-  .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
+  ${sel} .ala-ov-audit-section{margin-bottom:20px}
+  ${sel} .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
 
   @media (max-width:700px){
-    #${MODAL_ID}{align-items:flex-end;padding:0}
-    #${MODAL_ID} .ala-ov-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #${QUICK_MODAL_ID}{align-items:flex-end;padding:0}
-    #${QUICK_MODAL_ID} .ala-ov-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel}{align-items:flex-end;padding:0}
+    ${sel} .ala-core-sheet{width:100%;${fullHeight ? 'height:92vh;height:92dvh;' : ''}max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel} .ala-core-head{padding:14px 16px}
+    ${sel} .ala-core-body{padding:12px 16px}
+    ${sel} .ala-core-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
+    ${sel} .ala-core-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
 
-    .ala-ov-head{padding:14px 16px}
-    .ala-ov-body{padding:12px 16px}
-    .ala-ov-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
-    .ala-ov-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
+    ${sel} .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
+    ${sel} .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
 
-    .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
-    .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
+    ${sel} .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
+    ${sel} .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
+    ${sel} .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
+    ${sel} .ala-ov-filter-group{width:100%;flex-wrap:wrap}
 
-    .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
-    .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
-    .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
-    .ala-ov-filter-group{width:100%;flex-wrap:wrap}
-
-    .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
-    .ala-ov-item-cover{width:36px;height:48px}
-    .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
-    .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
-    .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
-    .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
+    ${sel} .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
+    ${sel} .ala-ov-item-cover{width:36px;height:48px}
+    ${sel} .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
+    ${sel} .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
+    ${sel} .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
+    ${sel} .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
   }
   `;
-
-let modalAddStyle: ((id: string, css: string) => void) | null = null;
-
-export function configureOverridesModalStyle(addStyleFn: ((id: string, css: string) => void) | null): () => void {
-  modalAddStyle = addStyleFn;
-  return () => {
-    if (modalAddStyle === addStyleFn) modalAddStyle = null;
-  };
-}
-
-function ensureOverridesStyle(addStyleFn?: (id: string, css: string) => void): void {
-  const inject = addStyleFn || modalAddStyle;
-  if (inject) {
-    inject('ala-overrides-style', OVERRIDES_CSS);
-    return;
-  }
-  if (typeof document !== 'undefined' && !document.getElementById('ala-overrides-style')) {
-    const s = document.createElement('style');
-    s.id = 'ala-overrides-style';
-    s.textContent = OVERRIDES_CSS;
-    (document.head || document.documentElement).appendChild(s);
-  }
-}
 
 function extractAlId(raw: string): number {
   const str = String(raw || '').trim();
@@ -216,55 +185,38 @@ async function batchFetchUnmatchedMeta(
 export async function openQuickOverrideModal(
   mediaId: number,
   mediaType: SyncMediaType = 'ANIME',
-  addStyleFn?: (id: string, css: string) => void,
-  onUpdated?: () => void,
-  api: AniListClient | null = syncApi
+  ctx: FeatureContext,
+  onUpdated?: () => void
 ): Promise<void> {
-  ensureOverridesStyle(addStyleFn);
-  const existing = document.getElementById(QUICK_MODAL_ID);
-  if (existing) existing.remove();
-
-  const backdrop = document.createElement('div');
-  backdrop.id = QUICK_MODAL_ID;
-
+  const api = ctx.api ?? syncApi;
   const currentOverrides = getManualOverrides();
   const existingOverride = currentOverrides[String(mediaId)];
 
-  backdrop.innerHTML = `
-    <div class="ala-ov-sheet ala-ov-quick-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-qo-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-qo-modal-title">Set MAL Mapping</h2>
-        <button class="ala-icon-btn ala-qo-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div id="ala-qo-preview" class="ala-ov-preview">
-          <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
-        </div>
-
-        <div class="ala-ov-field">
-          <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
-          <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-        </div>
-
-        <div class="ala-ov-form-actions">
-          <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
-          <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
-          ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ''}
-        </div>
+  const modal = ctx.modal({
+    id: 'quick-override',
+    title: 'Set MAL Mapping',
+    maxWidth: '480px',
+    bodyHtml: `
+      <div id="ala-qo-preview" class="ala-ov-preview">
+        <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
       </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-qo-close" type="button">Cancel</button>
-      </footer>
-    </div>
-  `;
 
-  document.body.appendChild(backdrop);
+      <div class="ala-ov-field">
+        <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
+        <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
+      </div>
 
-  const close = () => backdrop.remove();
-  backdrop.querySelectorAll('.ala-qo-close').forEach((btn) => btn.addEventListener('click', close));
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
+      <div class="ala-ov-form-actions">
+        <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
+        <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
+        ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ''}
+      </div>
+    `,
+    footerHtml: `<button class="ala-btn ala-qo-close" type="button">Cancel</button>`
   });
+  ctx.addStyle('quick-override', () => buildOverridesCss(`#${modal.backdrop.id}`, false));
+  const { backdrop, close } = modal;
+  backdrop.querySelectorAll('.ala-qo-close').forEach((btn) => btn.addEventListener('click', close));
 
   const previewBox = backdrop.querySelector('#ala-qo-preview') as HTMLElement;
   const malInput = backdrop.querySelector('#ala-qo-mal-input') as HTMLInputElement;
@@ -363,15 +315,17 @@ export async function openQuickOverrideModal(
 
 export function openOverridesModal(ec: JsonEditorContext): void {
   const api = ec.api ?? syncApi;
-  ensureOverridesStyle(ec.addStyle);
-  const existing = document.getElementById(MODAL_ID);
-  if (existing) existing.remove();
-
   const staging = typeof ec?.onApply === 'function';
   const initCheck = staging ? validateOverrides(ec!.value) : null;
   let draftOverrides: ManualOverrideStore = staging
     ? JSON.parse(JSON.stringify(initCheck?.valid && initCheck.overrides ? initCheck.overrides : {}))
     : {};
+
+  let cancelLookup: CleanupFn | null = null;
+  let cancelSearch: CleanupFn | null = null;
+  let cancelUnmatchedSearch: CleanupFn | null = null;
+  let cancelOrphansSearch: CleanupFn | null = null;
+  let cancelCopyTimer: CleanupFn | null = null;
 
   const readOverrides = (): ManualOverrideStore => (staging ? draftOverrides : getManualOverrides());
   const writeOverrides = (next: ManualOverrideStore): void => {
@@ -418,152 +372,137 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     return { success: true, count: Object.keys(check.overrides).length };
   };
 
-  if (!staging) {
-    refreshStaleOverrides().then(() => {
-      if (document.getElementById(MODAL_ID)) renderList();
-    });
-  }
+  const modal = ec.modal({
+    id: 'overrides',
+    title: 'Manual Mappings & Sync Audit',
+    maxWidth: '680px',
+    bodyHtml: `
+      <div class="ala-ov-tabs">
+        <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
+        <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
+        <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
+      </div>
 
-  const backdrop = document.createElement('div');
-  backdrop.id = MODAL_ID;
-  backdrop.innerHTML = `
-    <div class="ala-ov-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-ov-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-ov-modal-title">Manual Mappings & Sync Audit</h2>
-        <button class="ala-icon-btn ala-ov-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div class="ala-ov-tabs">
-          <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
-          <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
-          <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
-        </div>
-
-        <div id="ala-ov-view-overrides">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
-            <div class="ala-ov-field">
-              <label for="ala-ov-al-input">AniList Media ID or URL</label>
-              <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
-            </div>
-
-            <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
-
-            <div class="ala-ov-field">
-              <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
-              <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-            </div>
-
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
-            </div>
+      <div id="ala-ov-view-overrides">
+        <div class="ala-ov-form-box">
+          <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
+          <div class="ala-ov-field">
+            <label for="ala-ov-al-input">AniList Media ID or URL</label>
+            <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
           </div>
 
-          <div class="ala-ov-controls">
-            <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
-            <div class="ala-ov-filter-groups">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Status:</span>
-                <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
-                <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
-              </div>
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
-              </div>
-            </div>
+          <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
+
+          <div class="ala-ov-field">
+            <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
+            <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
           </div>
 
-          <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
-          <div id="ala-ov-list" class="ala-ov-list"></div>
-        </div>
-
-        <div id="ala-ov-view-audit" style="display:none">
-          <div class="ala-ov-audit-section">
-            <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
-            <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
-              <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
-          </div>
-
-          <div class="ala-ov-audit-section" style="margin-top:24px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
-              <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
-            </div>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
-            <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
-              <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
+          <div class="ala-ov-form-actions">
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
           </div>
         </div>
 
-        <div id="ala-ov-view-json" style="display:none">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
-              View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
-            </p>
-            <div class="ala-ov-field">
-              <label for="ala-ov-json-textarea">Configuration JSON</label>
-              <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
+        <div class="ala-ov-controls">
+          <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
+          <div class="ala-ov-filter-groups">
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Status:</span>
+              <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
+              <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
+              <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
             </div>
-            <div id="ala-ov-json-status" class="ala-ov-status"></div>
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Type:</span>
+              <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
+              <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
+              <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
             </div>
+          </div>
+        </div>
+
+        <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
+        <div id="ala-ov-list" class="ala-ov-list"></div>
+      </div>
+
+      <div id="ala-ov-view-audit" style="display:none">
+        <div class="ala-ov-audit-section">
+          <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
+          <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
+          <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
+            <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Type:</span>
+              <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
+              <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
+              <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
+            </div>
+          </div>
+          <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
+        </div>
+
+        <div class="ala-ov-audit-section" style="margin-top:24px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
+            <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
+          </div>
+          <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
+          <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
+            <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Type:</span>
+              <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
+              <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
+              <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
+            </div>
+          </div>
+          <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
+        </div>
+      </div>
+
+      <div id="ala-ov-view-json" style="display:none">
+        <div class="ala-ov-form-box">
+          <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
+          <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
+            View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
+          </p>
+          <div class="ala-ov-field">
+            <label for="ala-ov-json-textarea">Configuration JSON</label>
+            <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
+          </div>
+          <div id="ala-ov-json-status" class="ala-ov-status"></div>
+          <div class="ala-ov-form-actions">
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
           </div>
         </div>
       </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>
-      </footer>
-    </div>
-  `;
-
-  document.body.appendChild(backdrop);
-
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      close();
+    `,
+    footerHtml: `<button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>`,
+    onClose: () => {
+      cancelLookup?.();
+      cancelSearch?.();
+      cancelUnmatchedSearch?.();
+      cancelOrphansSearch?.();
+      cancelCopyTimer?.();
     }
-  };
-  const close = () => {
-    unlistenKey();
-    backdrop.remove();
-  };
-  const unlistenKey = ec.listen(document, 'keydown', onKey as EventListener, true);
-  backdrop.querySelectorAll('.ala-ov-close').forEach((btn) => btn.addEventListener('click', close));
+  });
+  ec.addStyle('overrides', () => buildOverridesCss(`#${modal.backdrop.id}`, true));
+  const { backdrop, close } = modal;
+
+  if (!staging) {
+    refreshStaleOverrides().then(() => {
+      if (backdrop.isConnected) renderList();
+    });
+  }
+
   backdrop.querySelector('#ala-ov-btn-done')?.addEventListener('click', () => {
     if (staging) ec!.onApply!(draftOverrides);
     close();
-  });
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
   });
 
   const tabs = backdrop.querySelectorAll<HTMLButtonElement>('.ala-ov-tab');
@@ -628,7 +567,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     }
   };
 
-  let lookupTimer: ReturnType<typeof setTimeout> | 0 = 0;
+
   const doLookup = async (id: number) => {
     if (!id) {
       activePreview = null;
@@ -698,8 +637,9 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   };
 
   alInput.addEventListener('input', () => {
-    clearTimeout(lookupTimer);
-    lookupTimer = setTimeout(() => {
+    cancelLookup?.();
+    cancelLookup = ec.timeout(() => {
+      cancelLookup = null;
       const id = extractAlId(alInput.value);
       doLookup(id);
     }, 300);
@@ -710,7 +650,8 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   const clearBtn = backdrop.querySelector('#ala-ov-btn-clear') as HTMLButtonElement;
 
   const clearForm = () => {
-    clearTimeout(lookupTimer);
+    cancelLookup?.();
+    cancelLookup = null;
     alInput.value = '';
     malInput.value = '';
     activePreview = null;
@@ -763,7 +704,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
                 updatedAt: Date.now()
               };
               writeOverrides(current);
-              if (document.getElementById(MODAL_ID)) renderList();
+              if (backdrop.isConnected) renderList();
             }
           }
         })
@@ -810,7 +751,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
                 updatedAt: Date.now()
               };
               writeOverrides(current);
-              if (document.getElementById(MODAL_ID)) renderList();
+              if (backdrop.isConnected) renderList();
             }
           }
         })
@@ -834,10 +775,10 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     });
   });
 
-  let searchTimer: ReturnType<typeof setTimeout> | 0 = 0;
   searchInput?.addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
+    cancelSearch?.();
+    cancelSearch = ec.timeout(() => {
+      cancelSearch = null;
       searchQuery = searchInput.value.trim();
       renderList();
     }, 150);
@@ -936,10 +877,10 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     });
   });
 
-  let unmatchedSearchTimer: ReturnType<typeof setTimeout> | 0 = 0;
   unmatchedSearchInput?.addEventListener('input', () => {
-    clearTimeout(unmatchedSearchTimer);
-    unmatchedSearchTimer = setTimeout(() => {
+    cancelUnmatchedSearch?.();
+    cancelUnmatchedSearch = ec.timeout(() => {
+      cancelUnmatchedSearch = null;
       unmatchedSearchQuery = unmatchedSearchInput.value.trim();
       renderUnmatchedList();
     }, 150);
@@ -1063,10 +1004,10 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     });
   });
 
-  let orphansSearchTimer: ReturnType<typeof setTimeout> | 0 = 0;
   orphansSearchInput?.addEventListener('input', () => {
-    clearTimeout(orphansSearchTimer);
-    orphansSearchTimer = setTimeout(() => {
+    cancelOrphansSearch?.();
+    cancelOrphansSearch = ec.timeout(() => {
+      cancelOrphansSearch = null;
       orphansSearchQuery = orphansSearchInput.value.trim();
       renderOrphansList();
     }, 150);
@@ -1232,7 +1173,9 @@ export function openOverridesModal(ec: JsonEditorContext): void {
       await navigator.clipboard.writeText(jsonTextarea.value);
       const prev = jsonCopyBtn.textContent;
       jsonCopyBtn.textContent = 'Copied!';
-      setTimeout(() => {
+      cancelCopyTimer?.();
+      cancelCopyTimer = ec.timeout(() => {
+        cancelCopyTimer = null;
         jsonCopyBtn.textContent = prev;
       }, 1500);
     } catch (_) {
@@ -1240,7 +1183,9 @@ export function openOverridesModal(ec: JsonEditorContext): void {
       document.execCommand('copy');
       const prev = jsonCopyBtn.textContent;
       jsonCopyBtn.textContent = 'Copied!';
-      setTimeout(() => {
+      cancelCopyTimer?.();
+      cancelCopyTimer = ec.timeout(() => {
+        cancelCopyTimer = null;
         jsonCopyBtn.textContent = prev;
       }, 1500);
     }

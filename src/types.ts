@@ -22,6 +22,32 @@ export interface ManualOverride {
 export type ManualOverrideStore = Record<string, ManualOverride>;
 
 export type CleanupFn = () => void;
+export type CssSource = string | (() => string);
+export type MountStyleSource = string | ((selector: string) => string);
+
+export interface MountHandle {
+  readonly id: string;
+  readonly selector: string;
+  el: () => HTMLElement | null;
+  readonly unmount: CleanupFn;
+}
+
+export interface ModalOptions {
+  id?: string;
+  title: string;
+  maxWidth?: string;
+  bodyHtml?: string;
+  footerHtml?: string;
+  onClose?: () => void;
+}
+
+export interface ModalHandle {
+  backdrop: HTMLDivElement;
+  sheet: HTMLElement;
+  body: HTMLElement;
+  footer: HTMLElement;
+  close: () => void;
+}
 
 export type SettingType = 'toggle' | 'number' | 'select' | 'list' | 'json';
 
@@ -53,16 +79,24 @@ export interface ChannelLogger<TCanDebug extends boolean = false> extends Logger
 
 export type AnyLogger = Logger<true> | Logger<false>;
 
+export interface AddStyleFn {
+  (css: CssSource): CleanupFn;
+  (id: string, css: CssSource): CleanupFn;
+}
+
 export interface JsonEditorContext {
   value: any;
   onApply: (nextValue: any) => void;
-  addStyle: (id: string, css: string) => CleanupFn;
+  getId: (name?: string) => string;
+  addStyle: AddStyleFn;
   listen: (
     target: EventTarget,
     type: string,
     listener: EventListenerOrEventListenerObject,
     options?: boolean | AddEventListenerOptions
   ) => CleanupFn;
+  timeout: (fn: () => void, ms: number) => CleanupFn;
+  modal: (opts: ModalOptions) => ModalHandle;
   api?: AniListClient;
   log?: AnyLogger;
 }
@@ -399,9 +433,10 @@ export interface MountSpec {
   id?: string;
   anchor: string | (() => Element | null);
   position?: InsertPosition;
-  create: () => HTMLElement;
+  create: () => Element | null;
   match?: () => boolean;
   ownUi?: boolean;
+  style?: MountStyleSource;
 }
 
 export interface RouteContext {
@@ -418,7 +453,8 @@ export interface RouteContext {
   ) => CleanupFn;
   interval: (fn: () => void, ms: number) => CleanupFn;
   timeout: (fn: () => void, ms: number) => CleanupFn;
-  mount: (spec: MountSpec) => CleanupFn;
+  mount: (spec: MountSpec) => MountHandle;
+  addStyle: AddStyleFn;
   waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs?: number) => Promise<T | null>;
 }
 
@@ -465,6 +501,7 @@ export interface FeatureContext<
   readonly id: string;
   readonly title: string;
   readonly help: string;
+  getId: (name?: string) => string;
   get: <T = any>(key: string) => T;
   set: (key: string, val: any) => void;
   storage: StorageScope;
@@ -479,8 +516,9 @@ export interface FeatureContext<
       handler: (rc: RouteContext) => void | Promise<void> | CleanupFn
     ): CleanupFn;
   };
-  mount: (spec: MountSpec) => CleanupFn;
-  addStyle: (id: string, css: string) => CleanupFn;
+  mount: (spec: MountSpec) => MountHandle;
+  addStyle: AddStyleFn;
+  modal: (opts: ModalOptions) => ModalHandle;
   listen: (
     target: EventTarget,
     type: string,

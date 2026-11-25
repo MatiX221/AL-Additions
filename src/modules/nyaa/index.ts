@@ -2,11 +2,7 @@ import { defineModule } from '../../core/registry';
 import { icon } from '../../utils/dom';
 import { openTab } from '../../utils/helpers';
 import { getEffectiveMalId, isIgnored } from '../../api/malOverrides';
-import type { MediaRoute } from '../../types';
-
-const ID = 'ala-find-on-nyaa';
-const EDIT_ID = 'ala-edit-mal-id';
-const STYLE_ID = 'ala-nyaa-style';
+import type { CleanupFn, MediaRoute, MountHandle } from '../../types';
 
 defineModule({
   id: 'nyaa',
@@ -29,10 +25,9 @@ defineModule({
   ],
   setup(ctx) {
     const ICON = icon('external', 17);
-    ctx.addStyle(
-      STYLE_ID,
-      `#${ID},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}#${ID}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}#${ID}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`
-    );
+    const LINK_ID = ctx.getId('find-on-nyaa');
+    const EDIT_ID = ctx.getId('edit-mal-id');
+    const H1_SEL = '.page-content .header .content > h1';
 
     const nyaaUrl = (title: string): string => {
       const q = title.trim().replace(/[^a-zA-Z0-9]+/g, '+').replace(/^\++|\++$/g, '');
@@ -41,190 +36,206 @@ defineModule({
       return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
     };
 
-    let activeTimerCleanup: (() => void) | null = null;
-    let attachedAnchor: { h1: HTMLElement; route: MediaRoute } | null = null;
+    let activeLink: MountHandle | null = null;
+    let activeEdit: MountHandle | null = null;
+    let activeRoute: MediaRoute | null = null;
     let quickEditFn = ctx.services.get('manualOverrides:quickEdit') ?? null;
 
-    const mountEditButton = (h1: HTMLElement, route: MediaRoute): void => {
-      document.getElementById(EDIT_ID)?.remove();
-      if (!quickEditFn || !h1.isConnected) return;
-
-      const editBtn = document.createElement('a');
-      editBtn.id = EDIT_ID;
-      editBtn.href = '#';
-      editBtn.title = 'Set or edit MyAnimeList mapping';
-      editBtn.setAttribute('aria-label', 'Set or edit MyAnimeList mapping');
-      editBtn.innerHTML = icon('edit', 16);
-      editBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        quickEditFn?.(route.id, route.type);
+    const ensureEditMount = () => {
+      if (!activeRoute || !quickEditFn) return;
+      const el = activeEdit?.el();
+      if (el?.isConnected) return;
+      const h1 = activeLink?.el()?.parentElement || document.querySelector<HTMLElement>(H1_SEL);
+      if (!h1 || !h1.isConnected) return;
+      if (activeEdit) activeEdit.unmount();
+      const route = activeRoute;
+      activeEdit = ctx.mount({
+        id: EDIT_ID,
+        anchor: () => activeLink?.el()?.parentElement || document.querySelector<HTMLElement>(H1_SEL),
+        position: 'beforeend',
+        match: () => !!quickEditFn && activeRoute === route,
+        create: () => {
+          const editBtn = document.createElement('a');
+          editBtn.href = '#';
+          editBtn.title = 'Set or edit MyAnimeList mapping';
+          editBtn.setAttribute('aria-label', 'Set or edit MyAnimeList mapping');
+          editBtn.innerHTML = icon('edit', 16);
+          editBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            quickEditFn?.(route.id, route.type);
+          });
+          return editBtn;
+        }
       });
-      h1.appendChild(editBtn);
     };
 
     ctx.services.onAvailable('manualOverrides:quickEdit', (impl) => {
       quickEditFn = impl;
-      if (attachedAnchor) {
-        mountEditButton(attachedAnchor.h1, attachedAnchor.route);
-      }
+      ensureEditMount();
       return () => {
-        if (quickEditFn === impl) {
-          quickEditFn = null;
-        }
-        document.getElementById(EDIT_ID)?.remove();
+        if (quickEditFn === impl) quickEditFn = null;
+        activeEdit?.unmount();
+        activeEdit = null;
       };
     });
 
     ctx.events.on('manualOverrides:changed', (changedId) => {
-      const linkEl = document.getElementById(ID);
-      if (!linkEl || !attachedAnchor) return;
-      if (changedId && Number(changedId) !== attachedAnchor.route.id) return;
-      linkEl.title = isIgnored(attachedAnchor.route.id)
+      const linkEl = activeLink?.el();
+      if (!linkEl || !activeRoute) return;
+      if (changedId && Number(changedId) !== activeRoute.id) return;
+      linkEl.title = isIgnored(activeRoute.id)
         ? 'Marked as AniList-Only (searches Nyaa)'
         : 'Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)';
     });
 
-    function attach(h1: HTMLElement, route: MediaRoute): void {
-      activeTimerCleanup?.();
-      const a = document.createElement('a');
-      a.id = ID;
-      a.href = '#';
-      a.title = isIgnored(route.id)
-        ? 'Marked as AniList-Only (searches Nyaa)'
-        : 'Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)';
-      a.setAttribute('aria-label', 'Open on MAL; long-press to search Nyaa');
-      a.innerHTML = ICON;
-
-      const titleText = (): string =>
-        [...h1.childNodes]
-          .filter((n) => n !== a && (n as HTMLElement)?.id !== EDIT_ID)
-          .map((n) => n.textContent)
-          .join('')
-          .trim();
-      const searchNyaa = (): void => openTab(nyaaUrl(titleText()));
-      void ctx.api.media.get(route.id, route.type);
-
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      let longResetTimer: ReturnType<typeof setTimeout> | null = null;
-      let longPressed = false;
-      let sx = 0;
-      let sy = 0;
-      const cancel = (): void => {
-        if (timer) clearTimeout(timer);
-        timer = null;
-      };
-      activeTimerCleanup = () => {
-        cancel();
-        if (longResetTimer) clearTimeout(longResetTimer);
-        longResetTimer = null;
-      };
-
-      a.addEventListener(
-        'touchstart',
-        (e) => {
-          if (e.touches.length !== 1) return;
-          sx = e.touches[0].clientX;
-          sy = e.touches[0].clientY;
-          longPressed = false;
-          cancel();
-          timer = setTimeout(() => {
-            timer = null;
-            longPressed = true;
-            searchNyaa();
-            longResetTimer = setTimeout(() => {
-              longPressed = false;
-              longResetTimer = null;
-            }, 800);
-          }, 550);
-        },
-        { passive: true }
-      );
-
-      a.addEventListener(
-        'touchmove',
-        (e) => {
-          if (timer === null || !e.touches.length) return;
-          if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
-        },
-        { passive: true }
-      );
-
-      a.addEventListener('touchend', cancel, { passive: true });
-      a.addEventListener('touchcancel', cancel, { passive: true });
-      a.addEventListener('contextmenu', (e) => {
-        if (longPressed) e.preventDefault();
-      });
-
-      a.addEventListener('click', async (e) => {
-        e.preventDefault();
-        if (longPressed) {
-          longPressed = false;
-          e.stopPropagation();
-          return;
-        }
-        const w = window.open('about:blank', '_blank');
-        const title = titleText();
-        const nyaa = nyaaUrl(title);
-        let target = nyaa;
-        if (!e.ctrlKey && !e.metaKey) {
-          if (isIgnored(route.id)) {
-            target = nyaa;
-          } else {
-            const media = await ctx.api.media.get(route.id, route.type);
-            const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
-            if (effectiveMalId) {
-              target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
-            } else {
-              target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
-            }
-          }
-        }
-        if (w) {
-          w.opener = null;
-          w.location.href = target;
-        } else openTab(target);
-      });
-
-      h1.appendChild(a);
-      attachedAnchor = { h1, route };
-      mountEditButton(h1, route);
-    }
-
-    ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, async (rc) => {
-      rc.onCleanup(() => {
-        activeTimerCleanup?.();
-        activeTimerCleanup = null;
-        attachedAnchor = null;
-        document.getElementById(ID)?.remove();
-        document.getElementById(EDIT_ID)?.remove();
-      });
+    ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
       const kind = rc.match![1] as 'anime' | 'manga';
       const route: MediaRoute = {
         kind,
         type: kind.toUpperCase() as 'ANIME' | 'MANGA',
         id: Number(rc.match![2])
       };
+      activeRoute = route;
+      void ctx.api.media.get(route.id, route.type);
 
-      const ensureMounted = () => {
-        if (rc.signal.aborted || document.getElementById(ID)) return;
-        const h1 = document.querySelector<HTMLElement>('.page-content .header .content > h1');
-        if (h1) attach(h1, route);
+      let cancelTouchTimer: CleanupFn | null = null;
+      let cancelResetTimer: CleanupFn | null = null;
+      const clearTouchTimers = () => {
+        cancelTouchTimer?.();
+        cancelTouchTimer = null;
+        cancelResetTimer?.();
+        cancelResetTimer = null;
       };
 
-      const h1 = await rc.waitForSelector<HTMLElement>('.page-content .header .content > h1', 8000);
-      if (rc.signal.aborted || !h1) return;
-      if (!document.getElementById(ID)) attach(h1, route);
+      const link = rc.mount({
+        id: LINK_ID,
+        anchor: H1_SEL,
+        position: 'beforeend',
+        style: (sel) =>
+          `${sel},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}${sel}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}${sel}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`,
+        create: () => {
+          clearTouchTimers();
+          const a = document.createElement('a');
+          a.href = '#';
+          a.title = isIgnored(route.id)
+            ? 'Marked as AniList-Only (searches Nyaa)'
+            : 'Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)';
+          a.setAttribute('aria-label', 'Open on MAL; long-press to search Nyaa');
+          a.innerHTML = ICON;
 
-      rc.onCleanup(ctx.onBodyMutation(ensureMounted));
+          const titleText = (): string => {
+            const h1 = a.parentElement;
+            if (!h1) return '';
+            return [...h1.childNodes]
+              .filter((n) => n !== a && (n as HTMLElement)?.id !== EDIT_ID)
+              .map((n) => n.textContent)
+              .join('')
+              .trim();
+          };
+          const searchNyaa = (): void => openTab(nyaaUrl(titleText()));
+
+          let longPressed = false;
+          let sx = 0;
+          let sy = 0;
+          const cancel = (): void => {
+            cancelTouchTimer?.();
+            cancelTouchTimer = null;
+          };
+
+          rc.listen(
+            a,
+            'touchstart',
+            ((e: TouchEvent) => {
+              if (e.touches.length !== 1) return;
+              sx = e.touches[0].clientX;
+              sy = e.touches[0].clientY;
+              longPressed = false;
+              cancel();
+              cancelTouchTimer = rc.timeout(() => {
+                cancelTouchTimer = null;
+                longPressed = true;
+                searchNyaa();
+                cancelResetTimer?.();
+                cancelResetTimer = rc.timeout(() => {
+                  longPressed = false;
+                  cancelResetTimer = null;
+                }, 800);
+              }, 550);
+            }) as EventListener,
+            { passive: true }
+          );
+
+          rc.listen(
+            a,
+            'touchmove',
+            ((e: TouchEvent) => {
+              if (!cancelTouchTimer || !e.touches.length) return;
+              if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
+            }) as EventListener,
+            { passive: true }
+          );
+
+          rc.listen(a, 'touchend', cancel, { passive: true });
+          rc.listen(a, 'touchcancel', cancel, { passive: true });
+          rc.listen(a, 'contextmenu', (e) => {
+            if (longPressed) e.preventDefault();
+          });
+
+          rc.listen(a, 'click', (ev: Event) => {
+            const e = ev as MouseEvent;
+            void (async () => {
+              e.preventDefault();
+            if (longPressed) {
+              longPressed = false;
+              e.stopPropagation();
+              return;
+            }
+            const w = window.open('about:blank', '_blank');
+            const title = titleText();
+            const nyaa = nyaaUrl(title);
+            let target = nyaa;
+            if (!e.ctrlKey && !e.metaKey) {
+              if (isIgnored(route.id)) {
+                target = nyaa;
+              } else {
+                const media = await ctx.api.media.get(route.id, route.type);
+                const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
+                if (effectiveMalId) {
+                  target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
+                } else {
+                  target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
+                }
+              }
+            }
+              if (w) {
+                w.opener = null;
+                w.location.href = target;
+              } else openTab(target);
+            })();
+          });
+
+          return a;
+        }
+      });
+
+      activeLink = link;
+      ensureEditMount();
+
+      rc.onCleanup(() => {
+        clearTouchTimers();
+        if (activeLink === link) activeLink = null;
+        if (activeRoute === route) activeRoute = null;
+        activeEdit?.unmount();
+        activeEdit = null;
+      });
     });
 
     ctx.onCleanup(() => {
-      activeTimerCleanup?.();
-      activeTimerCleanup = null;
-      attachedAnchor = null;
-      document.getElementById(ID)?.remove();
-      document.getElementById(EDIT_ID)?.remove();
+      activeEdit?.unmount();
+      activeEdit = null;
+      activeLink = null;
+      activeRoute = null;
     });
   }
 });

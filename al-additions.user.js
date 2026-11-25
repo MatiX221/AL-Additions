@@ -1434,12 +1434,16 @@
 			if (disposed) return;
 			const parent = document.head || document.documentElement;
 			if (!parent) return;
-			if (!document.getElementById(styleId)) {
-				const s = document.createElement("style");
-				s.id = styleId;
-				s.textContent = css;
-				parent.appendChild(s);
+			const text = typeof css === "function" ? css() : css;
+			const existing = document.getElementById(styleId);
+			if (existing) {
+				if (existing.textContent !== text) existing.textContent = text;
+				return;
 			}
+			const s = document.createElement("style");
+			s.id = styleId;
+			s.textContent = text;
+			parent.appendChild(s);
 		};
 		if (document.head) mount();
 		else cancelReady = Core.ready(mount);
@@ -1453,6 +1457,77 @@
 				styleRefCounts.delete(styleId);
 				document.getElementById(styleId)?.remove();
 			} else styleRefCounts.set(styleId, nextCount);
+		};
+	}
+	var fallbackSeq = 0;
+	var MODAL_STYLE_ID = "ala-core-modal-style";
+	var MODAL_CSS$1 = `
+  .ala-core-backdrop{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+  .ala-core-sheet{display:flex;flex-direction:column;width:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
+  .ala-core-sheet *{box-sizing:border-box}
+  .ala-core-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+  .ala-core-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
+  .ala-core-head h2{margin:0;font-size:18px;font-weight:600}
+  .ala-core-body{flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .ala-core-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+  .ala-core-sheet .ala-btn{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 18px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:4px;background:transparent;color:rgb(var(--color-text));font:inherit;font-size:13px;cursor:pointer}
+  .ala-core-sheet .ala-btn--primary{border-color:transparent;background:rgb(var(--color-blue));color:#fff;font-weight:600}
+  .ala-core-sheet .ala-btn--danger{border-color:rgba(var(--color-red,224,85,85),.35);color:rgb(var(--color-red,224,85,85))}
+  .ala-core-sheet .ala-btn--danger:hover{border-color:transparent;background:rgb(var(--color-red,224,85,85));color:#fff}
+  .ala-core-sheet .ala-btn--sm{min-height:32px;padding:0 12px;font-size:12px}
+  .ala-core-sheet .ala-btn:hover:not(:disabled){filter:brightness(1.1)}
+  .ala-core-sheet .ala-icon-btn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:rgb(var(--color-text-lighter));cursor:pointer}
+  .ala-core-sheet .ala-icon-btn:hover{background:rgba(var(--color-text-lighter),.14);color:rgb(var(--color-text))}
+`;
+	function createModal(opts) {
+		const modalId = opts.id ? prefixAlaId(opts.id) || `ala-modal-${++fallbackSeq}` : `ala-modal-${++fallbackSeq}`;
+		const disposeStyle = addStyle(MODAL_STYLE_ID, MODAL_CSS$1);
+		const disposeOwn = Core.registerOwnUi(`#${modalId}`);
+		document.getElementById(modalId)?.remove();
+		const backdrop = document.createElement("div");
+		backdrop.id = modalId;
+		backdrop.className = "ala-core-backdrop";
+		const titleId = `${modalId}-title`;
+		backdrop.innerHTML = `
+    <div class="ala-core-sheet" style="max-width:${esc(opts.maxWidth || "640px")}" role="dialog" aria-modal="true" aria-labelledby="${esc(titleId)}">
+      <header class="ala-core-head">
+        <h2 id="${esc(titleId)}">${esc(opts.title)}</h2>
+        <button class="ala-icon-btn ala-core-close" type="button" aria-label="Close">✕</button>
+      </header>
+      <div class="ala-core-body">${opts.bodyHtml || ""}</div>
+      <footer class="ala-core-foot">${opts.footerHtml || ""}</footer>
+    </div>
+  `;
+		let closed = false;
+		const cleanups = [disposeStyle, disposeOwn];
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			document.removeEventListener("keydown", onKey, true);
+			backdrop.remove();
+			for (const fn of cleanups) try {
+				fn();
+			} catch {}
+			opts.onClose?.();
+		};
+		const onKey = (e) => {
+			if (e.key === "Escape") {
+				e.stopPropagation();
+				close();
+			}
+		};
+		document.addEventListener("keydown", onKey, true);
+		backdrop.querySelector(".ala-core-close")?.addEventListener("click", close);
+		backdrop.addEventListener("click", (e) => {
+			if (e.target === backdrop) close();
+		});
+		document.body.appendChild(backdrop);
+		return {
+			backdrop,
+			sheet: backdrop.querySelector(".ala-core-sheet"),
+			body: backdrop.querySelector(".ala-core-body"),
+			footer: backdrop.querySelector(".ala-core-foot"),
+			close
 		};
 	}
 	var TOAST_ID = "ala-toast";
@@ -1792,12 +1867,44 @@
 		const assertAccountAllowed = (id) => {
 			if (!allowedAccounts.has(id)) throw new Error(`Module "${rec.id}" cannot access account provider "${id}" without declaring it in accounts`);
 		};
+		let idSeq = 0;
+		let styleSeq = 0;
+		let mountSeq = 0;
+		let modalSeq = 0;
+		const getId = (name) => {
+			const trimmed = name?.trim();
+			if (!trimmed) return `ala-${rec.id}-${++idSeq}`;
+			return trimmed.startsWith("ala-") ? trimmed : `ala-${rec.id}-${trimmed}`;
+		};
+		const makeAddStyle = (push, signal, autoPrefix) => (idOrCss, maybeCss) => {
+			if (disposed || signal.aborted) return noop;
+			const isOneArg = maybeCss === void 0;
+			const css = isOneArg ? idOrCss : maybeCss;
+			let styleId;
+			if (isOneArg) styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
+			else {
+				const raw = String(idOrCss || "").trim();
+				if (!raw) styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
+				else if (raw.startsWith("ala-")) styleId = raw;
+				else styleId = `ala-${rec.id}-${raw}${raw.endsWith("-style") ? "" : "-style"}`;
+			}
+			const clean = addStyle(styleId, css);
+			push(clean);
+			return clean;
+		};
 		const addMount = (spec, pushCleanup, signal) => {
-			if (disposed || signal?.aborted) return noop;
+			const resolvedId = spec.id ? getId(spec.id) : `ala-${rec.id}-mount-${++mountSeq}`;
+			const selector = `#${resolvedId}`;
+			if (disposed || signal?.aborted) return {
+				id: resolvedId,
+				selector,
+				el: () => null,
+				unmount: noop
+			};
 			let mountedEl = null;
 			let mountDisposed = false;
 			let ownDisposer = null;
-			const resolvedId = spec.id ? prefixAlaId(spec.id) : "";
+			let mountStyleDisposer = null;
 			const tryMount = () => {
 				if (mountDisposed || disposed || signal?.aborted) return;
 				if (spec.match && !spec.match()) {
@@ -1808,24 +1915,23 @@
 					return;
 				}
 				if (mountedEl?.isConnected) return;
-				if (resolvedId) {
-					const existing = document.getElementById(resolvedId);
-					if (existing?.isConnected) {
-						mountedEl = existing;
-						return;
-					}
+				const existing = document.getElementById(resolvedId);
+				if (existing?.isConnected) {
+					mountedEl = existing;
+					return;
 				}
 				const anchor = typeof spec.anchor === "string" ? document.querySelector(spec.anchor) : spec.anchor();
 				if (!anchor) return;
 				const el = spec.create();
-				if (resolvedId) el.id = resolvedId;
-				else if (el.id) el.id = prefixAlaId(el.id);
+				if (!el) return;
+				el.id = resolvedId;
+				if (spec.style !== void 0 && !mountStyleDisposer) {
+					const styleCss = spec.style;
+					mountStyleDisposer = addStyle(`${resolvedId}-style`, typeof styleCss === "function" ? () => styleCss(selector) : styleCss);
+				}
 				anchor.insertAdjacentElement(spec.position ?? "afterend", el);
 				mountedEl = el;
-				if (spec.ownUi && !ownDisposer) {
-					const sel = el.id ? `#${el.id}` : resolvedId ? `#${resolvedId}` : "";
-					if (sel) ownDisposer = Core.registerOwnUi(sel);
-				}
+				if (spec.ownUi && !ownDisposer) ownDisposer = Core.registerOwnUi(selector);
 			};
 			let unsubReady = noop;
 			let unsubNav = noop;
@@ -1839,6 +1945,8 @@
 				unsubBody();
 				ownDisposer?.();
 				ownDisposer = null;
+				mountStyleDisposer?.();
+				mountStyleDisposer = null;
 				mountedEl?.remove();
 				mountedEl = null;
 			};
@@ -1847,13 +1955,23 @@
 			unsubBody = Core.onBodyMutation(tryMount);
 			if (disposed || signal?.aborted) {
 				disposeMount();
-				return noop;
+				return {
+					id: resolvedId,
+					selector,
+					el: () => null,
+					unmount: noop
+				};
 			}
 			signal?.addEventListener("abort", disposeMount, { once: true });
 			pushCleanup(disposeMount);
-			return disposeMount;
+			return {
+				id: resolvedId,
+				selector,
+				el: () => document.getElementById(resolvedId),
+				unmount: disposeMount
+			};
 		};
-		const makeScopedHelpers = (push, signal) => ({
+		const makeScopedHelpers = (push, signal, stylePrefix) => ({
 			listen: (target, type, listener, options) => {
 				if (disposed || signal.aborted) return noop;
 				target.addEventListener(type, listener, options);
@@ -1876,12 +1994,13 @@
 				return cleanup;
 			},
 			mount: (spec) => addMount(spec, push, signal),
+			addStyle: makeAddStyle(push, signal, stylePrefix),
 			waitForSelector: (selector, timeoutMs = 8e3) => {
 				if (disposed || signal.aborted) return Promise.resolve(null);
 				return Core.waitForSelector(selector, timeoutMs, signal);
 			}
 		});
-		const rootScoped = makeScopedHelpers(track, ac.signal);
+		const rootScoped = makeScopedHelpers(track, ac.signal, "style");
 		const onRoute = (matchOrHandler, maybeHandler) => whenAlive(() => {
 			const matcher = typeof maybeHandler === "function" ? matchOrHandler : null;
 			const handler = maybeHandler ?? matchOrHandler;
@@ -1914,7 +2033,7 @@
 					routeAc = localAc;
 					const localCleanups = [];
 					routeCleanups = localCleanups;
-					const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal);
+					const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal, "route-style");
 					const rc = {
 						url,
 						pathname: url.pathname,
@@ -2147,10 +2266,30 @@
 		};
 		const eventOwner = Symbol(`events:${rec.id}`);
 		let retainedTracked = false;
+		const openModuleModal = (opts) => {
+			if (disposed) {
+				const deadEl = document.createElement("div");
+				return {
+					backdrop: deadEl,
+					sheet: deadEl,
+					body: deadEl,
+					footer: deadEl,
+					close: noop
+				};
+			}
+			const modalId = getId(opts.id ?? `modal-${++modalSeq}`);
+			const handle = createModal({
+				...opts,
+				id: modalId
+			});
+			track(handle.close);
+			return handle;
+		};
 		return {
 			id: rec.id,
 			title: rec.title,
 			help: rec.help,
+			getId,
 			get: (key) => Settings.get(key),
 			set: (key, val) => Settings.set(key, val),
 			storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
@@ -2160,7 +2299,8 @@
 			onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
 			onRoute,
 			mount: rootScoped.mount,
-			addStyle: (id, css) => whenAlive(() => addStyle(id, css)),
+			addStyle: rootScoped.addStyle,
+			modal: openModuleModal,
 			listen: rootScoped.listen,
 			interval: rootScoped.interval,
 			timeout: rootScoped.timeout,
@@ -2651,7 +2791,7 @@
 			const CONCURRENCY = 4;
 			const OPTIMISTIC_TTL = 2500;
 			const QUERY = "query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }";
-			ctx.addStyle("daiya-behind-dot-css", `
+			ctx.addStyle(`
       .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
       .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`);
 			const cacheStore = ctx.persistent("daiya-anilist-airing-cache-v5", (d) => {
@@ -2663,6 +2803,7 @@
 			const timers = new Map();
 			const optimistic = new Map();
 			let running = 0;
+			let routeTimeout = null;
 			const onListPage = () => location.pathname.includes("/animelist");
 			const idOf = (entry) => entry.querySelector("a[href*=\"/anime/\"]")?.getAttribute("href")?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] || null;
 			const needsFetch = (id) => {
@@ -2752,15 +2893,15 @@
 			}
 			function scheduleRefresh(id, at) {
 				const existing = timers.get(id);
-				if (existing) clearTimeout(existing);
+				if (existing) existing();
 				timers.delete(id);
-				if (!Number.isFinite(at)) return;
-				const t = setTimeout(() => {
+				if (!routeTimeout || !Number.isFinite(at)) return;
+				const cancel = routeTimeout(() => {
 					timers.delete(id);
 					queueIDs([id]);
 					repaint(new Set([id]));
 				}, Math.min(Math.max(0, at - Date.now()), 2147483647));
-				timers.set(id, t);
+				timers.set(id, cancel);
 			}
 			async function updateBatch(ids) {
 				const returned = new Set();
@@ -2839,33 +2980,6 @@
 				if (!raf) raf = requestAnimationFrame(flush);
 			};
 			const refresh = debounce(scanAll, 100);
-			ctx.onBodyMutation((muts) => {
-				if (!onListPage()) return;
-				for (const m of muts) {
-					const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
-					if (own) {
-						dirty.add(own);
-						mark();
-					}
-					for (const n of Array.from(m.addedNodes)) {
-						if (n.nodeType !== 1) continue;
-						const el = n;
-						if (el.matches(".entry")) dirty.add(el);
-						else {
-							el.querySelectorAll(".entry").forEach((e) => dirty.add(e));
-							if (el.matches(".list-wrap, .section-name") || el.querySelector(".section-name")) fullScan = true;
-						}
-						mark();
-					}
-				}
-			});
-			ctx.onNav(() => {
-				if (onListPage()) {
-					fullScan = true;
-					mark();
-					refresh();
-				}
-			});
 			const isIncrease = (el) => {
 				for (let n = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
 					const label = `${n.getAttribute?.("aria-label") || ""} ${n.getAttribute?.("title") || ""}`.trim().toLowerCase();
@@ -2875,45 +2989,80 @@
 				}
 				return false;
 			};
-			ctx.listen(document, "pointerdown", (e) => {
-				if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
-				const entry = e.target.closest(".entry");
-				const dot = entry && releasingDot(entry);
-				if (!dot || !dot.classList.contains(CLASS)) return;
-				const id = idOf(entry);
-				const data = id && cache[id];
-				const watched = progressOf(entry);
-				if (data && Number.isFinite(data.aired) && Number.isFinite(watched) && watched !== null && watched + 1 >= data.aired) {
-					optimistic.set(id, {
-						target: watched + 1,
-						expiresAt: Date.now() + OPTIMISTIC_TTL
-					});
-					dot.classList.remove(CLASS);
-				}
-			}, true);
-			for (const type of [
-				"click",
-				"input",
-				"change"
-			]) ctx.listen(document, type, (e) => {
-				if (e.target instanceof Element && e.target.closest(".entry")) refresh();
-			}, true);
-			ctx.listen(window, "focus", refresh);
-			ctx.listen(document, "visibilitychange", () => {
-				if (!document.hidden) refresh();
-			});
-			ctx.interval(scanAll, 6e4);
-			ctx.ready(() => {
-				if (onListPage()) {
+			ctx.onRoute(/^\/user\/[^/]+\/animelist(?:\/|$)/i, (rc) => {
+				routeTimeout = rc.timeout;
+				fullScan = false;
+				rc.onCleanup(ctx.onBodyMutation((muts) => {
+					if (rc.signal.aborted) return;
+					for (const m of muts) {
+						const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
+						if (own) {
+							dirty.add(own);
+							mark();
+						}
+						for (const n of Array.from(m.addedNodes)) {
+							if (n.nodeType !== 1) continue;
+							const el = n;
+							if (el.matches(".entry")) dirty.add(el);
+							else {
+								el.querySelectorAll(".entry").forEach((e) => dirty.add(e));
+								if (el.matches(".list-wrap, .section-name") || el.querySelector(".section-name")) fullScan = true;
+							}
+							mark();
+						}
+					}
+				}));
+				rc.listen(document, "pointerdown", (e) => {
+					if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
+					const entry = e.target.closest(".entry");
+					const dot = entry && releasingDot(entry);
+					if (!dot || !dot.classList.contains(CLASS)) return;
+					const id = idOf(entry);
+					const data = id && cache[id];
+					const watched = progressOf(entry);
+					if (data && Number.isFinite(data.aired) && Number.isFinite(watched) && watched !== null && watched + 1 >= data.aired) {
+						optimistic.set(id, {
+							target: watched + 1,
+							expiresAt: Date.now() + OPTIMISTIC_TTL
+						});
+						dot.classList.remove(CLASS);
+					}
+				}, true);
+				for (const type of [
+					"click",
+					"input",
+					"change"
+				]) rc.listen(document, type, (e) => {
+					if (e.target instanceof Element && e.target.closest(".entry")) refresh();
+				}, true);
+				rc.listen(window, "focus", refresh);
+				rc.listen(document, "visibilitychange", () => {
+					if (!document.hidden) refresh();
+				});
+				rc.interval(scanAll, 6e4);
+				const startList = () => {
+					if (rc.signal.aborted) return;
 					scanAll();
-					ctx.timeout(scanAll, 500);
-					ctx.timeout(scanAll, 1500);
-				}
+					for (const [id, entry] of Object.entries(cache)) if (entry && Number.isFinite(entry.nextCheck) && Date.now() < entry.nextCheck) scheduleRefresh(id, entry.nextCheck);
+					rc.timeout(scanAll, 500);
+					rc.timeout(scanAll, 1500);
+				};
+				rc.onCleanup(ctx.ready(startList));
+				rc.onCleanup(() => {
+					if (routeTimeout === rc.timeout) routeTimeout = null;
+					if (raf) cancelAnimationFrame(raf);
+					raf = 0;
+					for (const cancel of timers.values()) cancel();
+					timers.clear();
+					dirty.clear();
+					fullScan = false;
+				});
 			});
 			ctx.onCleanup(() => {
+				routeTimeout = null;
 				if (raf) cancelAnimationFrame(raf);
 				raf = 0;
-				for (const t of timers.values()) clearTimeout(t);
+				for (const cancel of timers.values()) cancel();
 				timers.clear();
 				pending.clear();
 				active.clear();
@@ -3069,56 +3218,47 @@
 		const queryJp = [animeJp, theme].filter(Boolean).join(" ");
 		return template.replace(/\{title_romaji\}/gi, format(titleRomaji)).replace(/\{title_jp\}/gi, format(titleJp)).replace(/\{title_native\}/gi, format(titleJp)).replace(/\{title\}/gi, format(title)).replace(/\{artists\}/gi, format(artists)).replace(/\{artist\}/gi, format(artist)).replace(/\{anime_romaji\}/gi, format(animeRomaji)).replace(/\{anime_english\}/gi, format(animeEn)).replace(/\{anime_en\}/gi, format(animeEn)).replace(/\{anime_native\}/gi, format(animeJp)).replace(/\{anime_jp\}/gi, format(animeJp)).replace(/\{anime\}/gi, format(anime)).replace(/\{year\}/gi, format(year)).replace(/\{season\}/gi, format(season)).replace(/\{theme\}/gi, format(theme)).replace(/\{type\}/gi, format(type)).replace(/\{number\}/gi, format(number)).replace(/\{eps\}/gi, format(eps)).replace(/\{query_anime\}/gi, format(queryAnime)).replace(/\{query_jp\}/gi, format(queryJp)).replace(/\{query\}/gi, format(query));
 	}
-	var MODAL_ID$2 = "ala-anisongs-modal-backdrop";
-	var MODAL_CSS$1 = `
-  #${MODAL_ID$2}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID$2} .ala-as-sheet{display:flex;flex-direction:column;width:min(660px,100%);height:100%;max-height:92vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  .ala-as-sheet *{box-sizing:border-box}
-  .ala-as-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  .ala-as-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-as-head h2{margin:0;font-size:18px;font-weight:600}
-  .ala-as-body{flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
-  .ala-as-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+	var buildAniSongsModalCss = (sel) => `
+  ${sel} .ala-core-sheet{height:100%}
+  ${sel} .ala-as-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  ${sel} .ala-as-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s}
+  ${sel} .ala-as-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
+  ${sel} .ala-as-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
 
-  .ala-as-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .ala-as-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s}
-  .ala-as-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
-  .ala-as-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
+  ${sel} .ala-as-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:16px}
+  ${sel} .ala-as-title{margin:0 0 8px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
+  ${sel} .ala-as-help{font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px;line-height:1.4}
 
-  .ala-as-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:16px}
-  .ala-as-title{margin:0 0 8px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
-  .ala-as-help{font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px;line-height:1.4}
+  ${sel} .ala-as-list{display:grid;gap:6px;margin-bottom:12px;min-width:0}
+  ${sel} .ala-as-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-foreground));border:1px solid rgba(var(--color-text-lighter),.12);min-width:0;max-width:100%}
+  ${sel} .ala-as-item-icon{width:22px;height:22px;object-fit:contain;border-radius:3px;flex-shrink:0}
+  ${sel} .ala-as-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+  ${sel} .ala-as-item-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
+  ${sel} .ala-as-item-url{font-size:11px;color:rgb(var(--color-text-lighter));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace}
+  ${sel} .ala-as-item-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
 
-  .ala-as-list{display:grid;gap:6px;margin-bottom:12px;min-width:0}
-  .ala-as-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-foreground));border:1px solid rgba(var(--color-text-lighter),.12);min-width:0;max-width:100%}
-  .ala-as-item-icon{width:22px;height:22px;object-fit:contain;border-radius:3px;flex-shrink:0}
-  .ala-as-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-  .ala-as-item-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
-  .ala-as-item-url{font-size:11px;color:rgb(var(--color-text-lighter));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace}
-  .ala-as-item-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
+  ${sel} .ala-as-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:14px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:12px;cursor:pointer;transition:all .15s}
+  ${sel} .ala-as-chip:hover{border-color:rgb(var(--color-blue));color:rgb(var(--color-blue))}
+  ${sel} .ala-as-chip-group{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 
-  .ala-as-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:14px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:12px;cursor:pointer;transition:all .15s}
-  .ala-as-chip:hover{border-color:rgb(var(--color-blue));color:rgb(var(--color-blue))}
-  .ala-as-chip-group{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  ${sel} .ala-as-form{display:grid;gap:8px;margin-top:8px}
+  ${sel} .ala-as-form-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  ${sel} .ala-as-field{display:flex;flex-direction:column;gap:4px}
+  ${sel} .ala-as-field label{font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-as-input{width:100%;height:34px;padding:0 8px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:12px}
+  ${sel} .ala-as-input:focus{outline:none;border-color:rgb(var(--color-blue))}
 
-  .ala-as-form{display:grid;gap:8px;margin-top:8px}
-  .ala-as-form-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .ala-as-field{display:flex;flex-direction:column;gap:4px}
-  .ala-as-field label{font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter))}
-  .ala-as-input{width:100%;height:34px;padding:0 8px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:12px}
-  .ala-as-input:focus{outline:none;border-color:rgb(var(--color-blue))}
+  ${sel} .ala-as-var-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;max-height:120px;overflow-y:auto;padding-bottom:2px}
+  ${sel} .ala-as-var-tag{padding:3px 7px;border-radius:3px;font-family:monospace;font-size:11px;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue));cursor:pointer;user-select:none;touch-action:manipulation}
+  ${sel} .ala-as-var-tag:hover{background:rgb(var(--color-blue));color:#fff}
 
-  .ala-as-var-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;max-height:120px;overflow-y:auto;padding-bottom:2px}
-  .ala-as-var-tag{padding:3px 7px;border-radius:3px;font-family:monospace;font-size:11px;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue));cursor:pointer;user-select:none;touch-action:manipulation}
-  .ala-as-var-tag:hover{background:rgb(var(--color-blue));color:#fff}
+  ${sel} .ala-as-textarea{width:100%;height:280px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
+  ${sel} .ala-as-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
+  ${sel} .ala-as-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
+  ${sel} .ala-as-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
 
-  .ala-as-textarea{width:100%;height:280px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
-  .ala-as-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
-  .ala-as-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
-  .ala-as-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
-
-  .ala-as-sheet .ala-btn:disabled,
-  .ala-as-sheet .ala-icon-btn:disabled {
+  ${sel} .ala-btn:disabled,
+  ${sel} .ala-icon-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
     pointer-events: none;
@@ -3126,146 +3266,125 @@
   }
 
   @media (max-width:700px){
-    #${MODAL_ID$2}{align-items:flex-end;padding:0}
-    #${MODAL_ID$2} .ala-as-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    .ala-as-head{padding:14px 16px}
-    .ala-as-body{padding:12px 16px}
-    .ala-as-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px));flex-direction:column-reverse;gap:8px}
-    .ala-as-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
+    ${sel}{align-items:flex-end;padding:0}
+    ${sel} .ala-core-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel} .ala-core-head{padding:14px 16px}
+    ${sel} .ala-core-body{padding:12px 16px}
+    ${sel} .ala-core-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px));flex-direction:column-reverse;gap:8px}
+    ${sel} .ala-core-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
 
-    .ala-as-form-row{grid-template-columns:1fr;gap:6px}
-    .ala-as-input{height:38px;font-size:14px}
+    ${sel} .ala-as-form-row{grid-template-columns:1fr;gap:6px}
+    ${sel} .ala-as-input{height:38px;font-size:14px}
 
-    .ala-as-item{flex-wrap:wrap;align-items:flex-start;gap:8px;padding:10px}
-    .ala-as-item-info{flex:1 1 calc(100% - 36px);min-width:0}
-    .ala-as-item-url{white-space:normal;word-break:break-all;font-size:10px}
-    .ala-as-item-actions{width:100%;display:flex;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
-    .ala-as-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;font-size:12px}
-    .ala-as-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
+    ${sel} .ala-as-item{flex-wrap:wrap;align-items:flex-start;gap:8px;padding:10px}
+    ${sel} .ala-as-item-info{flex:1 1 calc(100% - 36px);min-width:0}
+    ${sel} .ala-as-item-url{white-space:normal;word-break:break-all;font-size:10px}
+    ${sel} .ala-as-item-actions{width:100%;display:flex;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
+    ${sel} .ala-as-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;font-size:12px}
+    ${sel} .ala-as-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
 
-    .ala-as-form-actions{flex-direction:column;gap:8px;width:100%}
-    .ala-as-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
+    ${sel} .ala-as-form-actions{flex-direction:column;gap:8px;width:100%}
+    ${sel} .ala-as-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
 
-    .ala-as-json-actions{flex-direction:column;gap:8px}
-    .ala-as-json-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center}
-    .ala-as-textarea{height:200px}
+    ${sel} .ala-as-json-actions{flex-direction:column;gap:8px}
+    ${sel} .ala-as-json-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center}
+    ${sel} .ala-as-textarea{height:200px}
   }
   `;
 	function openAniSongsModal(ctx) {
-		ctx.addStyle("ala-anisongs-modal-style", MODAL_CSS$1);
-		const existing = document.getElementById(MODAL_ID$2);
-		if (existing) existing.remove();
 		const checkInit = validateAniSongsConfig(ctx.value);
 		let stateConfig = checkInit.valid && checkInit.config ? JSON.parse(JSON.stringify(checkInit.config)) : JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-		const backdrop = document.createElement("div");
-		backdrop.id = MODAL_ID$2;
-		backdrop.innerHTML = `
-    <div class="ala-as-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-as-modal-title">
-      <header class="ala-as-head">
-        <h2 id="ala-as-modal-title">Customize Song Search Providers</h2>
-        <button class="ala-icon-btn ala-as-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-as-body">
-        <div class="ala-as-tabs">
-          <button class="ala-as-tab is-active" data-tab="presets" type="button">Shortcuts &amp; Presets</button>
-          <button class="ala-as-tab" data-tab="json" type="button">Import / Export JSON</button>
+		const modal = ctx.modal({
+			id: "anisongs-modal",
+			title: "Customize Song Search Providers",
+			maxWidth: "660px",
+			bodyHtml: `
+      <div class="ala-as-tabs">
+        <button class="ala-as-tab is-active" data-tab="presets" type="button">Shortcuts &amp; Presets</button>
+        <button class="ala-as-tab" data-tab="json" type="button">Import / Export JSON</button>
+      </div>
+
+      <div id="ala-as-view-presets">
+        <div class="ala-as-box">
+          <h3 class="ala-as-title">Active Shortcuts</h3>
+          <p class="ala-as-help">These search icons appear directly next to each song on anime pages. Use arrows to reorder.</p>
+          <div id="ala-as-active-list" class="ala-as-list"></div>
+          <div style="font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter));margin-top:8px">Add inactive preset to shortcuts:</div>
+          <div id="ala-as-available-chips" class="ala-as-chip-group"></div>
         </div>
 
-        <div id="ala-as-view-presets">
-          <div class="ala-as-box">
-            <h3 class="ala-as-title">Active Shortcuts</h3>
-            <p class="ala-as-help">These search icons appear directly next to each song on anime pages. Use arrows to reorder.</p>
-            <div id="ala-as-active-list" class="ala-as-list"></div>
-            <div style="font-size:11px;font-weight:600;color:rgb(var(--color-text-lighter));margin-top:8px">Add inactive preset to shortcuts:</div>
-            <div id="ala-as-available-chips" class="ala-as-chip-group"></div>
-          </div>
+        <div class="ala-as-box">
+          <h3 class="ala-as-title">All Presets</h3>
+          <p class="ala-as-help">Manage available music and video providers.</p>
+          <div id="ala-as-preset-list" class="ala-as-list"></div>
 
-          <div class="ala-as-box">
-            <h3 class="ala-as-title">All Presets</h3>
-            <p class="ala-as-help">Manage available music and video providers.</p>
-            <div id="ala-as-preset-list" class="ala-as-list"></div>
-
-            <div style="border-top:1px solid rgba(var(--color-text-lighter),.12);padding-top:12px;margin-top:12px">
-              <h4 id="ala-as-form-heading" style="margin:0 0 8px;font-size:12px;color:rgb(var(--color-blue))">Add Custom Preset</h4>
-              <div class="ala-as-form">
-                <div class="ala-as-form-row">
-                  <div class="ala-as-field">
-                    <label for="ala-as-in-name">Name</label>
-                    <input type="text" id="ala-as-in-name" class="ala-as-input" placeholder="e.g. Deezer">
-                  </div>
-                  <div class="ala-as-field">
-                    <label for="ala-as-in-icon">Favicon / Icon URL</label>
-                    <input type="text" id="ala-as-in-icon" class="ala-as-input" placeholder="e.g. https://www.deezer.com/favicon.ico">
-                  </div>
+          <div style="border-top:1px solid rgba(var(--color-text-lighter),.12);padding-top:12px;margin-top:12px">
+            <h4 id="ala-as-form-heading" style="margin:0 0 8px;font-size:12px;color:rgb(var(--color-blue))">Add Custom Preset</h4>
+            <div class="ala-as-form">
+              <div class="ala-as-form-row">
+                <div class="ala-as-field">
+                  <label for="ala-as-in-name">Name</label>
+                  <input type="text" id="ala-as-in-name" class="ala-as-input" placeholder="e.g. Deezer">
                 </div>
                 <div class="ala-as-field">
-                  <label for="ala-as-in-url">URL Search Template</label>
-                  <input type="text" id="ala-as-in-url" class="ala-as-input" placeholder="e.g. https://www.deezer.com/search/{title}%20{artist}">
-                  <div class="ala-as-var-tags">
-                    <span class="ala-as-var-tag" data-var="{title}">{title}</span>
-                    <span class="ala-as-var-tag" data-var="{title_jp}">{title_jp}</span>
-                    <span class="ala-as-var-tag" data-var="{title_romaji}">{title_romaji}</span>
-                    <span class="ala-as-var-tag" data-var="{artist}">{artist}</span>
-                    <span class="ala-as-var-tag" data-var="{artists}">{artists}</span>
-                    <span class="ala-as-var-tag" data-var="{anime}">{anime}</span>
-                    <span class="ala-as-var-tag" data-var="{anime_jp}">{anime_jp}</span>
-                    <span class="ala-as-var-tag" data-var="{anime_romaji}">{anime_romaji}</span>
-                    <span class="ala-as-var-tag" data-var="{anime_en}">{anime_en}</span>
-                    <span class="ala-as-var-tag" data-var="{theme}">{theme}</span>
-                    <span class="ala-as-var-tag" data-var="{type}">{type}</span>
-                    <span class="ala-as-var-tag" data-var="{number}">{number}</span>
-                    <span class="ala-as-var-tag" data-var="{year}">{year}</span>
-                    <span class="ala-as-var-tag" data-var="{season}">{season}</span>
-                    <span class="ala-as-var-tag" data-var="{query}">{query}</span>
-                    <span class="ala-as-var-tag" data-var="{query_anime}">{query_anime}</span>
-                    <span class="ala-as-var-tag" data-var="{query_jp}">{query_jp}</span>
-                  </div>
+                  <label for="ala-as-in-icon">Favicon / Icon URL</label>
+                  <input type="text" id="ala-as-in-icon" class="ala-as-input" placeholder="e.g. https://www.deezer.com/favicon.ico">
                 </div>
-                <div class="ala-as-form-actions" style="display:flex;gap:8px;margin-top:6px">
-                  <button type="button" class="ala-btn ala-btn--sm ala-btn--primary" id="ala-as-btn-save-preset">Add Preset</button>
-                  <button type="button" class="ala-btn ala-btn--sm" id="ala-as-btn-cancel-preset" style="display:none">Cancel</button>
+              </div>
+              <div class="ala-as-field">
+                <label for="ala-as-in-url">URL Search Template</label>
+                <input type="text" id="ala-as-in-url" class="ala-as-input" placeholder="e.g. https://www.deezer.com/search/{title}%20{artist}">
+                <div class="ala-as-var-tags">
+                  <span class="ala-as-var-tag" data-var="{title}">{title}</span>
+                  <span class="ala-as-var-tag" data-var="{title_jp}">{title_jp}</span>
+                  <span class="ala-as-var-tag" data-var="{title_romaji}">{title_romaji}</span>
+                  <span class="ala-as-var-tag" data-var="{artist}">{artist}</span>
+                  <span class="ala-as-var-tag" data-var="{artists}">{artists}</span>
+                  <span class="ala-as-var-tag" data-var="{anime}">{anime}</span>
+                  <span class="ala-as-var-tag" data-var="{anime_jp}">{anime_jp}</span>
+                  <span class="ala-as-var-tag" data-var="{anime_romaji}">{anime_romaji}</span>
+                  <span class="ala-as-var-tag" data-var="{anime_en}">{anime_en}</span>
+                  <span class="ala-as-var-tag" data-var="{theme}">{theme}</span>
+                  <span class="ala-as-var-tag" data-var="{type}">{type}</span>
+                  <span class="ala-as-var-tag" data-var="{number}">{number}</span>
+                  <span class="ala-as-var-tag" data-var="{year}">{year}</span>
+                  <span class="ala-as-var-tag" data-var="{season}">{season}</span>
+                  <span class="ala-as-var-tag" data-var="{query}">{query}</span>
+                  <span class="ala-as-var-tag" data-var="{query_anime}">{query_anime}</span>
+                  <span class="ala-as-var-tag" data-var="{query_jp}">{query_jp}</span>
                 </div>
+              </div>
+              <div class="ala-as-form-actions" style="display:flex;gap:8px;margin-top:6px">
+                <button type="button" class="ala-btn ala-btn--sm ala-btn--primary" id="ala-as-btn-save-preset">Add Preset</button>
+                <button type="button" class="ala-btn ala-btn--sm" id="ala-as-btn-cancel-preset" style="display:none">Cancel</button>
               </div>
             </div>
           </div>
         </div>
+      </div>
 
-        <div id="ala-as-view-json" style="display:none">
-          <div class="ala-as-box">
-            <h3 class="ala-as-title">Raw JSON Configuration</h3>
-            <p class="ala-as-help">View, export, or paste preset definitions and active provider arrays.</p>
-            <textarea id="ala-as-json-area" class="ala-as-textarea" spellcheck="false"></textarea>
-            <div id="ala-as-json-status" class="ala-as-status"></div>
-            <div class="ala-as-json-actions" style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-as-btn-apply-json">Apply JSON</button>
-              <button type="button" class="ala-btn" id="ala-as-btn-copy-json">Copy to Clipboard</button>
-              <button type="button" class="ala-btn" id="ala-as-btn-reset-defaults" style="margin-left:auto">Reset Defaults</button>
-            </div>
+      <div id="ala-as-view-json" style="display:none">
+        <div class="ala-as-box">
+          <h3 class="ala-as-title">Raw JSON Configuration</h3>
+          <p class="ala-as-help">View, export, or paste preset definitions and active provider arrays.</p>
+          <textarea id="ala-as-json-area" class="ala-as-textarea" spellcheck="false"></textarea>
+          <div id="ala-as-json-status" class="ala-as-status"></div>
+          <div class="ala-as-json-actions" style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-as-btn-apply-json">Apply JSON</button>
+            <button type="button" class="ala-btn" id="ala-as-btn-copy-json">Copy to Clipboard</button>
+            <button type="button" class="ala-btn" id="ala-as-btn-reset-defaults" style="margin-left:auto">Reset Defaults</button>
           </div>
         </div>
       </div>
-      <footer class="ala-as-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-as-btn-done" type="button">Apply &amp; Save</button>
-        <button class="ala-btn ala-as-close" type="button">Cancel</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const close = () => {
-			unlistenKey();
-			backdrop.remove();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				close();
-			}
-		};
-		const unlistenKey = ctx.listen(document, "keydown", onKey, true);
-		backdrop.querySelectorAll(".ala-as-close").forEach((btn) => btn.addEventListener("click", close));
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
+    `,
+			footerHtml: `
+      <button class="ala-btn ala-btn--primary" id="ala-as-btn-done" type="button">Apply &amp; Save</button>
+      <button class="ala-btn ala-as-close" type="button">Cancel</button>
+    `
 		});
+		ctx.addStyle("anisongs-modal", () => buildAniSongsModalCss(`#${modal.backdrop.id}`));
+		const { backdrop, close } = modal;
+		backdrop.querySelectorAll(".ala-as-close").forEach((btn) => btn.addEventListener("click", close));
 		const tabs = backdrop.querySelectorAll(".ala-as-tab");
 		const viewPresets = backdrop.querySelector("#ala-as-view-presets");
 		const viewJson = backdrop.querySelector("#ala-as-view-json");
@@ -3749,7 +3868,17 @@
 			video
 		};
 	}
-	function createSongCard(song, activePresets, groupType) {
+	function scheduleFallback(fn, ms, timeout) {
+		if (timeout) return timeout(fn, ms);
+		let cancelled = false;
+		sleep(ms).then(() => {
+			if (!cancelled) fn();
+		});
+		return () => {
+			cancelled = true;
+		};
+	}
+	function createSongCard(song, activePresets, groupType, timeout) {
 		const el = document.createElement("div");
 		el.className = "daiya-anisong-entry";
 		const header = document.createElement("div");
@@ -3796,10 +3925,11 @@
 			closingByRow.set(player.row, player);
 			player.wrap.classList.remove("is-open");
 			let done = false;
+			let cancelTimer = () => {};
 			const detach = () => {
 				if (done) return false;
 				done = true;
-				clearTimeout(timer);
+				cancelTimer();
 				player.wrap.removeEventListener("transitionend", onEnd);
 				cancelClosingMap.delete(player.wrap);
 				if (closingByRow.get(player.row) === player) closingByRow.delete(player.row);
@@ -3811,7 +3941,7 @@
 			const onEnd = (e) => {
 				if (e.target === player.wrap && e.propertyName === "grid-template-rows") finish();
 			};
-			const timer = setTimeout(finish, COLLAPSE_FALLBACK_MS);
+			cancelTimer = scheduleFallback(finish, COLLAPSE_FALLBACK_MS, timeout);
 			player.wrap.addEventListener("transitionend", onEnd);
 			cancelClosingMap.set(player.wrap, detach);
 		}
@@ -3903,7 +4033,7 @@
 		if (typeof document === "undefined") return 0;
 		return Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0);
 	}
-	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop, listen) {
+	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop, listen, timeout) {
 		if (typeof window === "undefined" || typeof window.scrollBy !== "function") return () => {};
 		const stepScroll = () => {
 			const docShrink = Math.max(0, startDocHeight - getDocumentHeight());
@@ -3921,11 +4051,12 @@
 		let active = true;
 		let unlistenWheel = () => {};
 		let unlistenTouch = () => {};
+		let cancelTimer = () => {};
 		const stop = () => {
 			if (!active) return;
 			active = false;
 			if (rafId) cancelAnimationFrame(rafId);
-			clearTimeout(timer);
+			cancelTimer();
 			collapsible.removeEventListener("transitionend", onEnd);
 			unlistenWheel();
 			unlistenTouch();
@@ -3941,10 +4072,10 @@
 			stepScroll();
 			rafId = requestAnimationFrame(tick);
 		};
-		const timer = setTimeout(() => {
+		cancelTimer = scheduleFallback(() => {
 			stepScroll();
 			stop();
-		}, COLLAPSE_FALLBACK_MS);
+		}, COLLAPSE_FALLBACK_MS, timeout);
 		collapsible.addEventListener("transitionend", onEnd);
 		if (listen) {
 			unlistenWheel = listen(window, "wheel", stop, {
@@ -3959,7 +4090,7 @@
 		rafId = requestAnimationFrame(tick);
 		return stop;
 	}
-	function createSongGroup(title, songs, activePresets, groupType, listen) {
+	function createSongGroup(title, songs, activePresets, groupType, listen, timeout) {
 		const g = document.createElement("div");
 		g.className = "daiya-anisongs-group";
 		const h = document.createElement("h2");
@@ -3980,7 +4111,7 @@
 		extraWrap.className = "daiya-anisong-collapsible daiya-anisongs-extra";
 		const extraInner = document.createElement("div");
 		extraInner.className = "daiya-anisong-collapsible-inner";
-		rest.forEach((s) => extraInner.appendChild(createSongCard(s, activePresets, groupType)));
+		rest.forEach((s) => extraInner.appendChild(createSongCard(s, activePresets, groupType, timeout)));
 		extraWrap.appendChild(extraInner);
 		g.appendChild(extraWrap);
 		const btn = document.createElement("button");
@@ -4002,7 +4133,7 @@
 			extraWrap.classList.toggle("is-open", expanded);
 			btn.textContent = expanded ? "Show less" : showAllLabel;
 			btn.setAttribute("aria-expanded", String(expanded));
-			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen);
+			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen, timeout);
 		});
 		g.appendChild(btn);
 		return g;
@@ -4071,11 +4202,11 @@
 		},
 		setup(ctx) {
 			const API = "https://rs.animethemes.moe/graphql";
-			const ROOT = "daiya-anisongs";
+			const ROOT = ctx.getId("root");
 			const TTL = 6048e5;
 			const EMPTY_TTL = 432e5;
 			ctx.ownUi(`#${ROOT}`);
-			ctx.addStyle("daiya-anisongs-style", `
+			ctx.addStyle(`
       #${ROOT}{width:100%;margin-top:30px}
       #${ROOT} .daiya-anisongs-columns{display:flex;gap:30px;width:100%}
       #${ROOT} .daiya-anisongs-group{flex:1 1 0;min-width:0}
@@ -4193,7 +4324,7 @@
 				cacheStore.save();
 				return data;
 			});
-			function mount(state, overview) {
+			function mount(state, overview, listen = ctx.listen, timeout = ctx.timeout) {
 				document.getElementById(ROOT)?.remove();
 				const config = getValidAniSongsConfig(ctx.get("aniSongsProviders"));
 				const presetMap = new Map();
@@ -4204,7 +4335,7 @@
 				root.dataset.animeId = state.id;
 				const cols = document.createElement("div");
 				cols.className = "daiya-anisongs-columns";
-				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP", ctx.listen), createSongGroup("Endings", state.themes.ED, activePresets, "ED", ctx.listen));
+				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP", listen, timeout), createSongGroup("Endings", state.themes.ED, activePresets, "ED", listen, timeout));
 				root.appendChild(cols);
 				overview.appendChild(root);
 			}
@@ -4228,11 +4359,11 @@
 					mine.themes = themes;
 					const overview = await rc.waitForSelector(".overview", 1e4);
 					if (rc.signal.aborted || !overview) return;
-					mount(mine, overview);
+					mount(mine, overview, rc.listen, rc.timeout);
 					rc.onCleanup(ctx.onBodyMutation(() => {
 						if (!rc.signal.aborted && !document.getElementById(ROOT)) {
 							const ov = document.querySelector(".overview");
-							if (ov) mount(mine, ov);
+							if (ov) mount(mine, ov, rc.listen, rc.timeout);
 						}
 					}));
 				} catch (err) {
@@ -4296,7 +4427,7 @@
 			help: "Also show the download button on user profile banners (it is always shown on anime and manga pages)."
 		}],
 		setup(ctx) {
-			ctx.addStyle("ala-banner-style", `
+			ctx.addStyle(`
       .banner{position:relative}
       .ala-banner-dl{position:absolute;right:12px;bottom:12px;z-index:5;display:inline-flex;align-items:center;justify-content:center;height:34px;min-width:34px;padding:0 8px;border:0;border-radius:17px;background:transparent;color:rgba(255,255,255,.8);font-family:inherit;font-size:12px;font-weight:600;line-height:1;cursor:pointer;overflow:hidden;-webkit-tap-highlight-color:transparent;transition:background .15s,color .15s}
       .ala-banner-dl[hidden]{display:none}
@@ -4365,19 +4496,18 @@
 				activeSlug = mediaId || userSeg || "anilist";
 				scan();
 				rc.timeout(scan, 300);
+				rc.onCleanup(ctx.onBodyMutation(scanSoon));
 				return () => {
 					activeSlug = null;
 					scan();
 				};
 			});
-			ctx.onBodyMutation(scanSoon);
 			ctx.onCleanup(() => {
 				activeSlug = null;
 				document.querySelectorAll(".ala-banner-dl").forEach((el) => el.remove());
 			});
 		}
 	});
-	var COMPARE_CSS_ID = "ala-compare-style";
 	var COMPARE_CSS = `
       .content.container.ala-compare-page-container {
         padding-left: 18px !important;
@@ -4876,7 +5006,7 @@
 	}
 	function setLoadIndicator(state, sidebar, text) {
 		if (state.indicatorTimer) {
-			clearTimeout(state.indicatorTimer);
+			state.indicatorTimer();
 			state.indicatorTimer = null;
 		}
 		let indicator = sidebar.querySelector("#ala-compare-load-indicator");
@@ -4930,7 +5060,7 @@
 			state.prefetchRelease = null;
 		}
 		if (state.indicatorTimer) {
-			clearTimeout(state.indicatorTimer);
+			state.indicatorTimer();
 			state.indicatorTimer = null;
 		}
 		if (state.loadAbortState) {
@@ -5286,7 +5416,7 @@
 		state.loadAbortState = abortState;
 		state.prefetchRelease?.();
 		state.prefetchRelease = ctx.hooks.setPrefetchPaused(true);
-		state.indicatorTimer = setTimeout(() => {
+		state.indicatorTimer = ctx.timeout(() => {
 			if (!abortState.abort && isComparePage()) setLoadIndicator(state, sidebar, "Loading full compare list...");
 		}, 250);
 		try {
@@ -5357,25 +5487,12 @@
 			help: "Log list comparison data loading, score diffs, sorting, and filtering passes."
 		},
 		setup(ctx) {
-			ctx.addStyle(COMPARE_CSS_ID, COMPARE_CSS);
+			ctx.addStyle(COMPARE_CSS);
 			ctx.ownUi("#ala-compare-sidebar");
 			const state = createCompareState();
 			ctx.hooks.blockRpc(createCompareRpcBlocker(state));
 			const checkView = debounce(() => {
-				if (state.disposed || state.isMutatingDOM) return;
-				const path = location.pathname;
-				if (!isComparePage()) {
-					if (state.currentRoute) {
-						cleanupCompareView(state);
-						state.currentRoute = "";
-					}
-					return;
-				}
-				if (path !== state.currentRoute) {
-					state.currentRoute = path;
-					resetCompareFilters(state);
-					cleanupCompareView(state);
-				}
+				if (state.disposed || state.isMutatingDOM || !isComparePage()) return;
 				if (state.isCompareLoaded) return;
 				const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
 				if (!compareRoot) return;
@@ -5390,21 +5507,17 @@
 			}, 60);
 			ctx.onRoute(() => isComparePage(), (rc) => {
 				if (state.disposed) return;
-				if (rc.url.pathname !== state.currentRoute) {
-					state.currentRoute = rc.url.pathname;
-					resetCompareFilters(state);
-					cleanupCompareView(state);
-				}
-				checkView();
+				state.currentRoute = rc.pathname;
+				resetCompareFilters(state);
+				cleanupCompareView(state);
+				rc.onCleanup(ctx.ready(checkView));
+				rc.onCleanup(ctx.onBodyMutation(() => {
+					if (!rc.signal.aborted && !state.disposed && !state.isMutatingDOM) checkView();
+				}));
 				return () => {
 					state.currentRoute = "";
 					cleanupCompareView(state);
 				};
-			});
-			ctx.ready(checkView);
-			ctx.onNav(checkView);
-			ctx.onBodyMutation(() => {
-				if (!state.disposed && isComparePage() && !state.isMutatingDOM) checkView();
 			});
 			ctx.onCleanup(() => {
 				state.disposed = true;
@@ -5413,8 +5526,6 @@
 			});
 		}
 	});
-	var STYLE_ID$1 = "ala-date-backfill-style";
-	var MODAL_ID$1 = "ala-date-backfill-modal";
 	var TARGETED_BATCH_SIZE = 10;
 	var ACTIVITY_PAGE_QUERY = `
 query (
@@ -5643,117 +5754,112 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			help: "Log list scans, activity pagination, and entry updates."
 		},
 		setup(ctx) {
+			const MODAL_ID = ctx.getId("modal");
 			let activeModalAbort = null;
 			ctx.onCleanup(() => {
 				activeModalAbort?.abort();
 				activeModalAbort = null;
-				document.getElementById(MODAL_ID$1)?.remove();
 			});
-			ctx.addStyle(STYLE_ID$1, `@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
+			ctx.addStyle(`@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
       @keyframes alaDbfIndeterminate {0%{transform:translateX(-100%);}100%{transform:translateX(350%);}}
       @keyframes alaDbfPulse {0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.85);}}
-      #${MODAL_ID$1} {position:fixed;inset:0;z-index:99999;background:rgba(11,22,34,0.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px;overflow-x:hidden;}
-      #${MODAL_ID$1} * {box-sizing:border-box;}
-      #${MODAL_ID$1} .ala-dbf-card {width:min(960px,100%);max-width:100%;max-height:88vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border:1px solid rgba(var(--color-text),0.1);border-radius:10px;box-shadow:0 20px 50px rgba(0,0,0,0.5);overflow:hidden;font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
-      #${MODAL_ID$1} .ala-dbf-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-shrink:0;}
-      #${MODAL_ID$1} .ala-dbf-title-wrap {display:flex;flex-direction:column;gap:4px;min-width:0;}
-      #${MODAL_ID$1} .ala-dbf-title {font-size:1.65rem;font-weight:700;letter-spacing:-0.01em;color:rgb(var(--color-text));}
-      #${MODAL_ID$1} .ala-dbf-subtitle {font-size:1.2rem;color:rgb(var(--color-text-lighter));line-height:1.35;}
-      #${MODAL_ID$1} .ala-dbf-close {width:32px;height:32px;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:6px;cursor:pointer;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));font-size:1.5rem;line-height:1;transition:background 0.15s,color 0.15s;}
-      #${MODAL_ID$1} .ala-dbf-close:hover {background:rgba(var(--color-red),0.16);color:rgb(var(--color-red));}
-      #${MODAL_ID$1} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
-      #${MODAL_ID$1} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
-      #${MODAL_ID$1} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
-      #${MODAL_ID$1} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
-      #${MODAL_ID$1} .ala-dbf-body {padding:18px 22px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;}
-      #${MODAL_ID$1} .ala-dbf-body::-webkit-scrollbar {width:8px;}
-      #${MODAL_ID$1} .ala-dbf-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
-      #${MODAL_ID$1} .ala-dbf-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
-      #${MODAL_ID$1} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
-      #${MODAL_ID$1} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID$1} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
-      #${MODAL_ID$1} .ala-dbf-mode-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;}
-      #${MODAL_ID$1} .ala-dbf-mode-card {display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:8px;width:100%;padding:16px 18px;border-radius:8px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.1);color:rgb(var(--color-text));cursor:pointer;transition:border-color 0.15s,transform 0.12s,background 0.15s;}
-      #${MODAL_ID$1} .ala-dbf-mode-card:hover {border-color:rgb(var(--color-blue));background:rgba(var(--color-blue),0.06);transform:translateY(-1px);}
-      #${MODAL_ID$1} .ala-dbf-mode-card-head {display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;flex-wrap:wrap;}
-      #${MODAL_ID$1} .ala-dbf-mode-card-title {font-size:1.4rem;font-weight:700;color:rgb(var(--color-text));}
-      #${MODAL_ID$1} .ala-dbf-mode-badge {padding:2px 8px;border-radius:999px;font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;background:rgba(var(--color-blue),0.16);color:rgb(var(--color-blue));}
-      #${MODAL_ID$1} .ala-dbf-mode-desc {font-size:1.2rem;line-height:1.45;color:rgb(var(--color-text-lighter));font-weight:400;}
-      #${MODAL_ID$1} .ala-dbf-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;}
-      #${MODAL_ID$1} .ala-dbf-stat-card {padding:10px 14px;border-radius:7px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.07);display:flex;flex-direction:column;gap:3px;min-width:0;}
-      #${MODAL_ID$1} .ala-dbf-stat-label {font-size:1.1rem;text-transform:uppercase;letter-spacing:0.04em;color:rgb(var(--color-text-lighter));font-weight:600;}
-      #${MODAL_ID$1} .ala-dbf-stat-val {font-size:1.65rem;font-weight:700;font-variant-numeric:tabular-nums;}
-      #${MODAL_ID$1} .ala-dbf-stat-val.green {color:rgb(var(--color-green));}
-      #${MODAL_ID$1} .ala-dbf-stat-val.blue {color:rgb(var(--color-blue));}
-      #${MODAL_ID$1} .ala-dbf-toolbar {display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
-      #${MODAL_ID$1} .ala-dbf-search {flex:1;min-width:180px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(var(--color-text),0.14);background:rgb(var(--color-background));color:rgb(var(--color-text));font-size:1.25rem;outline:none;transition:border-color 0.15s;}
-      #${MODAL_ID$1} .ala-dbf-search:focus {border-color:rgb(var(--color-blue));}
-      #${MODAL_ID$1} .ala-dbf-section {margin-bottom:16px;border:1px solid rgba(var(--color-text),0.08);border-radius:8px;background:rgb(var(--color-background));overflow-x:hidden;}
-      #${MODAL_ID$1} .ala-dbf-section:last-child {margin-bottom:0;}
-      #${MODAL_ID$1} .ala-dbf-section-head {padding:10px 14px;background:rgba(var(--color-foreground),0.55);border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-weight:700;font-size:1.3rem;}
-      #${MODAL_ID$1} .ala-dbf-section-head.collapsible {cursor:pointer;user-select:none;}
-      #${MODAL_ID$1} .ala-dbf-section-head.collapsible:hover {background:rgba(var(--color-text),0.05);}
-      #${MODAL_ID$1} .ala-dbf-table-wrap {width:100%;overflow-x:hidden;}
-      #${MODAL_ID$1} table {width:100%;table-layout:fixed;border-collapse:collapse;font-size:1.25rem;}
-      #${MODAL_ID$1} thead th {background:rgb(var(--color-background));color:rgb(var(--color-text-lighter));font-size:1.1rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:9px 12px;border-bottom:1px solid rgba(var(--color-text),0.12);text-align:left;}
-      #${MODAL_ID$1} tbody td {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.06);vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;}
-      #${MODAL_ID$1} tbody tr:last-child td {border-bottom:none;}
-      #${MODAL_ID$1} tbody tr {transition:background 0.12s,opacity 0.12s;}
-      #${MODAL_ID$1} tbody tr:hover {background:rgba(var(--color-text),0.035);}
-      #${MODAL_ID$1} tbody tr.is-selected {background:rgba(var(--color-blue),0.055);}
-      #${MODAL_ID$1} tbody tr.is-unselected {opacity:0.72;}
-      #${MODAL_ID$1} input[type="checkbox"] {width:16px;height:16px;accent-color:rgb(var(--color-blue));cursor:pointer;vertical-align:middle;}
-      #${MODAL_ID$1} .ala-dbf-media-link {color:rgb(var(--color-text));text-decoration:none;font-weight:600;transition:color 0.12s;}
-      #${MODAL_ID$1} .ala-dbf-media-link:hover {color:rgb(var(--color-blue));text-decoration:underline;}
-      #${MODAL_ID$1} .ala-dbf-type-badge {display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:1rem;font-weight:700;letter-spacing:0.03em;background:rgba(var(--color-blue),0.15);color:rgb(var(--color-blue));vertical-align:middle;}
-      #${MODAL_ID$1} .ala-dbf-type-badge.manga {background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));}
-      #${MODAL_ID$1} .ala-dbf-date-diff {display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;font-variant-numeric:tabular-nums;}
-      #${MODAL_ID$1} .ala-dbf-old-date {color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID$1} .ala-dbf-arrow {color:rgb(var(--color-text-lighter));font-size:1.1rem;}
-      #${MODAL_ID$1} .ala-dbf-new-date {display:inline-block;padding:2px 7px;border-radius:4px;background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));font-weight:700;}
-      #${MODAL_ID$1} .ala-dbf-new-date.assumed {background:rgba(235,168,52,0.16);color:rgb(235,168,52);}
-      #${MODAL_ID$1} .ala-dbf-source {margin-top:3px;font-size:1.1rem;color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID$1} .ala-dbf-source.assumed {color:rgb(235,168,52);}
-      #${MODAL_ID$1} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
-      #${MODAL_ID$1} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
-      #${MODAL_ID$1} .ala-dbf-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;flex-shrink:0;}
-      #${MODAL_ID$1} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
-      #${MODAL_ID$1} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
-      #${MODAL_ID$1} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
-      #${MODAL_ID$1} .ala-dbf-dot.paused {background:rgb(235,168,52);}
-      #${MODAL_ID$1} .ala-dbf-dot.done {background:rgb(var(--color-green));}
-      #${MODAL_ID$1} .ala-dbf-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-      #${MODAL_ID$1} .ala-dbf-actions[hidden] {display:none;}
-      #${MODAL_ID$1} button.ala-dbf-btn {padding:7px 14px;border:1px solid transparent;border-radius:6px;cursor:pointer;font-size:1.25rem;font-weight:600;background:rgb(var(--color-blue));color:#fff;transition:filter 0.14s,background 0.14s,opacity 0.14s;}
-      #${MODAL_ID$1} button.ala-dbf-btn:hover:not(:disabled) {filter:brightness(1.08);}
-      #${MODAL_ID$1} button.ala-dbf-btn.secondary {background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
-      #${MODAL_ID$1} button.ala-dbf-btn.secondary:hover:not(:disabled) {background:rgba(var(--color-text),0.16);}
-      #${MODAL_ID$1} button.ala-dbf-btn.apply {background:rgb(var(--color-green));color:#fff;}
-      #${MODAL_ID$1} button.ala-dbf-btn.mini {padding:5px 10px;font-size:1.15rem;}
-      #${MODAL_ID$1} button:disabled {opacity:0.45;cursor:not-allowed;}
+      #${MODAL_ID} .ala-core-sheet {max-height:88vh;border:1px solid rgba(var(--color-text),0.1);font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
+      #${MODAL_ID} .ala-core-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);align-items:flex-start;}
+      #${MODAL_ID} .ala-dbf-title-wrap {display:flex;flex-direction:column;gap:4px;min-width:0;}
+      #${MODAL_ID} .ala-dbf-subtitle {font-size:1.2rem;color:rgb(var(--color-text-lighter));line-height:1.35;}
+      #${MODAL_ID} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
+      #${MODAL_ID} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
+      #${MODAL_ID} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
+      #${MODAL_ID} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
+      #${MODAL_ID} .ala-core-body {padding:18px 22px;}
+      #${MODAL_ID} .ala-core-body::-webkit-scrollbar {width:8px;}
+      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
+      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
+      #${MODAL_ID} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+      #${MODAL_ID} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
+      #${MODAL_ID} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
+      #${MODAL_ID} .ala-dbf-mode-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;}
+      #${MODAL_ID} .ala-dbf-mode-card {display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:8px;width:100%;padding:16px 18px;border-radius:8px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.1);color:rgb(var(--color-text));cursor:pointer;transition:border-color 0.15s,transform 0.12s,background 0.15s;}
+      #${MODAL_ID} .ala-dbf-mode-card:hover {border-color:rgb(var(--color-blue));background:rgba(var(--color-blue),0.06);transform:translateY(-1px);}
+      #${MODAL_ID} .ala-dbf-mode-card-head {display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;flex-wrap:wrap;}
+      #${MODAL_ID} .ala-dbf-mode-card-title {font-size:1.4rem;font-weight:700;color:rgb(var(--color-text));}
+      #${MODAL_ID} .ala-dbf-mode-badge {padding:2px 8px;border-radius:999px;font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;background:rgba(var(--color-blue),0.16);color:rgb(var(--color-blue));}
+      #${MODAL_ID} .ala-dbf-mode-desc {font-size:1.2rem;line-height:1.45;color:rgb(var(--color-text-lighter));font-weight:400;}
+      #${MODAL_ID} .ala-dbf-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;}
+      #${MODAL_ID} .ala-dbf-stat-card {padding:10px 14px;border-radius:7px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.07);display:flex;flex-direction:column;gap:3px;min-width:0;}
+      #${MODAL_ID} .ala-dbf-stat-label {font-size:1.1rem;text-transform:uppercase;letter-spacing:0.04em;color:rgb(var(--color-text-lighter));font-weight:600;}
+      #${MODAL_ID} .ala-dbf-stat-val {font-size:1.65rem;font-weight:700;font-variant-numeric:tabular-nums;}
+      #${MODAL_ID} .ala-dbf-stat-val.green {color:rgb(var(--color-green));}
+      #${MODAL_ID} .ala-dbf-stat-val.blue {color:rgb(var(--color-blue));}
+      #${MODAL_ID} .ala-dbf-toolbar {display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
+      #${MODAL_ID} .ala-dbf-search {flex:1;min-width:180px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(var(--color-text),0.14);background:rgb(var(--color-background));color:rgb(var(--color-text));font-size:1.25rem;outline:none;transition:border-color 0.15s;}
+      #${MODAL_ID} .ala-dbf-search:focus {border-color:rgb(var(--color-blue));}
+      #${MODAL_ID} .ala-dbf-section {margin-bottom:16px;border:1px solid rgba(var(--color-text),0.08);border-radius:8px;background:rgb(var(--color-background));overflow-x:hidden;}
+      #${MODAL_ID} .ala-dbf-section:last-child {margin-bottom:0;}
+      #${MODAL_ID} .ala-dbf-section-head {padding:10px 14px;background:rgba(var(--color-foreground),0.55);border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-weight:700;font-size:1.3rem;}
+      #${MODAL_ID} .ala-dbf-section-head.collapsible {cursor:pointer;user-select:none;}
+      #${MODAL_ID} .ala-dbf-section-head.collapsible:hover {background:rgba(var(--color-text),0.05);}
+      #${MODAL_ID} .ala-dbf-table-wrap {width:100%;overflow-x:hidden;}
+      #${MODAL_ID} table {width:100%;table-layout:fixed;border-collapse:collapse;font-size:1.25rem;}
+      #${MODAL_ID} thead th {background:rgb(var(--color-background));color:rgb(var(--color-text-lighter));font-size:1.1rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:9px 12px;border-bottom:1px solid rgba(var(--color-text),0.12);text-align:left;}
+      #${MODAL_ID} tbody td {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.06);vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;}
+      #${MODAL_ID} tbody tr:last-child td {border-bottom:none;}
+      #${MODAL_ID} tbody tr {transition:background 0.12s,opacity 0.12s;}
+      #${MODAL_ID} tbody tr:hover {background:rgba(var(--color-text),0.035);}
+      #${MODAL_ID} tbody tr.is-selected {background:rgba(var(--color-blue),0.055);}
+      #${MODAL_ID} tbody tr.is-unselected {opacity:0.72;}
+      #${MODAL_ID} input[type="checkbox"] {width:16px;height:16px;accent-color:rgb(var(--color-blue));cursor:pointer;vertical-align:middle;}
+      #${MODAL_ID} .ala-dbf-media-link {color:rgb(var(--color-text));text-decoration:none;font-weight:600;transition:color 0.12s;}
+      #${MODAL_ID} .ala-dbf-media-link:hover {color:rgb(var(--color-blue));text-decoration:underline;}
+      #${MODAL_ID} .ala-dbf-type-badge {display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:1rem;font-weight:700;letter-spacing:0.03em;background:rgba(var(--color-blue),0.15);color:rgb(var(--color-blue));vertical-align:middle;}
+      #${MODAL_ID} .ala-dbf-type-badge.manga {background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));}
+      #${MODAL_ID} .ala-dbf-date-diff {display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;font-variant-numeric:tabular-nums;}
+      #${MODAL_ID} .ala-dbf-old-date {color:rgb(var(--color-text-lighter));}
+      #${MODAL_ID} .ala-dbf-arrow {color:rgb(var(--color-text-lighter));font-size:1.1rem;}
+      #${MODAL_ID} .ala-dbf-new-date {display:inline-block;padding:2px 7px;border-radius:4px;background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));font-weight:700;}
+      #${MODAL_ID} .ala-dbf-new-date.assumed {background:rgba(235,168,52,0.16);color:rgb(235,168,52);}
+      #${MODAL_ID} .ala-dbf-source {margin-top:3px;font-size:1.1rem;color:rgb(var(--color-text-lighter));}
+      #${MODAL_ID} .ala-dbf-source.assumed {color:rgb(235,168,52);}
+      #${MODAL_ID} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
+      #${MODAL_ID} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
+      #${MODAL_ID} .ala-core-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);justify-content:space-between;gap:12px;flex-wrap:wrap;}
+      #${MODAL_ID} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
+      #${MODAL_ID} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
+      #${MODAL_ID} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
+      #${MODAL_ID} .ala-dbf-dot.paused {background:rgb(235,168,52);}
+      #${MODAL_ID} .ala-dbf-dot.done {background:rgb(var(--color-green));}
+      #${MODAL_ID} .ala-dbf-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
+      #${MODAL_ID} button.ala-dbf-btn {padding:7px 14px;border:1px solid transparent;border-radius:6px;cursor:pointer;font-size:1.25rem;font-weight:600;background:rgb(var(--color-blue));color:#fff;transition:filter 0.14s,background 0.14s,opacity 0.14s;}
+      #${MODAL_ID} button.ala-dbf-btn:hover:not(:disabled) {filter:brightness(1.08);}
+      #${MODAL_ID} button.ala-dbf-btn.secondary {background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
+      #${MODAL_ID} button.ala-dbf-btn.secondary:hover:not(:disabled) {background:rgba(var(--color-text),0.16);}
+      #${MODAL_ID} button.ala-dbf-btn.apply {background:rgb(var(--color-green));color:#fff;}
+      #${MODAL_ID} button.ala-dbf-btn.mini {padding:5px 10px;font-size:1.15rem;}
+      #${MODAL_ID} button:disabled {opacity:0.45;cursor:not-allowed;}
       @media (max-width:640px) {
-        #${MODAL_ID$1} {padding:10px;}
-        #${MODAL_ID$1} .ala-dbf-card {max-height:92vh;}
-        #${MODAL_ID$1} .ala-dbf-head {padding:12px 14px;}
-        #${MODAL_ID$1} .ala-dbf-body {padding:12px 14px;}
-        #${MODAL_ID$1} .ala-dbf-mode-grid {grid-template-columns:1fr;}
-        #${MODAL_ID$1} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
-        #${MODAL_ID$1} .ala-dbf-search {font-size:16px;}
-        #${MODAL_ID$1} .ala-dbf-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
-        #${MODAL_ID$1} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
-        #${MODAL_ID$1} .ala-dbf-actions[hidden] {display:none;}
-        #${MODAL_ID$1} .ala-dbf-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
-        #${MODAL_ID$1} table,#${MODAL_ID$1} tbody,#${MODAL_ID$1} tr,#${MODAL_ID$1} td {display:block;width:100%;}
-        #${MODAL_ID$1} thead {display:none;}
-        #${MODAL_ID$1} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
-        #${MODAL_ID$1} tbody tr:last-child {border-bottom:none;}
-        #${MODAL_ID$1} tbody td {padding:4px 0;border-bottom:none;}
-        #${MODAL_ID$1} tbody td.ala-dbf-check-cell {float:left;width:28px;padding-top:2px;}
-        #${MODAL_ID$1} tbody td.ala-dbf-title-cell {padding-left:28px;margin-bottom:4px;}
-        #${MODAL_ID$1} tbody td.ala-dbf-unresolved-title {margin-bottom:4px;}
-        #${MODAL_ID$1} tbody td[data-label] {display:flex;align-items:baseline;gap:8px;padding-left:28px;font-size:1.2rem;}
-        #${MODAL_ID$1} tbody td.ala-dbf-unresolved-meta[data-label] {padding-left:0;}
-        #${MODAL_ID$1} tbody td[data-label]::before {content:attr(data-label);flex-shrink:0;min-width:54px;font-size:1.1rem;font-weight:700;text-transform:uppercase;color:rgb(var(--color-text-lighter));}
+        #${MODAL_ID} {padding:10px;}
+        #${MODAL_ID} .ala-core-sheet {max-height:92vh;}
+        #${MODAL_ID} .ala-core-head {padding:12px 14px;}
+        #${MODAL_ID} .ala-core-body {padding:12px 14px;}
+        #${MODAL_ID} .ala-dbf-mode-grid {grid-template-columns:1fr;}
+        #${MODAL_ID} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
+        #${MODAL_ID} .ala-dbf-search {font-size:16px;}
+        #${MODAL_ID} .ala-core-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
+        #${MODAL_ID} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
+        #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
+        #${MODAL_ID} .ala-core-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
+        #${MODAL_ID} table,#${MODAL_ID} tbody,#${MODAL_ID} tr,#${MODAL_ID} td {display:block;width:100%;}
+        #${MODAL_ID} thead {display:none;}
+        #${MODAL_ID} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
+        #${MODAL_ID} tbody tr:last-child {border-bottom:none;}
+        #${MODAL_ID} tbody td {padding:4px 0;border-bottom:none;}
+        #${MODAL_ID} tbody td.ala-dbf-check-cell {float:left;width:28px;padding-top:2px;}
+        #${MODAL_ID} tbody td.ala-dbf-title-cell {padding-left:28px;margin-bottom:4px;}
+        #${MODAL_ID} tbody td.ala-dbf-unresolved-title {margin-bottom:4px;}
+        #${MODAL_ID} tbody td[data-label] {display:flex;align-items:baseline;gap:8px;padding-left:28px;font-size:1.2rem;}
+        #${MODAL_ID} tbody td.ala-dbf-unresolved-meta[data-label] {padding-left:0;}
+        #${MODAL_ID} tbody td[data-label]::before {content:attr(data-label);flex-shrink:0;min-width:54px;font-size:1.1rem;font-weight:700;text-transform:uppercase;color:rgb(var(--color-text-lighter));}
       }`);
 			async function resolveUserId() {
 				if (ctx.session.userId) return ctx.session.userId;
@@ -5769,15 +5875,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					activeScanAbort?.abort();
 					activeScanAbort = null;
 				});
-				document.getElementById(MODAL_ID$1)?.remove();
-				const overlay = document.createElement("div");
-				overlay.id = MODAL_ID$1;
-				const untrackOwnUi = ctx.ownUi(`#${MODAL_ID$1}`);
-				const closeModal = () => {
-					modalAbort.abort();
-					untrackOwnUi();
-					overlay.remove();
-				};
 				const renderIdleScreenHtml = () => {
 					const scopeSetting = ctx.get("dateBackfillScope");
 					const orderSetting = ctx.get("dateBackfillOrder");
@@ -5809,39 +5906,44 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
           </div>
         `;
 				};
-				overlay.innerHTML = `
-        <div class="ala-dbf-card" role="dialog" aria-modal="true" aria-label="Missing Date Backfill">
-          <div class="ala-dbf-head">
-            <div class="ala-dbf-title-wrap">
-              <div class="ala-dbf-title">Missing Date Backfill</div>
-              <div class="ala-dbf-subtitle">Recover missing start and completion dates from your AniList activity logs</div>
-            </div>
-            <button type="button" class="ala-dbf-close" data-act="close" title="Close">✕</button>
+				const modal = ctx.modal({
+					id: MODAL_ID,
+					title: "Missing Date Backfill",
+					maxWidth: "960px",
+					bodyHtml: renderIdleScreenHtml(),
+					footerHtml: `
+          <div class="ala-dbf-status">
+            <span class="ala-dbf-dot" data-role="dot"></span>
+            <span data-role="status">Ready to scan</span>
           </div>
-          <div class="ala-dbf-progress-track">
-            <div class="ala-dbf-progress-fill" data-role="progress"></div>
+          <div class="ala-dbf-actions" data-role="footer-actions" hidden>
+            <button type="button" class="ala-dbf-btn secondary" data-act="primary-action">Pause</button>
+            <button type="button" class="ala-dbf-btn apply" data-act="apply" disabled>Apply Selected (0)</button>
           </div>
-          <div class="ala-dbf-body" data-role="body">
-            ${renderIdleScreenHtml()}
-          </div>
-          <div class="ala-dbf-foot">
-            <div class="ala-dbf-status">
-              <span class="ala-dbf-dot" data-role="dot"></span>
-              <span data-role="status">Ready to scan</span>
-            </div>
-            <div class="ala-dbf-actions" data-role="footer-actions" hidden>
-              <button type="button" class="ala-dbf-btn secondary" data-act="primary-action">Pause</button>
-              <button type="button" class="ala-dbf-btn apply" data-act="apply" disabled>Apply Selected (0)</button>
-            </div>
-          </div>
-        </div>
-      `;
-				document.body.appendChild(overlay);
-				const bodyEl = overlay.querySelector("[data-role=\"body\"]");
-				const statusEl = overlay.querySelector("[data-role=\"status\"]");
-				const dotEl = overlay.querySelector("[data-role=\"dot\"]");
-				const progressEl = overlay.querySelector("[data-role=\"progress\"]");
-				const footerActionsEl = overlay.querySelector("[data-role=\"footer-actions\"]");
+        `,
+					onClose: () => modalAbort.abort()
+				});
+				const overlay = modal.backdrop;
+				const bodyEl = modal.body;
+				const statusEl = modal.footer.querySelector("[data-role=\"status\"]");
+				const dotEl = modal.footer.querySelector("[data-role=\"dot\"]");
+				const footerActionsEl = modal.footer.querySelector("[data-role=\"footer-actions\"]");
+				const h2 = modal.sheet.querySelector(".ala-core-head")?.querySelector("h2");
+				if (h2) {
+					const wrap = document.createElement("div");
+					wrap.className = "ala-dbf-title-wrap";
+					h2.parentNode?.insertBefore(wrap, h2);
+					wrap.appendChild(h2);
+					const sub = document.createElement("div");
+					sub.className = "ala-dbf-subtitle";
+					sub.textContent = "Recover missing start and completion dates from your AniList activity logs";
+					wrap.appendChild(sub);
+				}
+				const track = document.createElement("div");
+				track.className = "ala-dbf-progress-track";
+				track.innerHTML = "<div class=\"ala-dbf-progress-fill\" data-role=\"progress\"></div>";
+				modal.sheet.insertBefore(track, bodyEl);
+				const progressEl = track.querySelector("[data-role=\"progress\"]");
 				const primaryActionBtn = overlay.querySelector("[data-act=\"primary-action\"]");
 				const applyBtn = overlay.querySelector("[data-act=\"apply\"]");
 				let scanState = "idle";
@@ -6021,13 +6123,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				};
 				ctx.listen(overlay, "click", (ev) => {
 					const target = ev.target.closest("[data-act]");
-					if (!target) {
-						if (ev.target === overlay) closeModal();
-						return;
-					}
+					if (!target) return;
 					const act = target.dataset.act;
-					if (act === "close") closeModal();
-					else if (act === "scan-fast") runScan("TARGETED");
+					if (act === "scan-fast") runScan("TARGETED");
 					else if (act === "scan-full") runScan("FEED");
 					else if (act === "back-idle") {
 						if (scanState !== "scanning") resetToIdleScreen();
@@ -8310,7 +8408,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		title: "Keyframe Staff List Links",
 		help: "Add a button on staff and studio pages that opens the same person or studio on Keyframe Staff List.",
 		setup(ctx) {
-			const ID = "ala-keyframe-link";
 			const BASE = "https://keyframe-staff-list.com";
 			const LABEL = "Keyframe Staff List";
 			const SLOT = ".filters";
@@ -8318,11 +8415,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				staff: "person",
 				studio: "studio"
 			};
-			ctx.addStyle("ala-keyframe-style", `
-      #${ID}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
-      #${ID}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
-      #${ID}.ala-kf-plain:hover{background:rgb(var(--color-blue));color:#fff}
-      #${ID} .icon{flex:0 0 auto}`);
 			const copyScope = (from, to) => {
 				for (const at of Array.from(from.attributes)) if (at.name.startsWith("data-v-")) to.setAttribute(at.name, at.value);
 			};
@@ -8350,13 +8442,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			ctx.onRoute(/^\/(staff|studio)\/(\d+)(?:\/|$)/, (rc) => {
 				const kind = rc.match[1];
 				const id = rc.match[2];
-				rc.mount({
-					id: ID,
+				const link = rc.mount({
+					id: "link",
 					anchor: SLOT,
 					position: "afterbegin",
+					style: (sel) => `
+          ${sel}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
+          ${sel}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
+          ${sel}.ala-kf-plain:hover{background:rgb(var(--color-blue));color:#fff}
+          ${sel} .icon{flex:0 0 auto}`,
 					create: () => {
 						const a = document.createElement("a");
-						a.id = ID;
 						a.className = "ala-kf-plain";
 						a.href = `${BASE}/${PATHS[kind]}/${id}`;
 						a.target = "_blank";
@@ -8369,7 +8465,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						return a;
 					}
 				});
-				rc.onCleanup(ctx.onBodyMutation(() => skin(document.getElementById(ID))));
+				rc.onCleanup(ctx.onBodyMutation(() => skin(link.el())));
 			});
 		}
 	});
@@ -8508,9 +8604,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			help: "Log media info sidebar updates, progress steppers, and save requests."
 		},
 		setup(ctx) {
-			const ID = "ala-media-info";
+			const ID = ctx.getId("panel");
 			ctx.ownUi(`#${ID}`);
-			ctx.addStyle("ala-media-info-style", `
+			ctx.addStyle(`
       #${ID}{box-sizing:border-box;width:100%;max-width:100%;margin:0 0 12px;padding:14px 15px 15px;border-radius:3px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:1.3rem;line-height:1.4;overflow:hidden}
       #${ID} *{box-sizing:border-box}
       #${ID} :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
@@ -8585,7 +8681,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			let rerender = false;
 			let saving = false;
 			let routeAt = Date.now();
-			let timer = 0;
+			let cancelSchedule = null;
 			let retry = {
 				key: null,
 				at: 0,
@@ -8594,8 +8690,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const MAX_FAILURES = 3;
 			const panel = () => document.getElementById(ID);
 			const schedule = (ms = 300) => {
-				clearTimeout(timer);
-				timer = setTimeout(() => render(), ms);
+				cancelSchedule?.();
+				cancelSchedule = ctx.timeout(() => {
+					cancelSchedule = null;
+					render();
+				}, ms);
 			};
 			function renderConnect(key, reason = "none") {
 				const spot = findSpot();
@@ -8757,16 +8856,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					const limit = () => max !== null ? max : released;
 					let startScore = scoreInput.value.trim();
 					let startProgress = progressInput.value;
-					let savedTimer = 0;
-					let failedTimer = 0;
+					let cancelSavedTimer = null;
+					let cancelFailedTimer = null;
 					function clearSavedState() {
-						if (savedTimer) {
-							clearTimeout(savedTimer);
-							savedTimer = 0;
+						if (cancelSavedTimer) {
+							cancelSavedTimer();
+							cancelSavedTimer = null;
 						}
-						if (failedTimer) {
-							clearTimeout(failedTimer);
-							failedTimer = 0;
+						if (cancelFailedTimer) {
+							cancelFailedTimer();
+							cancelFailedTimer = null;
 						}
 						saveBtn.classList.remove("is-saved", "is-saving");
 						if (saveBtn.textContent === "Saved" || saveBtn.textContent === "Saving..." || saveBtn.textContent === "Failed") saveBtn.textContent = "Save";
@@ -8784,8 +8883,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							airedFill.style.width = released != null ? Math.min(100, released / total * 100) + "%" : "0%";
 						}
 						const isDirty = scoreInput.value.trim() !== startScore || progressInput.value !== startProgress;
-						if (savedTimer && isDirty) clearSavedState();
-						saveBtn.disabled = saving || Boolean(savedTimer) || !isDirty;
+						if (cancelSavedTimer && isDirty) clearSavedState();
+						saveBtn.disabled = saving || Boolean(cancelSavedTimer) || !isDirty;
 					}
 					saveBtn.addEventListener("click", async () => {
 						if (saving || saveBtn.disabled) return;
@@ -8809,8 +8908,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							saveBtn.classList.add("is-saved");
 							saveBtn.textContent = "Saved";
 							saveBtn.disabled = true;
-							savedTimer = setTimeout(() => {
-								savedTimer = 0;
+							cancelSavedTimer = ctx.timeout(() => {
+								cancelSavedTimer = null;
 								if (!box.isConnected) return;
 								saveBtn.classList.remove("is-saved");
 								saveBtn.textContent = "Save";
@@ -8820,8 +8919,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						} else if (res === false) {
 							saveBtn.textContent = "Failed";
 							saveBtn.disabled = false;
-							failedTimer = setTimeout(() => {
-								failedTimer = 0;
+							cancelFailedTimer = ctx.timeout(() => {
+								cancelFailedTimer = null;
 								if (box.isConnected && saveBtn.textContent === "Failed") {
 									saveBtn.textContent = "Save";
 									paint();
@@ -8874,8 +8973,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					}
 				}
 			}
-			ctx.listen(window, "load", () => schedule(500), { once: true });
-			ctx.ready(() => schedule(document.readyState === "complete" ? 500 : 1200));
 			ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
 				const kind = rc.match[1];
 				const r = {
@@ -8893,28 +8990,37 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					count: 0
 				};
 				panel()?.remove();
-				schedule(1200);
+				const scheduleRoute = (ms = 300) => {
+					cancelSchedule?.();
+					cancelSchedule = rc.timeout(() => {
+						cancelSchedule = null;
+						render();
+					}, ms);
+				};
+				scheduleRoute(document.readyState === "complete" ? 500 : 1200);
+				rc.listen(window, "load", () => scheduleRoute(500), { once: true });
+				rc.listen(window, "focus", () => {
+					if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
+				});
+				rc.onCleanup(ctx.onBodyMutation(() => {
+					if (rc.signal.aborted || currentRoute !== r || panel() || rendering || saving) return;
+					if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
+					scheduleRoute(500);
+				}));
 				return () => {
+					cancelSchedule?.();
+					cancelSchedule = null;
 					if (currentRoute === r) currentRoute = null;
 					gen++;
 					shown = null;
 					panel()?.remove();
 				};
 			});
-			ctx.onBodyMutation(() => {
-				const r = currentRoute;
-				if (!r || panel() || rendering || saving) return;
-				if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
-				schedule(500);
-			});
-			ctx.listen(window, "focus", () => {
-				if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
-			});
 			ctx.onCleanup(() => {
 				currentRoute = null;
 				gen++;
-				clearTimeout(timer);
-				timer = 0;
+				cancelSchedule?.();
+				cancelSchedule = null;
 				panel()?.remove();
 			});
 		}
@@ -10263,9 +10369,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			refreshing = false;
 		}
 	}
-	var ID = "ala-find-on-nyaa";
-	var EDIT_ID = "ala-edit-mal-id";
-	var STYLE_ID = "ala-nyaa-style";
 	defineModule({
 		id: "nyaa",
 		key: "nyaaEnabled",
@@ -10289,157 +10392,174 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}],
 		setup(ctx) {
 			const ICON = icon("external", 17);
-			ctx.addStyle(STYLE_ID, `#${ID},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}#${ID}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}#${ID}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`);
+			const LINK_ID = ctx.getId("find-on-nyaa");
+			const EDIT_ID = ctx.getId("edit-mal-id");
+			const H1_SEL = ".page-content .header .content > h1";
 			const nyaaUrl = (title) => {
 				const q = title.trim().replace(/[^a-zA-Z0-9]+/g, "+").replace(/^\++|\++$/g, "");
 				const frag = (ctx.get("nyaaProviders") || []).map(encodeURIComponent).join("&text=");
 				return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
 			};
-			let activeTimerCleanup = null;
-			let attachedAnchor = null;
+			let activeLink = null;
+			let activeEdit = null;
+			let activeRoute = null;
 			let quickEditFn = ctx.services.get("manualOverrides:quickEdit") ?? null;
-			const mountEditButton = (h1, route) => {
-				document.getElementById(EDIT_ID)?.remove();
-				if (!quickEditFn || !h1.isConnected) return;
-				const editBtn = document.createElement("a");
-				editBtn.id = EDIT_ID;
-				editBtn.href = "#";
-				editBtn.title = "Set or edit MyAnimeList mapping";
-				editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
-				editBtn.innerHTML = icon("edit", 16);
-				editBtn.addEventListener("click", (e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					quickEditFn?.(route.id, route.type);
+			const ensureEditMount = () => {
+				if (!activeRoute || !quickEditFn) return;
+				if ((activeEdit?.el())?.isConnected) return;
+				const h1 = activeLink?.el()?.parentElement || document.querySelector(H1_SEL);
+				if (!h1 || !h1.isConnected) return;
+				if (activeEdit) activeEdit.unmount();
+				const route = activeRoute;
+				activeEdit = ctx.mount({
+					id: EDIT_ID,
+					anchor: () => activeLink?.el()?.parentElement || document.querySelector(H1_SEL),
+					position: "beforeend",
+					match: () => !!quickEditFn && activeRoute === route,
+					create: () => {
+						const editBtn = document.createElement("a");
+						editBtn.href = "#";
+						editBtn.title = "Set or edit MyAnimeList mapping";
+						editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
+						editBtn.innerHTML = icon("edit", 16);
+						editBtn.addEventListener("click", (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							quickEditFn?.(route.id, route.type);
+						});
+						return editBtn;
+					}
 				});
-				h1.appendChild(editBtn);
 			};
 			ctx.services.onAvailable("manualOverrides:quickEdit", (impl) => {
 				quickEditFn = impl;
-				if (attachedAnchor) mountEditButton(attachedAnchor.h1, attachedAnchor.route);
+				ensureEditMount();
 				return () => {
 					if (quickEditFn === impl) quickEditFn = null;
-					document.getElementById(EDIT_ID)?.remove();
+					activeEdit?.unmount();
+					activeEdit = null;
 				};
 			});
 			ctx.events.on("manualOverrides:changed", (changedId) => {
-				const linkEl = document.getElementById(ID);
-				if (!linkEl || !attachedAnchor) return;
-				if (changedId && Number(changedId) !== attachedAnchor.route.id) return;
-				linkEl.title = isIgnored(attachedAnchor.route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
+				const linkEl = activeLink?.el();
+				if (!linkEl || !activeRoute) return;
+				if (changedId && Number(changedId) !== activeRoute.id) return;
+				linkEl.title = isIgnored(activeRoute.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
 			});
-			function attach(h1, route) {
-				activeTimerCleanup?.();
-				const a = document.createElement("a");
-				a.id = ID;
-				a.href = "#";
-				a.title = isIgnored(route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
-				a.setAttribute("aria-label", "Open on MAL; long-press to search Nyaa");
-				a.innerHTML = ICON;
-				const titleText = () => [...h1.childNodes].filter((n) => n !== a && n?.id !== EDIT_ID).map((n) => n.textContent).join("").trim();
-				const searchNyaa = () => openTab(nyaaUrl(titleText()));
-				ctx.api.media.get(route.id, route.type);
-				let timer = null;
-				let longResetTimer = null;
-				let longPressed = false;
-				let sx = 0;
-				let sy = 0;
-				const cancel = () => {
-					if (timer) clearTimeout(timer);
-					timer = null;
-				};
-				activeTimerCleanup = () => {
-					cancel();
-					if (longResetTimer) clearTimeout(longResetTimer);
-					longResetTimer = null;
-				};
-				a.addEventListener("touchstart", (e) => {
-					if (e.touches.length !== 1) return;
-					sx = e.touches[0].clientX;
-					sy = e.touches[0].clientY;
-					longPressed = false;
-					cancel();
-					timer = setTimeout(() => {
-						timer = null;
-						longPressed = true;
-						searchNyaa();
-						longResetTimer = setTimeout(() => {
-							longPressed = false;
-							longResetTimer = null;
-						}, 800);
-					}, 550);
-				}, { passive: true });
-				a.addEventListener("touchmove", (e) => {
-					if (timer === null || !e.touches.length) return;
-					if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
-				}, { passive: true });
-				a.addEventListener("touchend", cancel, { passive: true });
-				a.addEventListener("touchcancel", cancel, { passive: true });
-				a.addEventListener("contextmenu", (e) => {
-					if (longPressed) e.preventDefault();
-				});
-				a.addEventListener("click", async (e) => {
-					e.preventDefault();
-					if (longPressed) {
-						longPressed = false;
-						e.stopPropagation();
-						return;
-					}
-					const w = window.open("about:blank", "_blank");
-					const title = titleText();
-					const nyaa = nyaaUrl(title);
-					let target = nyaa;
-					if (!e.ctrlKey && !e.metaKey) {
-						if (isIgnored(route.id)) target = nyaa;
-						else {
-							const media = await ctx.api.media.get(route.id, route.type);
-							const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
-							if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
-							else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
-						}
-					}
-					if (w) {
-						w.opener = null;
-						w.location.href = target;
-					} else openTab(target);
-				});
-				h1.appendChild(a);
-				attachedAnchor = {
-					h1,
-					route
-				};
-				mountEditButton(h1, route);
-			}
-			ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, async (rc) => {
-				rc.onCleanup(() => {
-					activeTimerCleanup?.();
-					activeTimerCleanup = null;
-					attachedAnchor = null;
-					document.getElementById(ID)?.remove();
-					document.getElementById(EDIT_ID)?.remove();
-				});
+			ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
 				const kind = rc.match[1];
 				const route = {
 					kind,
 					type: kind.toUpperCase(),
 					id: Number(rc.match[2])
 				};
-				const ensureMounted = () => {
-					if (rc.signal.aborted || document.getElementById(ID)) return;
-					const h1 = document.querySelector(".page-content .header .content > h1");
-					if (h1) attach(h1, route);
+				activeRoute = route;
+				ctx.api.media.get(route.id, route.type);
+				let cancelTouchTimer = null;
+				let cancelResetTimer = null;
+				const clearTouchTimers = () => {
+					cancelTouchTimer?.();
+					cancelTouchTimer = null;
+					cancelResetTimer?.();
+					cancelResetTimer = null;
 				};
-				const h1 = await rc.waitForSelector(".page-content .header .content > h1", 8e3);
-				if (rc.signal.aborted || !h1) return;
-				if (!document.getElementById(ID)) attach(h1, route);
-				rc.onCleanup(ctx.onBodyMutation(ensureMounted));
+				const link = rc.mount({
+					id: LINK_ID,
+					anchor: H1_SEL,
+					position: "beforeend",
+					style: (sel) => `${sel},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}${sel}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}${sel}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`,
+					create: () => {
+						clearTouchTimers();
+						const a = document.createElement("a");
+						a.href = "#";
+						a.title = isIgnored(route.id) ? "Marked as AniList-Only (searches Nyaa)" : "Open on MAL (Ctrl/Cmd+click or long-press: search Nyaa)";
+						a.setAttribute("aria-label", "Open on MAL; long-press to search Nyaa");
+						a.innerHTML = ICON;
+						const titleText = () => {
+							const h1 = a.parentElement;
+							if (!h1) return "";
+							return [...h1.childNodes].filter((n) => n !== a && n?.id !== EDIT_ID).map((n) => n.textContent).join("").trim();
+						};
+						const searchNyaa = () => openTab(nyaaUrl(titleText()));
+						let longPressed = false;
+						let sx = 0;
+						let sy = 0;
+						const cancel = () => {
+							cancelTouchTimer?.();
+							cancelTouchTimer = null;
+						};
+						rc.listen(a, "touchstart", ((e) => {
+							if (e.touches.length !== 1) return;
+							sx = e.touches[0].clientX;
+							sy = e.touches[0].clientY;
+							longPressed = false;
+							cancel();
+							cancelTouchTimer = rc.timeout(() => {
+								cancelTouchTimer = null;
+								longPressed = true;
+								searchNyaa();
+								cancelResetTimer?.();
+								cancelResetTimer = rc.timeout(() => {
+									longPressed = false;
+									cancelResetTimer = null;
+								}, 800);
+							}, 550);
+						}), { passive: true });
+						rc.listen(a, "touchmove", ((e) => {
+							if (!cancelTouchTimer || !e.touches.length) return;
+							if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
+						}), { passive: true });
+						rc.listen(a, "touchend", cancel, { passive: true });
+						rc.listen(a, "touchcancel", cancel, { passive: true });
+						rc.listen(a, "contextmenu", (e) => {
+							if (longPressed) e.preventDefault();
+						});
+						rc.listen(a, "click", (ev) => {
+							const e = ev;
+							(async () => {
+								e.preventDefault();
+								if (longPressed) {
+									longPressed = false;
+									e.stopPropagation();
+									return;
+								}
+								const w = window.open("about:blank", "_blank");
+								const title = titleText();
+								const nyaa = nyaaUrl(title);
+								let target = nyaa;
+								if (!e.ctrlKey && !e.metaKey) {
+									if (isIgnored(route.id)) target = nyaa;
+									else {
+										const media = await ctx.api.media.get(route.id, route.type);
+										const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
+										if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
+										else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
+									}
+								}
+								if (w) {
+									w.opener = null;
+									w.location.href = target;
+								} else openTab(target);
+							})();
+						});
+						return a;
+					}
+				});
+				activeLink = link;
+				ensureEditMount();
+				rc.onCleanup(() => {
+					clearTouchTimers();
+					if (activeLink === link) activeLink = null;
+					if (activeRoute === route) activeRoute = null;
+					activeEdit?.unmount();
+					activeEdit = null;
+				});
 			});
 			ctx.onCleanup(() => {
-				activeTimerCleanup?.();
-				activeTimerCleanup = null;
-				attachedAnchor = null;
-				document.getElementById(ID)?.remove();
-				document.getElementById(EDIT_ID)?.remove();
+				activeEdit?.unmount();
+				activeEdit = null;
+				activeLink = null;
+				activeRoute = null;
 			});
 		}
 	});
@@ -11757,10 +11877,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		} else if (retryAt > 0 && Date.now() >= retryAt) syncStore.del("sync_retry_at");
 	}
 	var panelCtx = null;
-	var PANEL_CSS = `
-  #almal-panel{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
-  #almal-panel *{box-sizing:border-box}
-  #almal-panel :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
+	var routeOwner = null;
+	var panelId = () => panelCtx?.getId("panel") ?? "ala-sync-panel";
+	var buildPanelCss = (sel) => `
+  ${sel}{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
+  ${sel} *{box-sizing:border-box}
+  ${sel} :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
   .almal-head{display:flex;justify-content:center;margin-bottom:12px}
   .almal-flow{display:flex;align-items:center;gap:8px;min-width:0}
   .almal-arrow{flex:0 0 auto;color:rgb(var(--color-text-lighter));transition:color .2s,opacity .2s}
@@ -11830,18 +11952,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		manual: false,
 		showLogs: false
 	};
-	var progressTimer = 0;
+	var progressTimer = null;
 	function updateProgressUI(force = false) {
 		if (!force) {
-			if (!progressTimer) progressTimer = setTimeout(() => {
-				progressTimer = 0;
+			if (!progressTimer && panelCtx) progressTimer = panelCtx.timeout(() => {
+				progressTimer = null;
 				updateProgressUI(true);
 			}, 120);
 			return;
 		}
 		const fill = document.getElementById("almal-progress-fill");
 		const text = document.getElementById("almal-progress-text");
-		renderRateLimitWarning(document.getElementById("almal-panel"));
+		renderRateLimitWarning(document.getElementById(panelId()));
 		if (!fill || !text) return;
 		if (progress.phase === "fetching") {
 			fill.style.width = "100%";
@@ -11870,8 +11992,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			else panelEl.appendChild(warn);
 		}
 		warn.innerHTML = limited.map(([name, at]) => `<b>${name} API limit reached.</b> Requests resume in <b>${Math.ceil((Number(at) - now) / 1e3)}s</b>.`).join("<br>");
-		clearTimeout(panelEl._limitTimer);
-		panelEl._limitTimer = setTimeout(() => renderRateLimitWarning(panelEl), 1e3);
+		panelEl._limitCancel?.();
+		panelEl._limitCancel = panelCtx?.timeout(() => renderRateLimitWarning(panelEl), 1e3) ?? null;
 	}
 	var LOGOS = {
 		al: {
@@ -11894,7 +12016,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return `${Math.floor(s / 86400)} d ago`;
 	}
 	var timeEl = (sec) => `<time data-ts="${sec || 0}" title="${sec ? esc(new Date(sec * 1e3).toLocaleString()) : ""}">${ago(sec)}</time>`;
-	var refreshTimes = () => document.querySelectorAll("#almal-panel time[data-ts]").forEach((el) => {
+	var refreshTimes = () => document.getElementById(panelId())?.querySelectorAll("time[data-ts]").forEach((el) => {
 		el.textContent = ago(Number(el.dataset.ts));
 	});
 	function connItem(connected) {
@@ -11904,7 +12026,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return `<div class="almal-conn-item"><div class="almal-conn-row">${chip("mal", true)}<span class="almal-conn-name"><span>MyAnimeList</span>${status}</span></div>${connect}${manual}</div>`;
 	}
 	function renderPanel() {
-		const panelEl = document.getElementById("almal-panel");
+		const panelEl = document.getElementById(panelId());
 		if (!panelEl || !panelCtx) return;
 		const alOk = panelCtx.api.hasAuth();
 		const malOk = panelCtx.accounts.isConnected("mal");
@@ -11996,13 +12118,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	var lastMountTry = 0;
 	var retryCancel = null;
 	var selfLookup = false;
-	function listRouteOwner() {
-		const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
-		if (!m) return "";
+	function decodeOwner(raw) {
 		try {
-			return decodeURIComponent(m[1]);
+			return decodeURIComponent(raw);
 		} catch {
-			return m[1];
+			return raw;
 		}
 	}
 	function findPanelAnchor() {
@@ -12017,8 +12137,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return null;
 	}
 	function isOwnList() {
-		const owner = listRouteOwner();
-		if (!owner) return false;
+		let owner = routeOwner || "";
+		if (!owner) {
+			const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
+			if (!m) return false;
+			owner = decodeOwner(m[1]);
+		}
 		const me = panelCtx?.session.username || "";
 		if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
 			selfLookup = true;
@@ -12030,7 +12154,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	function mountPanel() {
 		retryCancel?.();
 		retryCancel = null;
-		if (!panelCtx || !onListRoute() || document.getElementById("almal-panel")) return;
+		const id = panelId();
+		if (!panelCtx || !onListRoute() || document.getElementById(id)) return;
 		lastMountTry = Date.now();
 		const anchor = findPanelAnchor();
 		if (!anchor) {
@@ -12038,7 +12163,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			return;
 		}
 		const panelEl = document.createElement("div");
-		panelEl.id = "almal-panel";
+		panelEl.id = id;
 		panelEl.addEventListener("click", (e) => {
 			const a = e.target?.closest("[data-act]");
 			if (a && a.dataset.act && ACTIONS[a.dataset.act]) ACTIONS[a.dataset.act]();
@@ -12053,8 +12178,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	var mountSoon = debounce(mountPanel, 250);
 	function initSyncPanel(ctx) {
 		panelCtx = ctx;
-		ctx.ownUi("#almal-panel");
-		ctx.addStyle("almal-style", PANEL_CSS);
+		const rootId = ctx.getId("panel");
+		const rootSel = `#${rootId}`;
+		ctx.ownUi(rootSel);
+		ctx.addStyle(() => buildPanelCss(rootSel));
 		ctx.onCleanup(setMalUiSink({
 			onLog: () => {
 				const hint = document.getElementById("almal-hint");
@@ -12071,155 +12198,132 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}));
 		ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
 		ctx.onCleanup(onStateChange(renderPanel));
-		ctx.accounts.watch("mal", () => renderPanel());
-		ctx.onBodyMutation(() => {
-			if (!document.getElementById("almal-panel") && Date.now() - lastMountTry > 1e3 && onListRoute()) mountSoon();
-		});
-		ctx.onNav(() => {
+		ctx.interval(() => maybeAutoSync(), 6e4);
+		ctx.ready(() => maybeAutoSync());
+		ctx.onRoute(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i, (rc) => {
+			routeOwner = decodeOwner(rc.match[1]);
 			retryCancel?.();
 			retryCancel = null;
-			document.getElementById("almal-panel")?.remove();
+			document.getElementById(rootId)?.remove();
 			mountSoon();
+			rc.onCleanup(ctx.accounts.watch("mal", () => renderPanel()));
+			rc.onCleanup(ctx.onBodyMutation(() => {
+				if (!rc.signal.aborted && !document.getElementById(rootId) && Date.now() - lastMountTry > 1e3 && onListRoute()) mountSoon();
+			}));
+			let lastAl = null;
+			let lastMal = null;
+			rc.interval(() => {
+				const al = ctx.api.hasAuth();
+				const mal = ctx.accounts.isConnected("mal");
+				if (al !== lastAl || mal !== lastMal) {
+					lastAl = al;
+					lastMal = mal;
+					renderPanel();
+				}
+				refreshTimes();
+				if (onListRoute() && !document.getElementById(rootId)) mountSoon();
+				maybeAutoSync();
+			}, 2e3);
+			return () => {
+				retryCancel?.();
+				retryCancel = null;
+				routeOwner = null;
+				document.getElementById(rootId)?.remove();
+			};
 		});
-		mountSoon();
-		let lastAl = null;
-		let lastMal = null;
-		ctx.interval(() => {
-			const al = ctx.api.hasAuth();
-			const mal = ctx.accounts.isConnected("mal");
-			if (al !== lastAl || mal !== lastMal) {
-				lastAl = al;
-				lastMal = mal;
-				renderPanel();
-			}
-			refreshTimes();
-			if (onListRoute() && !document.getElementById("almal-panel")) mountSoon();
-			maybeAutoSync();
-		}, 2e3);
 		ctx.onCleanup(() => {
 			retryCancel?.();
 			retryCancel = null;
+			progressTimer?.();
+			progressTimer = null;
+			routeOwner = null;
 			selfLookup = false;
-			document.getElementById("almal-panel")?.remove();
+			document.getElementById(rootId)?.remove();
 			if (panelCtx === ctx) panelCtx = null;
 		});
 	}
-	var MODAL_ID = "ala-overrides-backdrop";
-	var QUICK_MODAL_ID = "ala-quick-override-backdrop";
-	var OVERRIDES_CSS = `
-  #${MODAL_ID}, #${QUICK_MODAL_ID}{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
-  #${MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(680px,100%);height:100%;max-height:100%;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  #${QUICK_MODAL_ID} .ala-ov-sheet{display:flex;flex-direction:column;width:min(480px,100%);max-height:90vh;border-radius:10px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden}
-  .ala-ov-sheet *{box-sizing:border-box}
-  .ala-ov-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
-  .ala-ov-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
-  .ala-ov-head h2{margin:0;font-size:18px;font-weight:600}
-  .ala-ov-body {flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable;}
-  .ala-ov-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
+	var buildOverridesCss = (sel, fullHeight) => `
+  ${fullHeight ? `${sel} .ala-core-sheet{height:100%}` : ""}
+  ${sel} .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
+  ${sel} .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+  ${sel} .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
+  ${sel} .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
 
-  .ala-ov-tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid rgba(var(--color-text-lighter),.14);padding-bottom:10px}
-  .ala-ov-tab{padding:6px 14px;border:0;border-radius:4px;background:transparent;color:rgb(var(--color-text-lighter));font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
-  .ala-ov-tab:hover{color:rgb(var(--color-text));background:rgba(var(--color-text-lighter),.1)}
-  .ala-ov-tab.is-active{color:#fff;background:rgb(var(--color-blue))}
+  ${sel} .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
+  ${sel} .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
+  ${sel} .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
+  ${sel} .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
 
-  .ala-ov-form-box{padding:14px;border-radius:6px;background:rgb(var(--color-background));margin-bottom:18px}
-  .ala-ov-form-title{margin:0 0 10px;font-size:13px;font-weight:600;color:rgb(var(--color-blue))}
-  .ala-ov-field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
-  .ala-ov-field label{font-size:12px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-input{width:100%;height:36px;padding:0 10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font:inherit;font-size:13px}
-  .ala-ov-input:focus{outline:none;border-color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
+  ${sel} .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
 
-  .ala-ov-textarea{width:100%;height:320px;padding:10px;border:1px solid rgba(var(--color-text-lighter),.22);border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-family:monospace,Consolas,Courier,monospace;font-size:12px;line-height:1.4;resize:vertical;tab-size:2}
-  .ala-ov-textarea:focus{outline:none;border-color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
+  ${sel} .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
+  ${sel} .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
 
-  .ala-ov-status{padding:8px 12px;border-radius:4px;font-size:12px;margin-top:10px;display:none}
-  .ala-ov-status--success{background:rgba(var(--color-green,70,211,105),.15);color:rgb(var(--color-green,70,211,105));border:1px solid rgba(var(--color-green,70,211,105),.3)}
-  .ala-ov-status--error{background:rgba(var(--color-red,235,87,87),.15);color:rgb(var(--color-red,235,87,87));border:1px solid rgba(var(--color-red,235,87,87),.3)}
+  ${sel} .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
+  ${sel} .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
+  ${sel} .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  ${sel} .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  ${sel} .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
+  ${sel} .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
 
-  .ala-ov-preview{display:flex;gap:12px;align-items:center;padding:10px;margin:8px 0 12px;border-radius:6px;background:rgba(var(--color-text-lighter),.06);min-height:56px}
-  .ala-ov-preview-cover{width:40px;height:54px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2)}
-  .ala-ov-preview-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-preview-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ala-ov-preview-meta{display:flex;gap:6px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter))}
-  .ala-ov-badge{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))}
-  .ala-ov-badge--manga{background:rgba(235,108,133,.15);color:#eb6c85}
-  .ala-ov-badge--ignored{background:rgba(var(--color-text-lighter),.2);color:rgb(var(--color-text-lighter))}
+  ${sel} .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 
-  .ala-ov-form-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  ${sel} .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+  ${sel} .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
+  ${sel} .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  ${sel} .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
+  ${sel} .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
 
-  .ala-ov-controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
-  .ala-ov-search-input{flex:1 1 180px;height:32px;font-size:12px;padding:0 8px}
-  .ala-ov-filter-groups{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-  .ala-ov-filter-group{display:flex;gap:4px;align-items:center}
-  .ala-ov-filter-label{font-size:11px;color:rgb(var(--color-text-lighter));margin-right:2px}
+  ${sel} .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
+  ${sel} .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
 
-  .ala-ov-chip{padding:3px 8px;border:1px solid rgba(var(--color-text-lighter),.2);border-radius:12px;background:transparent;color:rgb(var(--color-text-lighter));font-size:11px;cursor:pointer;transition:all .15s}
-  .ala-ov-chip.is-active{background:rgba(var(--color-blue),.2);border-color:rgb(var(--color-blue));color:rgb(var(--color-blue));font-weight:600}
+  ${sel} .ala-ov-list{display:grid;gap:8px;min-width:0;}
+  ${sel} .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
+  ${sel} .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
+  ${sel} .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
+  ${sel} .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+  ${sel} .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
+  ${sel} .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
+  ${sel} .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
+  ${sel} .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
+  ${sel} .ala-ov-item-meta a:hover{text-decoration:underline}
+  ${sel} .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
 
-  .ala-ov-list{display:grid;gap:8px;min-width:0;}
-  .ala-ov-item{display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:rgb(var(--color-background));transition:background .15s;min-width:0;max-width:100%;}
-  .ala-ov-item:hover{background:rgba(var(--color-text-lighter),.08)}
-  .ala-ov-item-cover{width:36px;height:48px;border-radius:3px;object-fit:cover;background:rgba(var(--color-text-lighter),.2);flex-shrink:0}
-  .ala-ov-item-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-  .ala-ov-item-title{display:block;width:100%;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
-  .ala-ov-item-title:hover{color:rgb(var(--color-blue))}
-  .ala-ov-item-meta{display:flex;gap:8px;align-items:center;font-size:11px;color:rgb(var(--color-text-lighter));flex-wrap:wrap}
-  .ala-ov-item-meta a{color:rgb(var(--color-blue));text-decoration:none}
-  .ala-ov-item-meta a:hover{text-decoration:underline}
-  .ala-ov-item-actions{display:flex;gap:6px;align-items:center;flex-shrink:0}
+  ${sel} .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
 
-  .ala-ov-empty{padding:24px 10px;text-align:center;color:rgb(var(--color-text-lighter));font-size:13px}
-
-  .ala-ov-audit-section{margin-bottom:20px}
-  .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
+  ${sel} .ala-ov-audit-section{margin-bottom:20px}
+  ${sel} .ala-ov-audit-title{font-size:13px;font-weight:600;color:rgb(var(--color-blue));margin:0 0 8px}
 
   @media (max-width:700px){
-    #${MODAL_ID}{align-items:flex-end;padding:0}
-    #${MODAL_ID} .ala-ov-sheet{width:100%;height:92vh;height:92dvh;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    #${QUICK_MODAL_ID}{align-items:flex-end;padding:0}
-    #${QUICK_MODAL_ID} .ala-ov-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel}{align-items:flex-end;padding:0}
+    ${sel} .ala-core-sheet{width:100%;${fullHeight ? "height:92vh;height:92dvh;" : ""}max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel} .ala-core-head{padding:14px 16px}
+    ${sel} .ala-core-body{padding:12px 16px}
+    ${sel} .ala-core-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
+    ${sel} .ala-core-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
 
-    .ala-ov-head{padding:14px 16px}
-    .ala-ov-body{padding:12px 16px}
-    .ala-ov-foot{padding:10px 16px calc(10px + env(safe-area-inset-bottom, 0px))}
-    .ala-ov-foot .ala-btn{width:100%;min-height:42px;justify-content:center}
+    ${sel} .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
+    ${sel} .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
 
-    .ala-ov-form-actions{flex-direction:column;gap:8px;width:100%}
-    .ala-ov-form-actions .ala-btn{width:100%;min-height:42px;margin-left:0!important;justify-content:center;text-align:center}
+    ${sel} .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
+    ${sel} .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
+    ${sel} .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
+    ${sel} .ala-ov-filter-group{width:100%;flex-wrap:wrap}
 
-    .ala-ov-controls{flex-direction:column;align-items:stretch;gap:8px}
-    .ala-ov-search-input{width:100%;flex:none;height:36px;font-size:14px}
-    .ala-ov-filter-groups{width:100%;flex-direction:column;align-items:flex-start;gap:6px}
-    .ala-ov-filter-group{width:100%;flex-wrap:wrap}
-
-    .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
-    .ala-ov-item-cover{width:36px;height:48px}
-    .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
-    .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
-    .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
-    .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
+    ${sel} .ala-ov-item{flex-wrap:wrap;align-items:flex-start;gap:8px 10px;padding:10px}
+    ${sel} .ala-ov-item-cover{width:36px;height:48px}
+    ${sel} .ala-ov-item-info{flex:1 1 calc(100% - 48px);min-width:0}
+    ${sel} .ala-ov-item-actions{width:100%;display:flex;gap:8px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(var(--color-text-lighter),.1)}
+    ${sel} .ala-ov-item-actions .ala-btn{flex:1 1 0;min-height:36px;justify-content:center;text-align:center;font-size:13px}
+    ${sel} .ala-ov-item-actions .ala-icon-btn{flex:0 0 36px;height:36px}
   }
   `;
-	var modalAddStyle = null;
-	function configureOverridesModalStyle(addStyleFn) {
-		modalAddStyle = addStyleFn;
-		return () => {
-			if (modalAddStyle === addStyleFn) modalAddStyle = null;
-		};
-	}
-	function ensureOverridesStyle(addStyleFn) {
-		const inject = addStyleFn || modalAddStyle;
-		if (inject) {
-			inject("ala-overrides-style", OVERRIDES_CSS);
-			return;
-		}
-		if (typeof document !== "undefined" && !document.getElementById("ala-overrides-style")) {
-			const s = document.createElement("style");
-			s.id = "ala-overrides-style";
-			s.textContent = OVERRIDES_CSS;
-			(document.head || document.documentElement).appendChild(s);
-		}
-	}
 	function extractAlId(raw) {
 		const str = String(raw || "").trim();
 		const match = str.match(/(?:anime|manga)\/(\d+)/i) || str.match(/^(\d+)$/);
@@ -12272,46 +12376,34 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 		}
 	}
-	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", addStyleFn, onUpdated, api = syncApi) {
-		ensureOverridesStyle(addStyleFn);
-		const existing = document.getElementById(QUICK_MODAL_ID);
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = QUICK_MODAL_ID;
+	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", ctx, onUpdated) {
+		const api = ctx.api ?? syncApi;
 		const existingOverride = getManualOverrides()[String(mediaId)];
-		backdrop.innerHTML = `
-    <div class="ala-ov-sheet ala-ov-quick-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-qo-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-qo-modal-title">Set MAL Mapping</h2>
-        <button class="ala-icon-btn ala-qo-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div id="ala-qo-preview" class="ala-ov-preview">
-          <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
-        </div>
-
-        <div class="ala-ov-field">
-          <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
-          <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-        </div>
-
-        <div class="ala-ov-form-actions">
-          <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
-          <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
-          ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
-        </div>
+		const modal = ctx.modal({
+			id: "quick-override",
+			title: "Set MAL Mapping",
+			maxWidth: "480px",
+			bodyHtml: `
+      <div id="ala-qo-preview" class="ala-ov-preview">
+        <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
       </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-qo-close" type="button">Cancel</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const close = () => backdrop.remove();
-		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
+
+      <div class="ala-ov-field">
+        <label for="ala-qo-mal-input">Custom MyAnimeList ID or URL</label>
+        <input type="text" id="ala-qo-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
+      </div>
+
+      <div class="ala-ov-form-actions">
+        <button type="button" class="ala-btn ala-btn--primary" id="ala-qo-btn-save">Save Override</button>
+        <button type="button" class="ala-btn" id="ala-qo-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only</button>
+        ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
+      </div>
+    `,
+			footerHtml: `<button class="ala-btn ala-qo-close" type="button">Cancel</button>`
 		});
+		ctx.addStyle("quick-override", () => buildOverridesCss(`#${modal.backdrop.id}`, false));
+		const { backdrop, close } = modal;
+		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
 		const previewBox = backdrop.querySelector("#ala-qo-preview");
 		const malInput = backdrop.querySelector("#ala-qo-mal-input");
 		const saveBtn = backdrop.querySelector("#ala-qo-btn-save");
@@ -12384,12 +12476,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	function openOverridesModal(ec) {
 		const api = ec.api ?? syncApi;
-		ensureOverridesStyle(ec.addStyle);
-		const existing = document.getElementById(MODAL_ID);
-		if (existing) existing.remove();
 		const staging = typeof ec?.onApply === "function";
 		const initCheck = staging ? validateOverrides(ec.value) : null;
 		let draftOverrides = staging ? JSON.parse(JSON.stringify(initCheck?.valid && initCheck.overrides ? initCheck.overrides : {})) : {};
+		let cancelLookup = null;
+		let cancelSearch = null;
+		let cancelUnmatchedSearch = null;
+		let cancelOrphansSearch = null;
+		let cancelCopyTimer = null;
 		const readOverrides = () => staging ? draftOverrides : getManualOverrides();
 		const writeOverrides = (next) => {
 			if (staging) draftOverrides = next;
@@ -12430,147 +12524,133 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				count: Object.keys(check.overrides).length
 			};
 		};
-		if (!staging) refreshStaleOverrides().then(() => {
-			if (document.getElementById(MODAL_ID)) renderList();
-		});
-		const backdrop = document.createElement("div");
-		backdrop.id = MODAL_ID;
-		backdrop.innerHTML = `
-    <div class="ala-ov-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-ov-modal-title">
-      <header class="ala-ov-head">
-        <h2 id="ala-ov-modal-title">Manual Mappings & Sync Audit</h2>
-        <button class="ala-icon-btn ala-ov-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-ov-body">
-        <div class="ala-ov-tabs">
-          <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
-          <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
-          <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
-        </div>
+		const modal = ec.modal({
+			id: "overrides",
+			title: "Manual Mappings & Sync Audit",
+			maxWidth: "680px",
+			bodyHtml: `
+      <div class="ala-ov-tabs">
+        <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
+        <button class="ala-ov-tab" data-tab="audit" type="button">Sync Audit</button>
+        <button class="ala-ov-tab" data-tab="json" type="button">Import / Export</button>
+      </div>
 
-        <div id="ala-ov-view-overrides">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
-            <div class="ala-ov-field">
-              <label for="ala-ov-al-input">AniList Media ID or URL</label>
-              <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
-            </div>
-
-            <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
-
-            <div class="ala-ov-field">
-              <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
-              <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
-            </div>
-
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
-            </div>
+      <div id="ala-ov-view-overrides">
+        <div class="ala-ov-form-box">
+          <h3 class="ala-ov-form-title" id="ala-ov-form-heading">Add or Edit Override</h3>
+          <div class="ala-ov-field">
+            <label for="ala-ov-al-input">AniList Media ID or URL</label>
+            <input type="text" id="ala-ov-al-input" class="ala-ov-input" placeholder="e.g. 16498 or https://anilist.co/anime/16498" autocomplete="off">
           </div>
 
-          <div class="ala-ov-controls">
-            <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
-            <div class="ala-ov-filter-groups">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Status:</span>
-                <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
-                <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
-              </div>
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
-                <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
-              </div>
-            </div>
+          <div id="ala-ov-preview" class="ala-ov-preview" style="display:none"></div>
+
+          <div class="ala-ov-field">
+            <label for="ala-ov-mal-input">Custom MyAnimeList ID or URL</label>
+            <input type="text" id="ala-ov-mal-input" class="ala-ov-input" placeholder="e.g. 16498 or https://myanimelist.net/anime/16498" autocomplete="off">
           </div>
 
-          <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
-          <div id="ala-ov-list" class="ala-ov-list"></div>
-        </div>
-
-        <div id="ala-ov-view-audit" style="display:none">
-          <div class="ala-ov-audit-section">
-            <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
-            <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
-              <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
-          </div>
-
-          <div class="ala-ov-audit-section" style="margin-top:24px">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
-              <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
-            </div>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
-            <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
-              <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
-              <div class="ala-ov-filter-group">
-                <span class="ala-ov-filter-label">Type:</span>
-                <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
-                <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
-                <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
-              </div>
-            </div>
-            <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
+          <div class="ala-ov-form-actions">
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-save">Save Override</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-ignore" title="Prevent this entry from ever syncing to MAL without warnings">Mark as AniList-Only (Ignore)</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-clear" style="margin-left:auto">Clear</button>
           </div>
         </div>
 
-        <div id="ala-ov-view-json" style="display:none">
-          <div class="ala-ov-form-box">
-            <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
-            <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
-              View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
-            </p>
-            <div class="ala-ov-field">
-              <label for="ala-ov-json-textarea">Configuration JSON</label>
-              <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
+        <div class="ala-ov-controls">
+          <input type="text" id="ala-ov-search" class="ala-ov-input ala-ov-search-input" placeholder="Search overrides by title or ID..." autocomplete="off">
+          <div class="ala-ov-filter-groups">
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Status:</span>
+              <button class="ala-ov-chip is-active" data-status-filter="all" type="button">All</button>
+              <button class="ala-ov-chip" data-status-filter="overrides" type="button">Overrides</button>
+              <button class="ala-ov-chip" data-status-filter="ignored" type="button">AniList-Only</button>
             </div>
-            <div id="ala-ov-json-status" class="ala-ov-status"></div>
-            <div class="ala-ov-form-actions">
-              <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
-              <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Type:</span>
+              <button class="ala-ov-chip is-active" data-type-filter="all" type="button">All</button>
+              <button class="ala-ov-chip" data-type-filter="anime" type="button">Anime</button>
+              <button class="ala-ov-chip" data-type-filter="manga" type="button">Manga</button>
             </div>
+          </div>
+        </div>
+
+        <div style="font-size:12px;font-weight:600;color:rgb(var(--color-text-lighter));margin:0 0 8px" id="ala-ov-count">Configured Entries</div>
+        <div id="ala-ov-list" class="ala-ov-list"></div>
+      </div>
+
+      <div id="ala-ov-view-audit" style="display:none">
+        <div class="ala-ov-audit-section">
+          <h3 class="ala-ov-audit-title">Unmatched AniList Entries</h3>
+          <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">These entries could not be automatically matched to a MAL ID during sync.</p>
+          <div class="ala-ov-controls" id="ala-ov-unmatched-controls" style="display:none">
+            <input type="text" id="ala-ov-unmatched-search" class="ala-ov-input ala-ov-search-input" placeholder="Search unmatched by title or ID..." autocomplete="off">
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Type:</span>
+              <button class="ala-ov-chip is-active" data-unmatched-type="all" type="button">All</button>
+              <button class="ala-ov-chip" data-unmatched-type="anime" type="button">Anime</button>
+              <button class="ala-ov-chip" data-unmatched-type="manga" type="button">Manga</button>
+            </div>
+          </div>
+          <div id="ala-ov-audit-unmatched" class="ala-ov-list"></div>
+        </div>
+
+        <div class="ala-ov-audit-section" style="margin-top:24px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <h3 class="ala-ov-audit-title" style="margin:0">Orphaned MyAnimeList Entries</h3>
+            <button type="button" class="ala-btn ala-btn--sm" id="ala-ov-btn-scan-orphans">Scan MAL</button>
+          </div>
+          <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">Entries that exist on your MyAnimeList account but are absent from your AniList library.</p>
+          <div class="ala-ov-controls" id="ala-ov-orphans-controls" style="display:none">
+            <input type="text" id="ala-ov-orphans-search" class="ala-ov-input ala-ov-search-input" placeholder="Search orphans by title or ID..." autocomplete="off">
+            <div class="ala-ov-filter-group">
+              <span class="ala-ov-filter-label">Type:</span>
+              <button class="ala-ov-chip is-active" data-orphans-type="all" type="button">All</button>
+              <button class="ala-ov-chip" data-orphans-type="anime" type="button">Anime</button>
+              <button class="ala-ov-chip" data-orphans-type="manga" type="button">Manga</button>
+            </div>
+          </div>
+          <div id="ala-ov-audit-orphans" class="ala-ov-list"></div>
+        </div>
+      </div>
+
+      <div id="ala-ov-view-json" style="display:none">
+        <div class="ala-ov-form-box">
+          <h3 class="ala-ov-form-title">Raw JSON Overrides</h3>
+          <p style="font-size:12px;color:rgb(var(--color-text-lighter));margin:0 0 10px">
+            View, copy, or batch edit your manual AniList-to-MAL mappings and ignored entries in JSON format.
+          </p>
+          <div class="ala-ov-field">
+            <label for="ala-ov-json-textarea">Configuration JSON</label>
+            <textarea id="ala-ov-json-textarea" class="ala-ov-textarea" spellcheck="false" placeholder="{}"></textarea>
+          </div>
+          <div id="ala-ov-json-status" class="ala-ov-status"></div>
+          <div class="ala-ov-form-actions">
+            <button type="button" class="ala-btn ala-btn--primary" id="ala-ov-btn-json-save">Save & Replace</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-json-merge" title="Merge imported entries into current overrides">Merge with Current</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-json-copy">Copy to Clipboard</button>
+            <button type="button" class="ala-btn" id="ala-ov-btn-json-reset" style="margin-left:auto">Reset</button>
           </div>
         </div>
       </div>
-      <footer class="ala-ov-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				close();
+    `,
+			footerHtml: `<button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>`,
+			onClose: () => {
+				cancelLookup?.();
+				cancelSearch?.();
+				cancelUnmatchedSearch?.();
+				cancelOrphansSearch?.();
+				cancelCopyTimer?.();
 			}
-		};
-		const close = () => {
-			unlistenKey();
-			backdrop.remove();
-		};
-		const unlistenKey = ec.listen(document, "keydown", onKey, true);
-		backdrop.querySelectorAll(".ala-ov-close").forEach((btn) => btn.addEventListener("click", close));
+		});
+		ec.addStyle("overrides", () => buildOverridesCss(`#${modal.backdrop.id}`, true));
+		const { backdrop, close } = modal;
+		if (!staging) refreshStaleOverrides().then(() => {
+			if (backdrop.isConnected) renderList();
+		});
 		backdrop.querySelector("#ala-ov-btn-done")?.addEventListener("click", () => {
 			if (staging) ec.onApply(draftOverrides);
 			close();
-		});
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
 		});
 		const tabs = backdrop.querySelectorAll(".ala-ov-tab");
 		const viewOverrides = backdrop.querySelector("#ala-ov-view-overrides");
@@ -12624,7 +12704,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
     `;
 			if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
 		};
-		let lookupTimer = 0;
 		const doLookup = async (id) => {
 			if (!id) {
 				activePreview = null;
@@ -12681,8 +12760,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 		};
 		alInput.addEventListener("input", () => {
-			clearTimeout(lookupTimer);
-			lookupTimer = setTimeout(() => {
+			cancelLookup?.();
+			cancelLookup = ec.timeout(() => {
+				cancelLookup = null;
 				const id = extractAlId(alInput.value);
 				doLookup(id);
 			}, 300);
@@ -12691,7 +12771,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const ignoreBtn = backdrop.querySelector("#ala-ov-btn-ignore");
 		const clearBtn = backdrop.querySelector("#ala-ov-btn-clear");
 		const clearForm = () => {
-			clearTimeout(lookupTimer);
+			cancelLookup?.();
+			cancelLookup = null;
 			alInput.value = "";
 			malInput.value = "";
 			activePreview = null;
@@ -12731,7 +12812,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							updatedAt: Date.now()
 						};
 						writeOverrides(current);
-						if (document.getElementById(MODAL_ID)) renderList();
+						if (backdrop.isConnected) renderList();
 					}
 				}
 			}).catch(() => {});
@@ -12766,7 +12847,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							updatedAt: Date.now()
 						};
 						writeOverrides(current);
-						if (document.getElementById(MODAL_ID)) renderList();
+						if (backdrop.isConnected) renderList();
 					}
 				}
 			}).catch(() => {});
@@ -12785,10 +12866,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				renderList();
 			});
 		});
-		let searchTimer = 0;
 		searchInput?.addEventListener("input", () => {
-			clearTimeout(searchTimer);
-			searchTimer = setTimeout(() => {
+			cancelSearch?.();
+			cancelSearch = ec.timeout(() => {
+				cancelSearch = null;
 				searchQuery = searchInput.value.trim();
 				renderList();
 			}, 150);
@@ -12865,10 +12946,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				renderUnmatchedList();
 			});
 		});
-		let unmatchedSearchTimer = 0;
 		unmatchedSearchInput?.addEventListener("input", () => {
-			clearTimeout(unmatchedSearchTimer);
-			unmatchedSearchTimer = setTimeout(() => {
+			cancelUnmatchedSearch?.();
+			cancelUnmatchedSearch = ec.timeout(() => {
+				cancelUnmatchedSearch = null;
 				unmatchedSearchQuery = unmatchedSearchInput.value.trim();
 				renderUnmatchedList();
 			}, 150);
@@ -12970,10 +13051,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				renderOrphansList();
 			});
 		});
-		let orphansSearchTimer = 0;
 		orphansSearchInput?.addEventListener("input", () => {
-			clearTimeout(orphansSearchTimer);
-			orphansSearchTimer = setTimeout(() => {
+			cancelOrphansSearch?.();
+			cancelOrphansSearch = ec.timeout(() => {
+				cancelOrphansSearch = null;
 				orphansSearchQuery = orphansSearchInput.value.trim();
 				renderOrphansList();
 			}, 150);
@@ -13111,7 +13192,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				await navigator.clipboard.writeText(jsonTextarea.value);
 				const prev = jsonCopyBtn.textContent;
 				jsonCopyBtn.textContent = "Copied!";
-				setTimeout(() => {
+				cancelCopyTimer?.();
+				cancelCopyTimer = ec.timeout(() => {
+					cancelCopyTimer = null;
 					jsonCopyBtn.textContent = prev;
 				}, 1500);
 			} catch (_) {
@@ -13119,7 +13202,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				document.execCommand("copy");
 				const prev = jsonCopyBtn.textContent;
 				jsonCopyBtn.textContent = "Copied!";
-				setTimeout(() => {
+				cancelCopyTimer?.();
+				cancelCopyTimer = ec.timeout(() => {
+					cancelCopyTimer = null;
 					jsonCopyBtn.textContent = prev;
 				}, 1500);
 			}
@@ -13479,8 +13564,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (!m.settings.has("manualOverridesEnabled") && Object.keys(getManualOverrides()).length > 0) m.settings.set(MANUAL_OVERRIDES_ENABLED_KEY, true);
 		},
 		setup(ctx) {
-			ctx.onCleanup(configureOverridesModalStyle(ctx.addStyle));
-			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx.addStyle, () => ctx.events.emit("manualOverrides:changed", mediaId), ctx.api));
+			ctx.services.provide("quickEdit", (mediaId, mediaType = "ANIME") => openQuickOverrideModal(mediaId, mediaType, ctx, () => ctx.events.emit("manualOverrides:changed", mediaId)));
 		}
 	});
 	defineModule({
@@ -13707,80 +13791,72 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			tiers: validated
 		};
 	}
-	var TIER_MODAL_CSS = `
-  #ala-tier-editor-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(3px);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px}
-  .ala-tier-editor-sheet{width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;background:rgb(var(--color-foreground));color:rgb(var(--color-text));border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden}
-  .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
-  .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
-  .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
-  .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
-  .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
-  .ala-tier-table input[type=text],.ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
-  .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
-  .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
-  .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-  .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
-  .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
-  .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
+	var buildTierModalCss = (sel) => `
+  ${sel} .ala-tier-desc{font-size:13px;color:rgb(var(--color-text-lighter));margin:0 0 14px;line-height:1.4}
+  ${sel} .ala-tier-table-wrap{overflow-x:auto;max-height:48vh;overflow-y:auto;border:1px solid rgba(var(--color-text-lighter),.15);border-radius:8px;padding:4px}
+  ${sel} .ala-tier-table{width:100%;border-collapse:collapse;font-size:13px}
+  ${sel} .ala-tier-table th{text-align:left;padding:8px 6px;color:rgb(var(--color-text-lighter));font-weight:600;border-bottom:1px solid rgba(var(--color-text-lighter),.15)}
+  ${sel} .ala-tier-table td{padding:6px;vertical-align:middle;border-bottom:1px solid rgba(var(--color-text-lighter),.08)}
+  ${sel} .ala-tier-table input[type=text],${sel} .ala-tier-table input[type=number]{height:34px;padding:0 8px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));font:inherit;font-size:13px;box-sizing:border-box}
+  ${sel} .ala-tier-table input[type=color]{width:36px;height:34px;padding:1px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:transparent;cursor:pointer}
+  ${sel} .ala-tier-del-btn{padding:0 8px;height:32px;min-width:32px;display:inline-flex;align-items:center;justify-content:center}
+  ${sel} .ala-tier-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  ${sel} .ala-tier-json-area{width:100%;height:100px;font-family:monospace;font-size:12px;border-radius:6px;border:1px solid rgba(var(--color-text-lighter),.2);background:rgb(var(--color-background));color:rgb(var(--color-text));padding:8px;box-sizing:border-box;resize:vertical}
+  ${sel} .ala-tier-status{margin-left:auto;font-size:13px;color:rgb(var(--color-green,76,175,80))}
+  ${sel} .ala-tier-status.is-error{color:rgb(var(--color-red,224,85,85))}
+  ${sel} .ala-core-foot{justify-content:flex-start}
   @media (max-width:720px){
-    #ala-tier-editor-backdrop{align-items:flex-end;padding:0}
-    .ala-tier-editor-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
-    .ala-tier-table-wrap{max-height:45vh}
-    .ala-tier-table th,.ala-tier-table td{padding:4px}
+    ${sel}{align-items:flex-end;padding:0}
+    ${sel} .ala-core-sheet{width:100%;max-height:92vh;max-height:92dvh;border-radius:14px 14px 0 0}
+    ${sel} .ala-tier-table-wrap{max-height:45vh}
+    ${sel} .ala-tier-table th,${sel} .ala-tier-table td{padding:4px}
   }
 `;
 	function openTierEditor(ctx) {
-		ctx.addStyle("ala-tier-modal-style", TIER_MODAL_CSS);
 		const checkInit = validateTiers(ctx.value);
 		const tiers = checkInit.valid && checkInit.tiers ? checkInit.tiers : JSON.parse(JSON.stringify(DEFAULT_TIERS));
-		const existing = document.getElementById("ala-tier-editor-backdrop");
-		if (existing) existing.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = "ala-tier-editor-backdrop";
-		backdrop.innerHTML = `
-    <div class="ala-sheet ala-tier-editor-sheet" role="dialog" aria-modal="true" aria-labelledby="ala-tier-modal-title">
-      <header class="ala-sheet-head">
-        <h2 id="ala-tier-modal-title">Customize Tier Labels</h2>
-        <button class="ala-icon-btn ala-tier-close" type="button" aria-label="Close">✕</button>
-      </header>
-      <div class="ala-sheet-body">
-        <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
-        <div class="ala-tier-table-wrap">
-          <table class="ala-tier-table">
-            <thead>
-              <tr>
-                <th style="width:75px">Label</th>
-                <th style="width:70px">Min</th>
-                <th style="width:70px">Max</th>
-                <th style="width:48px">Badge</th>
-                <th style="width:48px">Text</th>
-                <th style="width:75px">Preview</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="ala-tier-tbody"></tbody>
-          </table>
-        </div>
-        <div class="ala-tier-actions">
-          <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
-          <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
-        </div>
-        <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
-          <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
-          </div>
+		const modal = ctx.modal({
+			id: "tier-editor",
+			title: "Customize Tier Labels",
+			maxWidth: "640px",
+			bodyHtml: `
+      <p class="ala-tier-desc">Configure tier badges, score thresholds (0–100 scale), and colors. Tiers match in order from top to bottom.</p>
+      <div class="ala-tier-table-wrap">
+        <table class="ala-tier-table">
+          <thead>
+            <tr>
+              <th style="width:75px">Label</th>
+              <th style="width:70px">Min</th>
+              <th style="width:70px">Max</th>
+              <th style="width:48px">Badge</th>
+              <th style="width:48px">Text</th>
+              <th style="width:75px">Preview</th>
+              <th style="width:36px"></th>
+            </tr>
+          </thead>
+          <tbody id="ala-tier-tbody"></tbody>
+        </table>
+      </div>
+      <div class="ala-tier-actions">
+        <button type="button" class="ala-btn" id="ala-tier-btn-add">+ Add Tier</button>
+        <button type="button" class="ala-btn" id="ala-tier-btn-reset">Reset Defaults</button>
+        <button type="button" class="ala-btn" id="ala-tier-btn-toggle-json">Import / Export JSON</button>
+      </div>
+      <div id="ala-tier-json-wrap" style="display:none;margin-top:12px">
+        <textarea id="ala-tier-json-area" class="ala-tier-json-area" rows="6" spellcheck="false"></textarea>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button type="button" class="ala-btn" id="ala-tier-btn-apply-json">Apply JSON</button>
         </div>
       </div>
-      <footer class="ala-sheet-foot">
-        <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-        <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
-        <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-      </footer>
-    </div>
-  `;
-		document.body.appendChild(backdrop);
+    `,
+			footerHtml: `
+      <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
+      <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+      <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
+    `
+		});
+		ctx.addStyle("tier-modal", () => buildTierModalCss(`#${modal.backdrop.id}`));
+		const { backdrop, close } = modal;
 		const tbody = backdrop.querySelector("#ala-tier-tbody");
 		const status = backdrop.querySelector("#ala-tier-status");
 		const setModalStatus = (msg, isError = false) => {
@@ -13887,22 +13963,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
 			}
 		});
-		const closeModal = () => {
-			unlistenKey();
-			backdrop.remove();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
-				closeModal();
-			}
-		};
-		const unlistenKey = ctx.listen(document, "keydown", onKey, true);
-		backdrop.querySelector(".ala-tier-close")?.addEventListener("click", closeModal);
-		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", closeModal);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) closeModal();
-		});
+		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", close);
 		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
 			const check = validateTiers(getRowsData());
 			if (!check.valid || !check.tiers) {
@@ -13910,7 +13971,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return;
 			}
 			ctx.onApply(check.tiers);
-			closeModal();
+			close();
 		});
 		renderTable(tiers);
 	}
@@ -14013,7 +14074,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		],
 		migrate: migrateLegacyTierLabels,
 		setup(ctx) {
-			ctx.addStyle("ala-tier-labels-css", `
+			ctx.addStyle(`
       .ala-tier-badge {
         display: inline-block;
         font-weight: 700;
@@ -15620,7 +15681,25 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				const inputEl = panel.querySelector(`input[data-key="${key}"]`);
 				if (!inputEl) return;
 				const beforeBodyChildren = new Set(Array.from(document.body.children));
-				const trackedAddStyle = (styleId, css) => {
+				let edIdSeq = 0;
+				let edStyleSeq = 0;
+				let edModalSeq = 0;
+				const edGetId = (name) => {
+					const trimmed = name?.trim();
+					if (!trimmed) return `ala-editor-${key}-${++edIdSeq}`;
+					return trimmed.startsWith("ala-") ? trimmed : `ala-editor-${key}-${trimmed}`;
+				};
+				const trackedAddStyle = (idOrCss, maybeCss) => {
+					const isOneArg = maybeCss === void 0;
+					const css = isOneArg ? idOrCss : maybeCss;
+					let styleId;
+					if (isOneArg) styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
+					else {
+						const raw = String(idOrCss || "").trim();
+						if (!raw) styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
+						else if (raw.startsWith("ala-")) styleId = raw;
+						else styleId = `ala-editor-${key}-${raw}${raw.endsWith("-style") ? "" : "-style"}`;
+					}
 					const dispose = addStyle(styleId, css);
 					editorStyleDisposers.add(dispose);
 					return dispose;
@@ -15630,6 +15709,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					const dispose = () => target.removeEventListener(type, listener, options);
 					editorStyleDisposers.add(dispose);
 					return dispose;
+				};
+				const trackedTimeout = (fn, ms) => {
+					const timerId = setTimeout(fn, ms);
+					const dispose = () => clearTimeout(timerId);
+					editorStyleDisposers.add(dispose);
+					return dispose;
+				};
+				const trackedModal = (opts) => {
+					const modalId = edGetId(opts.id ?? `modal-${++edModalSeq}`);
+					const handle = createModal({
+						...opts,
+						id: modalId
+					});
+					editorStyleDisposers.add(handle.close);
+					return handle;
 				};
 				try {
 					r.editor({
@@ -15644,8 +15738,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							const plan = syncAll();
 							setStatus(`Updated. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply.`);
 						},
+						getId: edGetId,
 						addStyle: trackedAddStyle,
 						listen: trackedListen,
+						timeout: trackedTimeout,
+						modal: trackedModal,
 						api: host.api,
 						log: settingsLog
 					});

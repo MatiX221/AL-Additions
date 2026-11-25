@@ -1,7 +1,7 @@
 import { defineModule } from '../../core/registry';
 import { externalReleased } from '../../api/scrapers';
 import { tryOr, safe } from '../../utils/helpers';
-import type { MediaRoute } from '../../types';
+import type { CleanupFn, MediaRoute } from '../../types';
 
 defineModule({
   id: 'mediaInfo',
@@ -18,11 +18,9 @@ defineModule({
     help: 'Log media info sidebar updates, progress steppers, and save requests.'
   },
   setup(ctx) {
-    const ID = 'ala-media-info';
+    const ID = ctx.getId('panel');
     ctx.ownUi(`#${ID}`);
-    ctx.addStyle(
-      'ala-media-info-style',
-      `
+    ctx.addStyle(`
       #${ID}{box-sizing:border-box;width:100%;max-width:100%;margin:0 0 12px;padding:14px 15px 15px;border-radius:3px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:1.3rem;line-height:1.4;overflow:hidden}
       #${ID} *{box-sizing:border-box}
       #${ID} :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
@@ -92,13 +90,16 @@ defineModule({
     let rerender = false;
     let saving = false;
     let routeAt = Date.now();
-    let timer: ReturnType<typeof setTimeout> | 0 = 0;
+    let cancelSchedule: CleanupFn | null = null;
     let retry = { key: null as string | null, at: 0, count: 0 };
     const MAX_FAILURES = 3;
     const panel = (): HTMLElement | null => document.getElementById(ID);
     const schedule = (ms = 300): void => {
-      clearTimeout(timer);
-      timer = setTimeout(() => render(), ms);
+      cancelSchedule?.();
+      cancelSchedule = ctx.timeout(() => {
+        cancelSchedule = null;
+        render();
+      }, ms);
     };
 
     function renderConnect(key: string, reason: 'none' | 'rejected' = 'none'): void {
@@ -270,17 +271,17 @@ defineModule({
         const limit = (): number | null => (max !== null ? max : released);
         let startScore = scoreInput.value.trim();
         let startProgress = progressInput.value;
-        let savedTimer: ReturnType<typeof setTimeout> | 0 = 0;
-        let failedTimer: ReturnType<typeof setTimeout> | 0 = 0;
+        let cancelSavedTimer: CleanupFn | null = null;
+        let cancelFailedTimer: CleanupFn | null = null;
 
         function clearSavedState(): void {
-          if (savedTimer) {
-            clearTimeout(savedTimer);
-            savedTimer = 0;
+          if (cancelSavedTimer) {
+            cancelSavedTimer();
+            cancelSavedTimer = null;
           }
-          if (failedTimer) {
-            clearTimeout(failedTimer);
-            failedTimer = 0;
+          if (cancelFailedTimer) {
+            cancelFailedTimer();
+            cancelFailedTimer = null;
           }
           saveBtn.classList.remove('is-saved', 'is-saving');
           if (saveBtn.textContent === 'Saved' || saveBtn.textContent === 'Saving...' || saveBtn.textContent === 'Failed') {
@@ -303,10 +304,10 @@ defineModule({
             airedFill.style.width = released != null ? Math.min(100, (released / total) * 100) + '%' : '0%';
           }
           const isDirty = scoreInput.value.trim() !== startScore || progressInput.value !== startProgress;
-          if (savedTimer && isDirty) {
+          if (cancelSavedTimer && isDirty) {
             clearSavedState();
           }
-          saveBtn.disabled = saving || Boolean(savedTimer) || !isDirty;
+          saveBtn.disabled = saving || Boolean(cancelSavedTimer) || !isDirty;
         }
 
         saveBtn.addEventListener('click', async () => {
@@ -334,8 +335,8 @@ defineModule({
             saveBtn.classList.add('is-saved');
             saveBtn.textContent = 'Saved';
             saveBtn.disabled = true;
-            savedTimer = setTimeout(() => {
-              savedTimer = 0;
+            cancelSavedTimer = ctx.timeout(() => {
+              cancelSavedTimer = null;
               if (!box.isConnected) return;
               saveBtn.classList.remove('is-saved');
               saveBtn.textContent = 'Save';
@@ -345,8 +346,8 @@ defineModule({
           } else if (res === false) {
             saveBtn.textContent = 'Failed';
             saveBtn.disabled = false;
-            failedTimer = setTimeout(() => {
-              failedTimer = 0;
+            cancelFailedTimer = ctx.timeout(() => {
+              cancelFailedTimer = null;
               if (box.isConnected && saveBtn.textContent === 'Failed') {
                 saveBtn.textContent = 'Save';
                 paint();
@@ -408,8 +409,6 @@ defineModule({
       }
     }
 
-    ctx.listen(window, 'load', () => schedule(500), { once: true });
-    ctx.ready(() => schedule(document.readyState === 'complete' ? 500 : 1200));
     ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
       const kind = rc.match![1] as 'anime' | 'manga';
       const r: MediaRoute = {
@@ -423,28 +422,41 @@ defineModule({
       routeAt = Date.now();
       retry = { key: null, at: 0, count: 0 };
       panel()?.remove();
-      schedule(1200);
+
+      const scheduleRoute = (ms = 300) => {
+        cancelSchedule?.();
+        cancelSchedule = rc.timeout(() => {
+          cancelSchedule = null;
+          render();
+        }, ms);
+      };
+
+      scheduleRoute(document.readyState === 'complete' ? 500 : 1200);
+      rc.listen(window, 'load', () => scheduleRoute(500), { once: true });
+      rc.listen(window, 'focus', () => {
+        if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
+      });
+      rc.onCleanup(
+        ctx.onBodyMutation(() => {
+          if (rc.signal.aborted || currentRoute !== r || panel() || rendering || saving) return;
+          if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
+          scheduleRoute(500);
+        })
+      );
       return () => {
+        cancelSchedule?.();
+        cancelSchedule = null;
         if (currentRoute === r) currentRoute = null;
         gen++;
         shown = null;
         panel()?.remove();
       };
     });
-    ctx.onBodyMutation(() => {
-      const r = currentRoute;
-      if (!r || panel() || rendering || saving) return;
-      if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
-      schedule(500);
-    });
-    ctx.listen(window, 'focus', () => {
-      if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
-    });
     ctx.onCleanup(() => {
       currentRoute = null;
       gen++;
-      clearTimeout(timer);
-      timer = 0;
+      cancelSchedule?.();
+      cancelSchedule = null;
       panel()?.remove();
     });
   }

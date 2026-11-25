@@ -77,13 +77,11 @@ There is no shared route-parser or selector module. Each module keeps its own pa
 
 Calling `appendChild` directly is fragile on AniList. The sidebar often renders after the route changes, and a later Vue re-render can drop your node.
 
-`rc.mount(...)` handles this. It waits for the anchor to exist, inserts your element, re-inserts it if the page removes it, and removes it when the route changes or the module unloads. Pair it with `ctx.addStyle(...)`, which removes its `<style>` tag on unload:
+`rc.mount(...)` handles this. It waits for the anchor to exist, injects optional scoped CSS before paint, inserts your element, re-inserts it if the page removes it, and removes both when the route changes or the module unloads. You can also allocate automatic stylesheet ids with 1-arg `ctx.addStyle(...)` or element ids with `ctx.getId(...)`:
 
 ```ts
 import { defineModule } from '../../core/registry';
 
-const BADGE_ID = 'ala-media-id-badge';
-const STYLE_ID = 'ala-media-id-badge-style';
 const SIDEBAR_DATA = '.sidebar > .data';
 
 defineModule({
@@ -93,28 +91,26 @@ defineModule({
   title: 'Media ID Badge',
   help: 'Show the numeric AniList media ID in the sidebar on anime and manga pages.',
   setup(ctx) {
-    ctx.addStyle(
-      STYLE_ID,
-      `#${BADGE_ID} {
-        margin-bottom: 12px;
-        padding: 10px 14px;
-        border-radius: 3px;
-        background: rgb(var(--color-foreground));
-        color: rgb(var(--color-text));
-        font-size: 1.3rem;
-        font-weight: 600;
-      }`
-    );
+    const badgeId = ctx.getId('badge');
 
     ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
       const kind = rc.match![1];
       const id = rc.match![2];
 
       rc.mount({
-        id: BADGE_ID,
+        id: badgeId,
         anchor: SIDEBAR_DATA,
         position: 'beforebegin',
         ownUi: true,
+        style: (sel) => `${sel} {
+          margin-bottom: 12px;
+          padding: 10px 14px;
+          border-radius: 3px;
+          background: rgb(var(--color-foreground));
+          color: rgb(var(--color-text));
+          font-size: 1.3rem;
+          font-weight: 600;
+        }`,
         create: () => {
           const el = document.createElement('div');
           el.textContent = `${kind.toUpperCase()} #${id}`;
@@ -128,12 +124,12 @@ defineModule({
 
 Four things worth knowing here:
 
-- **Automatic cleanup:** `ctx.addStyle` and `rc.mount` both register cleanups, so disabling the module removes the badge and the `<style>` tag immediately.
+- **Automatic cleanup:** `rc.mount` registers cleanups for both the element and its `style`, so leaving the page or disabling the module removes the badge and its `<style>` tag immediately.
 - **Repeated `create()` calls:** the mount is re-checked after page mutations, so `create()` can run again if the page drops your element. Keep it cheap and free of side effects.
-- **`ownUi: true`:** tells the shared DOM observer to ignore mutations inside the badge, so updating your own UI never wakes your own `ctx.onBodyMutation` callbacks. It is opt-in and needs an `id`.
-- **Automatic `ala-` prefix:** ids passed to `ctx.addStyle(...)` and to `mount({ id })` get an `ala-` prefix unless they already start with it. The ids in this tutorial already do, so nothing changes, and the mount sets the element's id for you. If you passed `badge`, the element would really be `#ala-badge`, so always write CSS selectors against the final id. This keeps module ids from colliding with AniList's own.
+- **`ownUi: true`:** tells the shared DOM observer to ignore mutations inside the badge, so updating your own UI never wakes your own `ctx.onBodyMutation` callbacks. It is opt-in.
+- **Namespaced IDs:** `ctx.getId('badge')` resolves to `ala-mediaIdBadge-badge` (or pass `id: 'badge'` directly to `rc.mount`), and `mount` assigns that id on `el` and passes `#ala-mediaIdBadge-badge` to `style(sel)`. Never pass hardcoded `'ala-'`, `'daiya-'`, or `'almal-'` string literals to `addStyle` or `mount({ id })`.
 
-Full details are in [Mounting DOM Elements](./context-api.md#mounting-dom-elements), [Styles](./context-api.md#styles), and [Observer Exclusions](./context-api.md#observer-exclusions).
+Full details are in [Element IDs](./context-api.md#element-ids), [Mounting DOM Elements](./context-api.md#mounting-dom-elements), [Styles](./context-api.md#styles), and [Observer Exclusions](./context-api.md#observer-exclusions).
 
 ---
 
@@ -221,8 +217,6 @@ Putting every step together:
 ```ts
 import { defineModule } from '../../core/registry';
 
-const BADGE_ID = 'ala-media-id-badge';
-const STYLE_ID = 'ala-media-id-badge-style';
 const SIDEBAR_DATA = '.sidebar > .data';
 
 export function formatBadgeText(kind: string, id: number | string, format: string): string {
@@ -255,19 +249,6 @@ defineModule({
     help: 'Log route detection and badge mounting.'
   },
   setup(ctx) {
-    ctx.addStyle(
-      STYLE_ID,
-      `#${BADGE_ID} {
-        margin-bottom: 12px;
-        padding: 10px 14px;
-        border-radius: 3px;
-        background: rgb(var(--color-foreground));
-        color: rgb(var(--color-text));
-        font-size: 1.3rem;
-        font-weight: 600;
-      }`
-    );
-
     ctx.onRoute(/^\/(anime|manga)\/(\d+)(?:\/|$)/, (rc) => {
       const kind = rc.match![1];
       const id = rc.match![2];
@@ -275,10 +256,19 @@ defineModule({
       ctx.log.debug('Mounting badge for', kind, id, 'format:', format);
 
       rc.mount({
-        id: BADGE_ID,
+        id: 'badge',
         anchor: SIDEBAR_DATA,
         position: 'beforebegin',
         ownUi: true,
+        style: (sel) => `${sel} {
+          margin-bottom: 12px;
+          padding: 10px 14px;
+          border-radius: 3px;
+          background: rgb(var(--color-foreground));
+          color: rgb(var(--color-text));
+          font-size: 1.3rem;
+          font-weight: 600;
+        }`,
         create: () => {
           const el = document.createElement('div');
           el.textContent = formatBadgeText(kind, id, format);
@@ -325,11 +315,11 @@ describe('mediaIdBadge', () => {
     Settings.set('mediaIdBadgeFormat', 'short');
 
     await bootModuleForTest('mediaIdBadge');
-    expect(document.getElementById('ala-media-id-badge')?.textContent).toBe('#16498');
+    expect(document.getElementById('ala-mediaIdBadge-badge')?.textContent).toBe('#16498');
 
     Settings.set('mediaIdBadgeEnabled', false);
     createModuleHost().reload(['mediaIdBadge']);
-    expect(document.getElementById('ala-media-id-badge')).toBeNull();
+    expect(document.getElementById('ala-mediaIdBadge-badge')).toBeNull();
   });
 });
 ```

@@ -2,7 +2,7 @@
 
 This guide covers everything modules share besides `ctx` itself: the AniList session and API client, connected accounts, core logging, and the helper code under `src/utils/` and `src/api/`.
 
-Modules may import from `types.ts`, `utils/*`, `api/*`, and `core/registry.ts`. Anything that has a lifecycle-tracked version on `ctx` must be used through `ctx` instead, see [Enforced Conventions](./architecture.md#enforced-conventions).
+Modules may import from `types.ts`, `utils/*`, `api/*`, and `core/registry.ts`. Anything that has a lifecycle-tracked version on `ctx` (including `ctx.getId`, `ctx.addStyle`, `ctx.mount`, `ctx.modal`, and `ctx.log`) must be used through `ctx` instead, see [Enforced Conventions](./architecture.md#enforced-conventions). For example, `core/modal.ts` is internal kernel code wrapped by [ctx.modal](./context-api.md#modals) and `JsonEditorContext.modal`, not imported directly by modules.
 
 ---
 

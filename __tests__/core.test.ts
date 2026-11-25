@@ -450,17 +450,17 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
     settings.Settings.set('ctxSuiteEnabled', true);
     registry.startModules(false);
 
-    expect(document.getElementById('ala-ctx-test-mount')).not.toBeNull();
+    expect(document.getElementById('ala-ctxSuite-ctx-test-mount')).not.toBeNull();
 
     vi.useFakeTimers();
     try {
-      document.getElementById('ala-ctx-test-mount')!.remove();
-      expect(document.getElementById('ala-ctx-test-mount')).toBeNull();
+      document.getElementById('ala-ctxSuite-ctx-test-mount')!.remove();
+      expect(document.getElementById('ala-ctxSuite-ctx-test-mount')).toBeNull();
       const trigger = document.createElement('span');
       document.body.appendChild(trigger);
       await Promise.resolve();
       vi.advanceTimersByTime(60);
-      expect(document.getElementById('ala-ctx-test-mount')).not.toBeNull();
+      expect(document.getElementById('ala-ctxSuite-ctx-test-mount')).not.toBeNull();
       trigger.remove();
     } finally {
       vi.useRealTimers();
@@ -495,7 +495,7 @@ describe('Core Microkernel: FeatureContext & Runtime Utilities', () => {
 
     await expect(pendingReq).rejects.toThrow('Request aborted');
     expect(abortFn).toHaveBeenCalledTimes(1);
-    expect(document.getElementById('ala-ctx-test-mount')).toBeNull();
+    expect(document.getElementById('ala-ctxSuite-ctx-test-mount')).toBeNull();
 
     capturedCtx.storage.clear();
     expect(capturedCtx.storage.get('item', null)).toBeNull();
@@ -801,21 +801,21 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(document.getElementById('ala-find-on-nyaa')).not.toBeNull();
-    expect(document.getElementById('ala-edit-mal-id')).toBeNull();
+    expect(document.getElementById('ala-nyaa-find-on-nyaa')).not.toBeNull();
+    expect(document.getElementById('ala-nyaa-edit-mal-id')).toBeNull();
 
     settings.Settings.set('manualOverridesEnabled', true);
     registry.createModuleHost().reload(['manualOverrides']);
-    expect(document.getElementById('ala-edit-mal-id')).not.toBeNull();
+    expect(document.getElementById('ala-nyaa-edit-mal-id')).not.toBeNull();
 
-    const nyaaLink = document.getElementById('ala-find-on-nyaa') as HTMLAnchorElement;
+    const nyaaLink = document.getElementById('ala-nyaa-find-on-nyaa') as HTMLAnchorElement;
     malOverrides.setOverride(16498, { malId: 0, type: 'ANIME', title: 'AoT' });
     bus.EventBus.emit('manualOverrides:changed', 16498);
     expect(nyaaLink.title).toBe('Marked as AniList-Only (searches Nyaa)');
 
     settings.Settings.set('manualOverridesEnabled', false);
     registry.createModuleHost().reload(['manualOverrides']);
-    expect(document.getElementById('ala-edit-mal-id')).toBeNull();
+    expect(document.getElementById('ala-nyaa-edit-mal-id')).toBeNull();
   });
 
   it('enforces compile-time EventMap and ServiceMap key/payload contracts without runtime overhead', async () => {
@@ -1147,5 +1147,143 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     const unsubNone = bus.EventBus.onRetained('manualOverrides:changed', (id) => afterDisable.push(id));
     expect(afterDisable).toEqual([]);
     unsubNone();
+  });
+
+  it('provides ctx.getId, 1-arg/2-arg lazy addStyle with in-place updates, MountHandle with route-scoped style, and ctx.modal auto-cleanup', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const styles = await import('../src/core/styles');
+
+    let capturedCtx: any;
+    let routeMount!: any;
+    let modalCloses = 0;
+    let openModalHandle: any = null;
+    let styleTagExistedBeforeInsert = false;
+
+    document.body.innerHTML = '<div id="mount-root"></div>';
+    history.replaceState({}, '', '/anime/42');
+
+    registry.defineModule({
+      id: 'ergoMod',
+      key: 'ergoModEnabled',
+      title: 'Ergonomics Mod',
+      help: 'Test',
+      setup(ctx) {
+        capturedCtx = ctx;
+
+        expect(ctx.getId('panel')).toBe('ala-ergoMod-panel');
+        expect(ctx.getId('ala-ergoMod-panel')).toBe('ala-ergoMod-panel');
+        expect(ctx.getId()).toBe('ala-ergoMod-1');
+        expect(ctx.getId()).toBe('ala-ergoMod-2');
+
+        ctx.addStyle('body { opacity: 1; }');
+        ctx.addStyle('modal', () => '.m { color: red; }');
+        ctx.addStyle('modal', () => '.m { color: blue; }');
+        ctx.addStyle('card-style', '.c { color: green; }');
+
+        ctx.onRoute(/^\/anime\/\d+/, (rc) => {
+          rc.addStyle('.route-only { display: block; }');
+          routeMount = rc.mount({
+            anchor: '#mount-root',
+            position: 'beforeend',
+            ownUi: true,
+            style: (sel) => `${sel} { color: rgb(1, 2, 3); }`,
+            create: () => {
+              const div = document.createElement('div');
+              div.textContent = 'mounted';
+              return div;
+            }
+          });
+          styleTagExistedBeforeInsert = !!document.getElementById(`${routeMount.id}-style`);
+        });
+      }
+    });
+
+    const origInsert = Element.prototype.insertAdjacentElement;
+    const spyInsert = vi.spyOn(Element.prototype, 'insertAdjacentElement').mockImplementation(function (
+      this: Element,
+      pos: InsertPosition,
+      el: Element
+    ) {
+      styleTagExistedBeforeInsert = !!document.getElementById(`${el.id}-style`);
+      return origInsert.call(this, pos, el);
+    });
+
+    settings.Settings.set('ergoModEnabled', true);
+    try {
+      registry.startModules(false);
+    } finally {
+      spyInsert.mockRestore();
+    }
+
+    expect(document.getElementById('ala-ergoMod-style-1')?.textContent).toBe('body { opacity: 1; }');
+    expect(document.getElementById('ala-ergoMod-modal-style')?.textContent).toBe('.m { color: blue; }');
+    expect(document.getElementById('ala-ergoMod-card-style')?.textContent).toBe('.c { color: green; }');
+    expect(document.getElementById('ala-ergoMod-route-style-2')?.textContent).toBe('.route-only { display: block; }');
+
+    expect(routeMount.id).toBe('ala-ergoMod-mount-1');
+    expect(routeMount.selector).toBe('#ala-ergoMod-mount-1');
+    expect(routeMount.el()).not.toBeNull();
+    expect(styleTagExistedBeforeInsert).toBe(true);
+    expect(document.getElementById('ala-ergoMod-mount-1-style')?.textContent).toBe(
+      '#ala-ergoMod-mount-1 { color: rgb(1, 2, 3); }'
+    );
+
+    vi.useFakeTimers();
+    try {
+      routeMount.el()!.remove();
+      document.body.appendChild(document.createElement('span'));
+      await Promise.resolve();
+      vi.advanceTimersByTime(60);
+      expect(routeMount.el()).not.toBeNull();
+      expect(document.getElementById('ala-ergoMod-mount-1-style')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    history.pushState({}, '', '/home');
+    expect(routeMount.el()).toBeNull();
+    expect(document.getElementById('ala-ergoMod-mount-1-style')).toBeNull();
+    expect(document.getElementById('ala-ergoMod-route-style-2')).toBeNull();
+    expect(document.getElementById('ala-ergoMod-style-1')).not.toBeNull();
+
+    openModalHandle = capturedCtx.modal({
+      title: 'Test Modal',
+      bodyHtml: '<p>Hello</p>',
+      footerHtml: '<button type="button">OK</button>',
+      onClose: () => {
+        modalCloses++;
+      }
+    });
+    expect(openModalHandle.backdrop.id).toBe('ala-ergoMod-modal-1');
+    expect(document.getElementById('ala-ergoMod-modal-1')).not.toBeNull();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(modalCloses).toBe(1);
+    expect(document.getElementById('ala-ergoMod-modal-1')).toBeNull();
+
+    openModalHandle = capturedCtx.modal({
+      id: 'second',
+      title: 'Second Modal',
+      onClose: () => {
+        modalCloses++;
+      }
+    });
+    expect(document.getElementById('ala-ergoMod-second')).not.toBeNull();
+
+    registry.disposeFeature('ergoMod');
+    expect(modalCloses).toBe(2);
+    expect(document.getElementById('ala-ergoMod-second')).toBeNull();
+    expect(document.getElementById('ala-ergoMod-style-1')).toBeNull();
+    expect(document.getElementById('ala-ergoMod-modal-style')).toBeNull();
+    expect(document.getElementById('ala-ergoMod-card-style')).toBeNull();
+
+    const sClean = styles.addStyle('live-upd', '.a { color: red; }');
+    expect(document.getElementById('ala-live-upd')?.textContent).toBe('.a { color: red; }');
+    const sClean2 = styles.addStyle('ala-live-upd', () => '.a { color: green; }');
+    expect(document.getElementById('ala-live-upd')?.textContent).toBe('.a { color: green; }');
+    sClean();
+    expect(document.getElementById('ala-live-upd')).not.toBeNull();
+    sClean2();
+    expect(document.getElementById('ala-live-upd')).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { defineModule } from '../../core/registry';
 import { clean, debounce } from '../../utils/helpers';
+import type { CleanupFn } from '../../types';
 
 interface AiringCacheEntry {
   status: string | null;
@@ -39,9 +40,7 @@ defineModule({
     const QUERY =
       'query ($ids: [Int]) { Page(page: 1, perPage: 25) { media(id_in: $ids, type: ANIME) { id status nextAiringEpisode { episode airingAt timeUntilAiring } } } }';
 
-    ctx.addStyle(
-      'daiya-behind-dot-css',
-      `
+    ctx.addStyle(`
       .${CLASS}{background:${ORANGE}!important;background-color:${ORANGE}!important;box-shadow:0 0 5px rgba(255,152,0,.85)!important;opacity:1!important}
       .${CLASS}::before,.${CLASS}::after{background:${ORANGE}!important;background-color:${ORANGE}!important}`
     );
@@ -55,9 +54,10 @@ defineModule({
 
     const pending = new Set<string>();
     const active = new Set<string>();
-    const timers = new Map<string, ReturnType<typeof setTimeout>>();
+    const timers = new Map<string, CleanupFn>();
     const optimistic = new Map<string, { target: number; expiresAt: number }>();
     let running = 0;
+    let routeTimeout: ((fn: () => void, ms: number) => CleanupFn) | null = null;
 
     const onListPage = (): boolean => location.pathname.includes('/animelist');
     const idOf = (entry: Element): string | null =>
@@ -161,15 +161,15 @@ defineModule({
 
     function scheduleRefresh(id: string, at: number): void {
       const existing = timers.get(id);
-      if (existing) clearTimeout(existing);
+      if (existing) existing();
       timers.delete(id);
-      if (!Number.isFinite(at)) return;
-      const t = setTimeout(() => {
+      if (!routeTimeout || !Number.isFinite(at)) return;
+      const cancel = routeTimeout(() => {
         timers.delete(id);
         queueIDs([id]);
         repaint(new Set([id]));
       }, Math.min(Math.max(0, at - Date.now()), 2147483647));
-      timers.set(id, t);
+      timers.set(id, cancel);
     }
 
     async function updateBatch(ids: string[]): Promise<void> {
@@ -251,36 +251,6 @@ defineModule({
     };
     const refresh = debounce(scanAll, 100);
 
-    ctx.onBodyMutation((muts) => {
-      if (!onListPage()) return;
-      for (const m of muts) {
-        const t = (m.target.nodeType === 1 ? m.target : m.target.parentElement) as Element | null;
-        const own = t?.closest?.('.entry');
-        if (own) {
-          dirty.add(own);
-          mark();
-        }
-        for (const n of Array.from(m.addedNodes)) {
-          if (n.nodeType !== 1) continue;
-          const el = n as Element;
-          if (el.matches('.entry')) dirty.add(el);
-          else {
-            el.querySelectorAll('.entry').forEach((e) => dirty.add(e));
-            if (el.matches('.list-wrap, .section-name') || el.querySelector('.section-name')) fullScan = true;
-          }
-          mark();
-        }
-      }
-    });
-
-    ctx.onNav(() => {
-      if (onListPage()) {
-        fullScan = true;
-        mark();
-        refresh();
-      }
-    });
-
     const isIncrease = (el: Element | null): boolean => {
       for (let n: Element | null = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
         const label = `${n.getAttribute?.('aria-label') || ''} ${n.getAttribute?.('title') || ''}`
@@ -293,58 +263,104 @@ defineModule({
       return false;
     };
 
-    ctx.listen(
-      document,
-      'pointerdown',
-      (e) => {
-        if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
-        const entry = e.target.closest('.entry');
-        const dot = entry && releasingDot(entry);
-        if (!dot || !dot.classList.contains(CLASS)) return;
-        const id = idOf(entry);
-        const data = id && cache[id];
-        const watched = progressOf(entry);
-        if (
-          data &&
-          Number.isFinite(data.aired) &&
-          Number.isFinite(watched) &&
-          watched !== null &&
-          watched + 1 >= (data.aired as number)
-        ) {
-          optimistic.set(id, { target: watched + 1, expiresAt: Date.now() + OPTIMISTIC_TTL });
-          dot.classList.remove(CLASS);
-        }
-      },
-      true
-    );
+    ctx.onRoute(/^\/user\/[^/]+\/animelist(?:\/|$)/i, (rc) => {
+      routeTimeout = rc.timeout;
+      fullScan = false;
 
-    for (const type of ['click', 'input', 'change']) {
-      ctx.listen(
+      rc.onCleanup(
+        ctx.onBodyMutation((muts) => {
+          if (rc.signal.aborted) return;
+          for (const m of muts) {
+            const t = (m.target.nodeType === 1 ? m.target : m.target.parentElement) as Element | null;
+            const own = t?.closest?.('.entry');
+            if (own) {
+              dirty.add(own);
+              mark();
+            }
+            for (const n of Array.from(m.addedNodes)) {
+              if (n.nodeType !== 1) continue;
+              const el = n as Element;
+              if (el.matches('.entry')) dirty.add(el);
+              else {
+                el.querySelectorAll('.entry').forEach((e) => dirty.add(e));
+                if (el.matches('.list-wrap, .section-name') || el.querySelector('.section-name')) fullScan = true;
+              }
+              mark();
+            }
+          }
+        })
+      );
+
+      rc.listen(
         document,
-        type,
+        'pointerdown',
         (e) => {
-          if (e.target instanceof Element && e.target.closest('.entry')) refresh();
+          if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
+          const entry = e.target.closest('.entry');
+          const dot = entry && releasingDot(entry);
+          if (!dot || !dot.classList.contains(CLASS)) return;
+          const id = idOf(entry);
+          const data = id && cache[id];
+          const watched = progressOf(entry);
+          if (
+            data &&
+            Number.isFinite(data.aired) &&
+            Number.isFinite(watched) &&
+            watched !== null &&
+            watched + 1 >= (data.aired as number)
+          ) {
+            optimistic.set(id, { target: watched + 1, expiresAt: Date.now() + OPTIMISTIC_TTL });
+            dot.classList.remove(CLASS);
+          }
         },
         true
       );
-    }
-    ctx.listen(window, 'focus', refresh);
-    ctx.listen(document, 'visibilitychange', () => {
-      if (!document.hidden) refresh();
+
+      for (const type of ['click', 'input', 'change']) {
+        rc.listen(
+          document,
+          type,
+          (e) => {
+            if (e.target instanceof Element && e.target.closest('.entry')) refresh();
+          },
+          true
+        );
+      }
+      rc.listen(window, 'focus', refresh);
+      rc.listen(document, 'visibilitychange', () => {
+        if (!document.hidden) refresh();
+      });
+
+      rc.interval(scanAll, 60000);
+      const startList = () => {
+        if (rc.signal.aborted) return;
+        scanAll();
+        for (const [id, entry] of Object.entries(cache)) {
+          if (entry && Number.isFinite(entry.nextCheck) && Date.now() < entry.nextCheck) {
+            scheduleRefresh(id, entry.nextCheck);
+          }
+        }
+        rc.timeout(scanAll, 500);
+        rc.timeout(scanAll, 1500);
+      };
+      rc.onCleanup(ctx.ready(startList));
+
+      rc.onCleanup(() => {
+        if (routeTimeout === rc.timeout) routeTimeout = null;
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+        for (const cancel of timers.values()) cancel();
+        timers.clear();
+        dirty.clear();
+        fullScan = false;
+      });
     });
 
-    ctx.interval(scanAll, 60000);
-    ctx.ready(() => {
-      if (onListPage()) {
-        scanAll();
-        ctx.timeout(scanAll, 500);
-        ctx.timeout(scanAll, 1500);
-      }
-    });
     ctx.onCleanup(() => {
+      routeTimeout = null;
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
-      for (const t of timers.values()) clearTimeout(t);
+      for (const cancel of timers.values()) cancel();
       timers.clear();
       pending.clear();
       active.clear();
