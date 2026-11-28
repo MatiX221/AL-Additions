@@ -1,4 +1,8 @@
+import { esc } from '../../utils/helpers';
 import type { JsonEditorContext } from '../../types';
+
+const DEFAULT_ICON = 'https://www.google.com/s2/favicons?domain=youtube.com&sz=32';
+const VALID_ICON_SCHEME_RE = /^\s*https?:\/\//i;
 
 export interface SongProviderPreset {
   id: string;
@@ -114,13 +118,17 @@ export function validateAniSongsConfig(raw: unknown): {
     const id = String(p.id || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
     const name = String(p.name || '').trim();
     const url = String(p.url || '').trim();
-    const icon = String(p.icon || '').trim() || 'https://www.google.com/s2/favicons?domain=youtube.com&sz=32';
+    const rawIcon = p.icon != null ? String(p.icon).trim() : '';
 
     if (!id) return { valid: false, error: `Preset at index ${i} requires an ID.` };
     if (!name) return { valid: false, error: `Preset "${id}" requires a name.` };
     if (!url || !/^https?:\/\//i.test(url)) {
       return { valid: false, error: `Preset "${id}" has an invalid URL. Must start with http:// or https://.` };
     }
+    if (rawIcon && !VALID_ICON_SCHEME_RE.test(rawIcon)) {
+      return { valid: false, error: `Preset "${id}" has an invalid icon URL. Must start with http:// or https://.` };
+    }
+    const icon = rawIcon || DEFAULT_ICON;
     if (seenIds.has(id)) {
       return { valid: false, error: `Duplicate preset ID "${id}". Each preset ID must be unique.` };
     }
@@ -364,13 +372,16 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
     `,
     footerHtml: `
       <button class="ala-btn ala-btn--primary" id="ala-as-btn-done" type="button">Apply &amp; Save</button>
-      <button class="ala-btn ala-as-close" type="button">Cancel</button>
-    `
+      <button class="ala-btn" type="button" data-ala-close>Cancel</button>
+    `,
+    style: buildAniSongsModalCss
   });
-  ctx.addStyle('anisongs-modal', () => buildAniSongsModalCss(`#${modal.backdrop.id}`));
   const { backdrop, close } = modal;
 
-  backdrop.querySelectorAll('.ala-as-close').forEach((btn) => btn.addEventListener('click', close));
+  const onClick = (selector: string, fn: EventListener) => {
+    const el = backdrop.querySelector(selector);
+    if (el) modal.listen(el, 'click', fn);
+  };
 
   const tabs = backdrop.querySelectorAll<HTMLButtonElement>('.ala-as-tab');
   const viewPresets = backdrop.querySelector('#ala-as-view-presets') as HTMLElement;
@@ -379,7 +390,7 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
   const jsonStatus = backdrop.querySelector('#ala-as-json-status') as HTMLElement;
 
   tabs.forEach((t) => {
-    t.addEventListener('click', () => {
+    modal.listen(t, 'click', () => {
       tabs.forEach((o) => o.classList.toggle('is-active', o === t));
       const isJson = t.dataset.tab === 'json';
       viewPresets.style.display = isJson ? 'none' : 'block';
@@ -397,10 +408,13 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
   const formHeading = backdrop.querySelector('#ala-as-form-heading') as HTMLElement;
   const savePresetBtn = backdrop.querySelector('#ala-as-btn-save-preset') as HTMLButtonElement;
   const cancelPresetBtn = backdrop.querySelector('#ala-as-btn-cancel-preset') as HTMLButtonElement;
+  const activeList = backdrop.querySelector('#ala-as-active-list') as HTMLElement;
+  const availableChips = backdrop.querySelector('#ala-as-available-chips') as HTMLElement;
+  const presetList = backdrop.querySelector('#ala-as-preset-list') as HTMLElement;
   let editingPresetId: string | null = null;
 
   backdrop.querySelectorAll<HTMLSpanElement>('.ala-as-var-tag').forEach((chip) => {
-    chip.addEventListener('click', () => {
+    modal.listen(chip, 'click', () => {
       const tag = chip.dataset.var || '';
       urlInput.value += tag;
       urlInput.focus();
@@ -416,17 +430,33 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
     iconInput.value = '';
     urlInput.value = '';
   };
-  cancelPresetBtn.addEventListener('click', resetForm);
+  modal.listen(cancelPresetBtn, 'click', resetForm);
 
-  savePresetBtn.addEventListener('click', () => {
+  modal.listen(savePresetBtn, 'click', async () => {
+    if (savePresetBtn.disabled) return;
     const name = nameInput.value.trim();
     const url = urlInput.value.trim();
-    const icon =
-      iconInput.value.trim() ||
-      `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.replace(/^https?:\/\//i, '').split('/')[0])}&sz=32`;
+    const rawIcon = iconInput.value.trim();
 
-    if (!name) return alert('Please enter a preset name.');
-    if (!url || !/^https?:\/\//i.test(url)) return alert('Please enter a valid URL template starting with http:// or https://.');
+    const showFormError = async (msg: string) => {
+      savePresetBtn.disabled = true;
+      try {
+        await ctx.alert(msg);
+      } finally {
+        if (!modal.signal.aborted) savePresetBtn.disabled = false;
+      }
+    };
+
+    if (!name) return void (await showFormError('Please enter a preset name.'));
+    if (!url || !/^https?:\/\//i.test(url)) {
+      return void (await showFormError('Please enter a valid URL template starting with http:// or https://.'));
+    }
+    if (rawIcon && !VALID_ICON_SCHEME_RE.test(rawIcon)) {
+      return void (await showFormError('Please enter a valid icon URL starting with http:// or https://.'));
+    }
+    const icon =
+      rawIcon ||
+      `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.replace(/^https?:\/\//i, '').split('/')[0])}&sz=32`;
 
     if (editingPresetId) {
       const idx = stateConfig.presets.findIndex((p) => p.id === editingPresetId);
@@ -434,7 +464,13 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
         stateConfig.presets[idx] = { ...stateConfig.presets[idx], name, icon, url };
       }
     } else {
-      const id = name.toLowerCase().replace(/[^a-z0-9_-]/g, '_') + '_' + Math.floor(Math.random() * 1000);
+      const base = name.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'preset';
+      let id = `${base}_${Math.floor(Math.random() * 1000)}`;
+      const candidateBase = id;
+      let suffix = 1;
+      while (stateConfig.presets.some((p) => p.id === id)) {
+        id = `${candidateBase}_${suffix++}`;
+      }
       stateConfig.presets.push({ id, name, icon, url });
       stateConfig.active.push(id);
     }
@@ -444,10 +480,6 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
   });
 
   function renderUI() {
-    const activeList = backdrop.querySelector('#ala-as-active-list') as HTMLElement;
-    const availableChips = backdrop.querySelector('#ala-as-available-chips') as HTMLElement;
-    const presetList = backdrop.querySelector('#ala-as-preset-list') as HTMLElement;
-
     const presetMap = new Map<string, SongProviderPreset>();
     stateConfig.presets.forEach((p) => presetMap.set(p.id, p));
 
@@ -464,16 +496,16 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
           const isBottom = idx === totalActive - 1;
 
           return `
-          <div class="ala-as-item" data-id="${p.id}">
-            <img class="ala-as-item-icon" src="${p.icon}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=youtube.com&sz=32'">
+          <div class="ala-as-item" data-id="${esc(p.id)}">
+            <img class="ala-as-item-icon" src="${esc(p.icon)}" alt="">
             <div class="ala-as-item-info">
-              <span class="ala-as-item-name">${p.name}</span>
-              <span class="ala-as-item-url">${p.url}</span>
+              <span class="ala-as-item-name">${esc(p.name)}</span>
+              <span class="ala-as-item-url">${esc(p.url)}</span>
             </div>
             <div class="ala-as-item-actions">
               <button type="button" class="ala-btn ala-btn--sm ala-as-act-up" data-idx="${idx}" ${isTop ? 'disabled' : ''} title="Move Up">▲</button>
               <button type="button" class="ala-btn ala-btn--sm ala-as-act-down" data-idx="${idx}" ${isBottom ? 'disabled' : ''} title="Move Down">▼</button>
-              <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-as-act-remove" data-id="${p.id}" title="Remove from active">✕</button>
+              <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-as-act-remove" data-id="${esc(p.id)}" title="Remove from active">✕</button>
             </div>
           </div>
         `;
@@ -489,9 +521,9 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
       availableChips.innerHTML = inactivePresets
         .map(
           (p) => `
-          <button type="button" class="ala-as-chip ala-as-chip-activate" data-id="${p.id}">
-            <img style="width:14px;height:14px;object-fit:contain" src="${p.icon}" alt="">
-            <span>+ ${p.name}</span>
+          <button type="button" class="ala-as-chip ala-as-chip-activate" data-id="${esc(p.id)}">
+            <img style="width:14px;height:14px;object-fit:contain" src="${esc(p.icon)}" alt="">
+            <span>+ ${esc(p.name)}</span>
           </button>
         `
         )
@@ -502,122 +534,185 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
       .map((p) => {
         const isActive = activeSet.has(p.id);
         return `
-        <div class="ala-as-item" data-id="${p.id}">
-          <img class="ala-as-item-icon" src="${p.icon}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=youtube.com&sz=32'">
+        <div class="ala-as-item" data-id="${esc(p.id)}">
+          <img class="ala-as-item-icon" src="${esc(p.icon)}" alt="">
           <div class="ala-as-item-info">
             <span class="ala-as-item-name">
-              ${p.name}
+              ${esc(p.name)}
               ${isActive ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))">Active</span>` : ''}
             </span>
-            <span class="ala-as-item-url">${p.url}</span>
+            <span class="ala-as-item-url">${esc(p.url)}</span>
           </div>
           <div class="ala-as-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-as-btn-edit-preset" data-id="${p.id}">Edit</button>
-            <button type="button" class="ala-icon-btn ala-as-btn-del-preset" data-id="${p.id}" title="Delete preset">✕</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-as-btn-edit-preset" data-id="${esc(p.id)}">Edit</button>
+            <button type="button" class="ala-icon-btn ala-as-btn-del-preset" data-id="${esc(p.id)}" title="Delete preset">✕</button>
           </div>
         </div>
       `;
       })
       .join('');
 
-    activeList.querySelectorAll<HTMLButtonElement>('.ala-as-act-up').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (btn.disabled) return;
-        const idx = Number(btn.dataset.idx);
-        if (idx > 0) {
-          const temp = stateConfig.active[idx - 1];
-          stateConfig.active[idx - 1] = stateConfig.active[idx];
-          stateConfig.active[idx] = temp;
-          renderUI();
-        }
+    for (const container of [activeList, availableChips, presetList]) {
+      container.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
+        img.addEventListener(
+          'error',
+          () => {
+            if (img.src !== DEFAULT_ICON) img.src = DEFAULT_ICON;
+          },
+          { once: true, signal: modal.signal }
+        );
       });
-    });
-
-    activeList.querySelectorAll<HTMLButtonElement>('.ala-as-act-down').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (btn.disabled) return;
-        const idx = Number(btn.dataset.idx);
-        if (idx < stateConfig.active.length - 1) {
-          const temp = stateConfig.active[idx + 1];
-          stateConfig.active[idx + 1] = stateConfig.active[idx];
-          stateConfig.active[idx] = temp;
-          renderUI();
-        }
-      });
-    });
-
-    activeList.querySelectorAll<HTMLButtonElement>('.ala-as-act-remove').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.id;
-        stateConfig.active = stateConfig.active.filter((a) => a !== id);
-        renderUI();
-      });
-    });
-
-    availableChips.querySelectorAll<HTMLButtonElement>('.ala-as-chip-activate').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.id;
-        if (id && !stateConfig.active.includes(id)) {
-          stateConfig.active.push(id);
-          renderUI();
-        }
-      });
-    });
-
-    presetList.querySelectorAll<HTMLButtonElement>('.ala-as-btn-edit-preset').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.id;
-        const p = stateConfig.presets.find((x) => x.id === id);
-        if (!p) return;
-        editingPresetId = p.id;
-        formHeading.textContent = `Edit Preset: ${p.name}`;
-        savePresetBtn.textContent = 'Update Preset';
-        cancelPresetBtn.style.display = 'inline-flex';
-        nameInput.value = p.name;
-        iconInput.value = p.icon;
-        urlInput.value = p.url;
-        nameInput.focus();
-      });
-    });
-
-    presetList.querySelectorAll<HTMLButtonElement>('.ala-as-btn-del-preset').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.id;
-        if (!id) return;
-        if (stateConfig.presets.length <= 1) {
-          return alert('You must have at least one preset configured.');
-        }
-        if (!confirm(`Delete preset?`)) return;
-        stateConfig.presets = stateConfig.presets.filter((p) => p.id !== id);
-        stateConfig.active = stateConfig.active.filter((a) => a !== id);
-        if (editingPresetId === id) resetForm();
-        renderUI();
-      });
-    });
+    }
   }
 
-  backdrop.querySelector('#ala-as-btn-copy-json')?.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(jsonArea.value);
-      alert('Copied configuration to clipboard!');
-    } catch (_) {
-      jsonArea.select();
-      document.execCommand('copy');
-      alert('Copied configuration to clipboard!');
+  modal.listen(activeList, 'click', (e) => {
+    const target = e.target as HTMLElement;
+    const upBtn = target.closest<HTMLButtonElement>('.ala-as-act-up');
+    if (upBtn) {
+      if (upBtn.disabled) return;
+      const idx = Number(upBtn.dataset.idx);
+      if (idx > 0) {
+        const temp = stateConfig.active[idx - 1];
+        stateConfig.active[idx - 1] = stateConfig.active[idx];
+        stateConfig.active[idx] = temp;
+        renderUI();
+      }
+      return;
+    }
+    const downBtn = target.closest<HTMLButtonElement>('.ala-as-act-down');
+    if (downBtn) {
+      if (downBtn.disabled) return;
+      const idx = Number(downBtn.dataset.idx);
+      if (idx < stateConfig.active.length - 1) {
+        const temp = stateConfig.active[idx + 1];
+        stateConfig.active[idx + 1] = stateConfig.active[idx];
+        stateConfig.active[idx] = temp;
+        renderUI();
+      }
+      return;
+    }
+    const removeBtn = target.closest<HTMLButtonElement>('.ala-as-act-remove');
+    if (removeBtn) {
+      const id = removeBtn.dataset.id;
+      stateConfig.active = stateConfig.active.filter((a) => a !== id);
+      renderUI();
     }
   });
 
-  backdrop.querySelector('#ala-as-btn-reset-defaults')?.addEventListener('click', () => {
-    if (!confirm('Reset all music search providers and shortcuts to default settings?')) return;
-    stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-    jsonArea.value = JSON.stringify(stateConfig, null, 2);
-    renderUI();
-    jsonStatus.className = 'ala-as-status ala-as-status--success';
-    jsonStatus.textContent = 'Reset to default presets.';
-    jsonStatus.style.display = 'block';
+  modal.listen(availableChips, 'click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.ala-as-chip-activate');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    if (id && !stateConfig.active.includes(id)) {
+      stateConfig.active.push(id);
+      renderUI();
+    }
   });
 
-  backdrop.querySelector('#ala-as-btn-apply-json')?.addEventListener('click', () => {
+  let presetActionPending = false;
+  modal.listen(presetList, 'click', async (e) => {
+    const target = e.target as HTMLElement;
+    const editBtn = target.closest<HTMLButtonElement>('.ala-as-btn-edit-preset');
+    if (editBtn) {
+      if (presetActionPending) return;
+      const id = editBtn.dataset.id;
+      const p = stateConfig.presets.find((x) => x.id === id);
+      if (!p) return;
+      editingPresetId = p.id;
+      formHeading.textContent = `Edit Preset: ${p.name}`;
+      savePresetBtn.textContent = 'Update Preset';
+      cancelPresetBtn.style.display = 'inline-flex';
+      nameInput.value = p.name;
+      iconInput.value = p.icon;
+      urlInput.value = p.url;
+      nameInput.focus();
+      return;
+    }
+    const delBtn = target.closest<HTMLButtonElement>('.ala-as-btn-del-preset');
+    if (delBtn) {
+      if (presetActionPending || delBtn.disabled) return;
+      const id = delBtn.dataset.id;
+      if (!id) return;
+      if (stateConfig.presets.length <= 1) {
+        presetActionPending = true;
+        delBtn.disabled = true;
+        try {
+          await ctx.alert('You must have at least one preset configured.');
+        } finally {
+          presetActionPending = false;
+          if (!modal.signal.aborted && delBtn.isConnected) delBtn.disabled = false;
+        }
+        return;
+      }
+      presetActionPending = true;
+      delBtn.disabled = true;
+      let confirmed = false;
+      try {
+        confirmed = await ctx.confirm({
+          title: 'Delete Preset',
+          message: 'Delete preset?',
+          confirmText: 'Delete',
+          danger: true
+        });
+      } finally {
+        presetActionPending = false;
+        if (!modal.signal.aborted && delBtn.isConnected) delBtn.disabled = false;
+      }
+      if (!confirmed || modal.signal.aborted || ctx.signal.aborted) return;
+      stateConfig.presets = stateConfig.presets.filter((p) => p.id !== id);
+      stateConfig.active = stateConfig.active.filter((a) => a !== id);
+      if (editingPresetId === id) resetForm();
+      renderUI();
+    }
+  });
+
+  const copyJsonBtn = backdrop.querySelector<HTMLButtonElement>('#ala-as-btn-copy-json');
+  if (copyJsonBtn) {
+    modal.listen(copyJsonBtn, 'click', async () => {
+      if (copyJsonBtn.disabled) return;
+      copyJsonBtn.disabled = true;
+      try {
+        try {
+          await navigator.clipboard.writeText(jsonArea.value);
+        } catch (_) {
+          jsonArea.select();
+          document.execCommand?.('copy');
+        }
+        if (modal.signal.aborted || ctx.signal.aborted) return;
+        ctx.toast.success('Copied configuration to clipboard!');
+      } finally {
+        if (!modal.signal.aborted) copyJsonBtn.disabled = false;
+      }
+    });
+  }
+
+  const resetDefaultsBtn = backdrop.querySelector<HTMLButtonElement>('#ala-as-btn-reset-defaults');
+  if (resetDefaultsBtn) {
+    modal.listen(resetDefaultsBtn, 'click', async () => {
+      if (resetDefaultsBtn.disabled) return;
+      resetDefaultsBtn.disabled = true;
+      try {
+        const confirmed = await ctx.confirm({
+          title: 'Reset Defaults',
+          message: 'Reset all music search providers and shortcuts to default settings?',
+          confirmText: 'Reset',
+          danger: true
+        });
+        if (!confirmed || modal.signal.aborted || ctx.signal.aborted) return;
+        stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
+        jsonArea.value = JSON.stringify(stateConfig, null, 2);
+        resetForm();
+        renderUI();
+        jsonStatus.className = 'ala-as-status ala-as-status--success';
+        jsonStatus.textContent = 'Reset to default presets.';
+        jsonStatus.style.display = 'block';
+      } finally {
+        if (!modal.signal.aborted) resetDefaultsBtn.disabled = false;
+      }
+    });
+  }
+
+  onClick('#ala-as-btn-apply-json', () => {
     const check = validateAniSongsConfig(jsonArea.value);
     if (!check.valid || !check.config) {
       jsonStatus.className = 'ala-as-status ala-as-status--error';
@@ -626,20 +721,32 @@ export function openAniSongsModal(ctx: JsonEditorContext): void {
       return;
     }
     stateConfig = check.config;
+    resetForm();
     renderUI();
     jsonStatus.className = 'ala-as-status ala-as-status--success';
     jsonStatus.textContent = 'Configuration applied successfully!';
     jsonStatus.style.display = 'block';
   });
 
-  backdrop.querySelector('#ala-as-btn-done')?.addEventListener('click', () => {
-    const check = validateAniSongsConfig(stateConfig);
-    if (!check.valid || !check.config) {
-      return alert(check.error || 'Invalid configuration');
-    }
-    ctx.onApply(check.config);
-    close();
-  });
+  const doneBtn = backdrop.querySelector<HTMLButtonElement>('#ala-as-btn-done');
+  if (doneBtn) {
+    modal.listen(doneBtn, 'click', async () => {
+      if (doneBtn.disabled) return;
+      const check = validateAniSongsConfig(stateConfig);
+      if (!check.valid || !check.config) {
+        doneBtn.disabled = true;
+        try {
+          await ctx.alert(check.error || 'Invalid configuration');
+        } finally {
+          if (!modal.signal.aborted) doneBtn.disabled = false;
+        }
+        return;
+      }
+      if (modal.signal.aborted || ctx.signal.aborted) return;
+      ctx.onApply(check.config);
+      close();
+    });
+  }
 
   renderUI();
 }

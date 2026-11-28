@@ -31,18 +31,18 @@ Only `id`, `key`, `title`, `help`, and `setup` are required.
 
 | Field | Purpose |
 | :--- | :--- |
-| `id` | Unique module identifier. Must match `/^[a-z][A-Za-z0-9]*$/`. |
+| `id` | Unique module identifier. Must match `/^[a-z][A-Za-z0-9]*$/` and must not be a reserved id (`core`, `devMode`). |
 | `key` | Setting key for the on/off toggle, stored as `ala_setting_<key>`. |
 | `legacy` | Older names for the toggle key, used once by the settings migration. |
 | `section` | Settings panel group. Defaults to `Other`. |
 | `title`, `help` | Text on the toggle card. |
 | `accounts` | Account providers the module may use through `ctx.accounts`. Enforced. |
 
-**`id`** namespaces everything the module owns: scoped storage (`ala_mod_<id>_*`, see [Storage](./context-api.md#storage)), debug settings, and published services (see [Services](./communication.md#services)). An invalid id is rejected with status `invalid-id`. A second module with the same id is ignored and both are marked `id-collision`.
+**`id`** namespaces everything the module owns: scoped storage (`ala_mod_<id>_*`, see [Storage](./context-api.md#storage)), debug settings, and published services (see [Services](./communication.md#services)). An invalid or reserved id (`core`, `devMode`) is rejected with status `invalid-id`. A second module with the same id is ignored and both are marked `id-collision`.
 
 **`key`** must be unique across every setting in the script. A duplicate throws `Duplicate setting: <key>` at load time, before any module runs. The toggle always defaults to `false`; registering a toggle with another default throws. This keeps every feature opt-in.
 
-**`legacy`** lists earlier setting names. On startup, if the new key has never been saved, the settings migration looks for each legacy name (first in userscript storage under `ala_setting_<name>`, then in `localStorage` under `ALAdditions:<name>`) and copies the first value it finds. Use this when you rename a setting. For anything more complex, use [Migrations](#migrations).
+**`legacy`** lists earlier setting names. On startup, if the new key has never been saved, the settings migration looks for each legacy name (first in userscript storage under `ala_setting_<name>`, then in `localStorage` under `ALAdditions:<name>`), normalizes it through the setting's type rules, and saves the first valid value it finds (skipping corrupt values and isolating errors per setting). Use this when you rename a setting. For anything more complex, use [Migrations](#migrations).
 
 **`section`** picks the collapsible group in the Settings panel. `Sync` and `General` are pinned first, `Advanced` is pinned last, and every other section is sorted alphabetically. Cards inside a section are sorted by title.
 
@@ -53,7 +53,7 @@ Only `id`, `key`, `title`, `help`, and `setup` are required.
 - `ctx.accounts.isConnected('other')` is a type error when `'other'` is not declared. Write the list as an inline array literal so the ids are inferred as literal types.
 - A call that gets past the compiler throws `Module "<id>" cannot access account provider "<provider>" without declaring it in accounts`.
 - `ctx.accounts.clearSecrets()` with no argument clears only the declared providers, never every provider in the script.
-- `connect` and `disconnect` do nothing after the module has been disposed.
+- `connect`, `disconnect`, and `clearSecrets` do nothing after the module has been disposed.
 
 Helpers in sibling files type the context as `FeatureContext<true, 'mal'>`, where the second parameter is the union of declared ids. See [Using ctx From Sibling Files](./context-api.md#using-ctx-from-sibling-files) and [Accounts](./platform-apis.md#accounts).
 
@@ -89,7 +89,7 @@ Rules to remember:
 | `false` | The kernel disposes the module and runs `setup(ctx)` again. No tab refresh. |
 | `true` | The button reads **Save and reload** and the page refreshes after saving. |
 
-The panel considers a module affected when its active state flips, or when it is (or was) active and one of its own options changed.
+The panel considers a module affected when its active state flips, or when it is (or was) active and one of its own options changed. When an active or newly active module is affected, the panel also walks reverse `dependsOn` edges across active or newly active dependents and uses **Save and reload** if any reachable dependent sets `requiresReload: true`. Runtime-errored modules (`reason: 'error'`) count as inactive in this baseline, so disabling a crashed module does not force a page reload.
 
 Use `requiresReload: true` when the module cannot undo its effects, for example when it patches `window.fetch` or `Worker`, runs at `document-start`, or rewrites state that the page reads only once. Everything that can be fully removed by its cleanups should hot-reload.
 
@@ -164,6 +164,7 @@ Read them with `ctx.get<T>(key)`. Values are normalized on every read, so invali
 | `legacy` | Older names for this key, migrated like the main toggle. |
 | `validate` | For `json`: custom validation, see below. |
 | `childOf` | Key of a `toggle` option in the same module that gates this row. |
+| `autoEnableParentWhenNonEmpty` | When `true`, applying a non-empty value (non-empty array or plain object with own keys) in the Settings UI checks the card's main module toggle if it is unchecked and enabled. Does not alter legacy backup imports. |
 | `editor` | For `json`: the function that opens the editor UI. |
 
 ### Option types
@@ -174,7 +175,7 @@ Read them with `ctx.get<T>(key)`. Values are normalized on every read, so invali
 | `number` | integer | Rounded, then clamped to `min` and `max`. Non-numeric input falls back to `def`. |
 | `select` | string | Must equal one of the `options` values, otherwise `def`. |
 | `list` | string array | Edited as comma-separated text. Items are trimmed, empties dropped, and an empty result falls back to `def`. |
-| `json` | any JSON | Edited through your `editor` function. Invalid data falls back to a clone of `def`. |
+| `json` | any JSON | Edited through your `editor` function. Normalized values are deep-cloned (with own `__proto__` keys stripped); invalid data falls back to a clone of `def`. |
 
 ### Nested options with childOf
 
@@ -189,7 +190,7 @@ options: [
 
 ### JSON options
 
-A `json` option shows a **Customize** button that calls `editor(ctx)`. The editor receives a `JsonEditorContext` with `value` (the staged value), `onApply(next)`, `getId(name?)`, `addStyle` (1-arg or 2-arg `CssSource`), `listen`, `timeout`, `modal(opts)`, an optional `api` (the AniList client), and an optional `log`. Use `listen`, `timeout`, and `modal` instead of raw `document.addEventListener`, `setTimeout`, or custom backdrop DOM — cleanups run automatically when the Settings panel closes. Edits are staged in the panel and only saved when the user presses Save. `validate(value)` may return a boolean or an object such as `{ valid: true, config }`. When it returns an object, the value used is the first of `value`, `tiers`, `config`, or `overrides` that is present, otherwise the original input. A throwing validator is treated as invalid.
+A `json` option shows a **Customize** button that calls `editor(ctx)`. The editor receives a `JsonEditorContext` with `value` (the staged value), `onApply(next)`, `signal` (`readonly AbortSignal`), `getId(name?)`, `addStyle` (1-arg or 2-arg `CssSource`), `listen`, `timeout`, `observe`, `modal(opts)`, `confirm(opts)` (`Promise<boolean>`), `alert(opts)` (`Promise<void>`), `toast` (`ToastApi`: `{ show, success, error }`, ignored after session close or panel detach), `onCleanup(fn)`, an optional lifecycle-scoped `api` (`Omit<AniListClient, 'session'>`, bound to `signal`), and an optional `log`. Use `addStyle`, `listen`, `timeout`, `observe`, `modal`, `confirm`, `alert`, and `onCleanup` instead of raw `document.addEventListener`, `setTimeout`, `new MutationObserver`, `window.confirm`/`alert`, or custom backdrop DOM — cleanups are scoped to each editor invocation (`ContextScope`) and run automatically (along with aborting `signal` and `api` calls) when its last session modal closes (or immediately if a synchronous `editor(ctx)` throws with no open modals; `async` editors returning a Promise stay alive across intermediate confirm/modal transitions until the returned Promise settles with zero open modals), with re-opening the same option's editor or closing the Settings panel as fallbacks. Edits are staged in the panel and only saved when the user presses Save; `onApply(next)` normalizes `next` through the option's `json` rules (including `validate`) before staging or evaluating `autoEnableParentWhenNonEmpty`, and becomes a no-op once the session disposes or the panel closes. `validate(value)` receives a deep-cloned copy (with own `__proto__` keys stripped) and may return a boolean or an object such as `{ valid: true, config }`. When it returns an object, the value used is a clone of the first of `value`, `tiers`, `config`, or `overrides` that is present, otherwise the cloned input. A throwing validator is treated as invalid.
 
 For a complete editor, see [Staged JSON Modal Editors](./recipes.md#staged-json-modal-editors).
 
@@ -244,7 +245,7 @@ standalone: {
 
 When a probe returns `true` the module's status becomes `standalone-paused`: its cleanups run, dependents are paused, the toggle is locked, and the panel explains why. The saved setting is kept and applies again once the standalone script is removed.
 
-The kernel probes when the Settings panel opens. A module can also pause itself during startup with `ctx.setStandalonePaused(true)`, which is how a module reacts to a conflict it finds in `setup(ctx)`. The full pattern, including remembering the last probe result so normal page loads never wait, is in [Yielding to Standalone Scripts](./recipes.md#yielding-to-standalone-scripts).
+The kernel probes when the Settings panel opens (clearing `standalone-paused` without auto-booting an unbooted module if the conflict disappeared). A module can also pause itself during startup with `ctx.setStandalonePaused(true)`, which is how a module reacts to a conflict it finds in `setup(ctx)`. The full pattern, including remembering the last probe result so normal page loads never wait, is in [Yielding to Standalone Scripts](./recipes.md#yielding-to-standalone-scripts).
 
 ---
 
@@ -272,7 +273,7 @@ Writes through `m` are ignored after the hook returns, so do not keep references
 
 ### The @migration annotation
 
-Every file that defines a `migrate` hook or a helper named `migrate...` must contain at least one valid annotation comment, and every `@migration` comment anywhere in `src/` must be well formed. Double quotes are required:
+Every `migrate` hook or migration helper declaration individually — `(async) migrate(...)` methods, `migrate: (async) ...` properties, `(async) function migrate*(...)`, and `const/let/var migrate* = ...` function/arrow variables — must carry its own valid annotation comment either inside its body or immediately preceding the declaration, and every `@migration` comment anywhere in `src/` must be well formed. Non-empty double-quoted `from` and `sunset` values are required:
 
 ```ts
 // @migration(from: "v0.9.1", kind: "storage", sunset: "2-3 releases")
@@ -295,7 +296,7 @@ Every file that defines a `migrate` hook or a helper named `migrate...` must con
 - A throw or rejection marks the module `error`, runs its cleanups, disposes dependents, and shows an **Error** badge in Settings with the message.
 - Cleanups run in reverse order of registration. A throwing cleanup is logged and the rest still run.
 - If the module is reloaded or disabled while an async `setup` is still pending, the late result is discarded and its cleanups run.
-- After disposal, lifecycle hooks, DOM mounts, timers, HTTP requests, `ctx.storage` writes, account connection changes, and event or hook mutations become no-ops or abort, so stray callbacks cannot revive the module.
+- After disposal, `ctx.signal` aborts, and lifecycle hooks, DOM mounts, timers, HTTP requests, `ctx.set` and `ctx.storage` writes, toasts, `silently`, account mutations, `ctx.api` mutations and cache clears, and event or hook mutations become no-ops or abort, so stray callbacks cannot revive the module.
 
 ### Status reasons
 
@@ -303,9 +304,10 @@ Every file that defines a `migrate` hook or a helper named `migrate...` must con
 
 | `reason` | Meaning |
 | :--- | :--- |
-| none (`active: true`) | Running. |
+| none (`active: true`) | Running (booted and not paused or errored). |
+| none (`active: false`) | Eligible, but not booted yet (e.g., deferred module before DOM ready, or unbooted module whose standalone conflict cleared). |
 | `disabled` | The toggle is off. |
-| `invalid-id` | The id failed the pattern check. |
+| `invalid-id` | The id failed the pattern check or used a reserved id. |
 | `id-collision` | Two modules used the same id. |
 | `host-mismatch` | Wrong site, see [Host Filtering](#host-filtering). |
 | `standalone-paused` | Yielding to a standalone script. |

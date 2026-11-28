@@ -1,5 +1,8 @@
 import { addStyle } from '../core/styles';
+import { Core } from '../core/observer';
+import { registerModalOverlay } from '../core/modal';
 import { esc } from '../utils/helpers';
+import type { CleanupFn } from '../types';
 
 export interface PasswordModalOptions {
   title: string;
@@ -36,6 +39,91 @@ const MODAL_CSS = `
     display: flex;
     flex-direction: column;
     animation: alaModalPop 0.15s ease-out;
+  }
+  #ala-pwd-backdrop .ala-sheet {
+    box-sizing: border-box;
+    max-height: 92vh;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+  #ala-pwd-backdrop .ala-sheet * {
+    box-sizing: border-box;
+  }
+  #ala-pwd-backdrop .ala-sheet :focus-visible {
+    outline: 2px solid rgb(var(--color-blue, 61, 180, 242));
+    outline-offset: 2px;
+  }
+  #ala-pwd-backdrop .ala-sheet-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 20px 10px;
+  }
+  #ala-pwd-backdrop .ala-sheet-head h2 {
+    margin: 0;
+    font-family: inherit;
+    font-size: 19px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+  #ala-pwd-backdrop .ala-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0 20px 8px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  #ala-pwd-backdrop .ala-sheet-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 20px;
+    border-top: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.14);
+  }
+  #ala-pwd-backdrop .ala-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 38px;
+    padding: 0 18px;
+    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
+    border-radius: 4px;
+    background: transparent;
+    color: rgb(var(--color-text, 240, 243, 246));
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #ala-pwd-backdrop .ala-btn--primary {
+    border-color: transparent;
+    background: rgb(var(--color-blue, 61, 180, 242));
+    color: #fff;
+    font-weight: 600;
+  }
+  #ala-pwd-backdrop .ala-btn:hover {
+    filter: brightness(1.1);
+  }
+  #ala-pwd-backdrop .ala-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    cursor: pointer;
+  }
+  #ala-pwd-backdrop .ala-icon-btn:hover {
+    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.14);
+    color: rgb(var(--color-text, 240, 243, 246));
   }
   @keyframes alaModalPop {
     from { opacity: 0; transform: scale(0.96) translateY(-4px); }
@@ -133,6 +221,7 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
     }
 
     const disposeStyle = addStyle('ala-pwd-modal-style', MODAL_CSS);
+    const disposeOwn = Core.registerOwnUi('#ala-pwd-backdrop');
 
     const existing = document.getElementById('ala-pwd-backdrop');
     if (existing) existing.remove();
@@ -202,13 +291,16 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
     let isVisible = false;
     let settled = false;
     let focusTimer: ReturnType<typeof setTimeout> | null = null;
+    let overlay: { isTop: () => boolean; dispose: CleanupFn } | null = null;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (!overlay?.isTop()) return;
         e.preventDefault();
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         cancel();
       } else if (e.key === 'Enter') {
+        if (!overlay?.isTop()) return;
         const target = e.target;
         if (target instanceof Element) {
           if (backdrop.contains(target)) {
@@ -233,10 +325,13 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
         focusTimer = null;
       }
       document.removeEventListener('keydown', onKeyDown, true);
+      overlay?.dispose();
+      overlay = null;
       if (activeCancel === cancel) {
         activeCancel = null;
       }
       backdrop.remove();
+      disposeOwn();
       disposeStyle();
     };
 
@@ -251,6 +346,12 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
       const val = input.value;
       if (!options.allowEmpty && !val.trim()) {
         errBox.textContent = 'Password cannot be empty.';
+        errBox.style.display = 'block';
+        input.focus();
+        return;
+      }
+      if (val.length > 0 && !val.trim()) {
+        errBox.textContent = 'Password cannot contain only whitespace.';
         errBox.style.display = 'block';
         input.focus();
         return;
@@ -270,6 +371,7 @@ export function promptPasswordModal(options: PasswordModalOptions): Promise<stri
     };
 
     activeCancel = cancel;
+    overlay = registerModalOverlay(cancel);
 
     toggleBtn.addEventListener('click', () => {
       isVisible = !isVisible;

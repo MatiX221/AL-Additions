@@ -1,5 +1,6 @@
-import { searchMalId, log, strictTitle } from '../../api/mal';
-import { stores, markDone, ID_MISS_TTL_MS } from './state';
+import { searchMalId, log, strictTitle, type MalCallOptions } from '../../api/mal';
+import { isAbortError } from '../../utils/helpers';
+import { stores, markDone, checkCancel, ID_MISS_TTL_MS } from './state';
 import { STATUS_MAP } from './reconcile';
 import { SyncMediaType, AniListSyncEntry, SyncTarget, SyncCounters, typeLabel } from './types';
 import { getOverride } from '../../api/malOverrides';
@@ -43,16 +44,40 @@ export function rememberId(type: SyncMediaType, mediaId: number, malId: number, 
   stores[type].ids.save();
 }
 
+function checkTargetCancel(opts?: MalCallOptions): void {
+  if (opts?.checkCancel) opts.checkCancel();
+  else checkCancel();
+  if (opts?.signal?.aborted) {
+    const e: Error & { cancelled?: boolean } = new Error('Sync stopped.');
+    e.cancelled = true;
+    throw e;
+  }
+}
+
 export async function runPool<T>(
   items: T[],
   worker: (item: T, idx: number) => Promise<void>,
-  concurrency: number
+  concurrency: number,
+  opts?: MalCallOptions | AbortSignal
 ): Promise<void> {
+  const poolOpts: MalCallOptions | undefined =
+    opts && typeof (opts as AbortSignal).aborted === 'boolean'
+      ? { signal: opts as AbortSignal }
+      : (opts as MalCallOptions | undefined);
   let i = 0;
   let failure: any = null;
   const lane = async (): Promise<void> => {
     while (!failure && i < items.length) {
+      if (poolOpts?.checkCancel || poolOpts?.signal) {
+        try {
+          checkTargetCancel(poolOpts);
+        } catch (e) {
+          failure = failure || e;
+          break;
+        }
+      }
       const n = i++;
+      if (n >= items.length) break;
       try {
         await worker(items[n], n);
       } catch (e) {
@@ -68,8 +93,17 @@ export async function resolveTargets(
   type: SyncMediaType,
   entries: AniListSyncEntry[],
   mal: Record<number, any>,
-  c: SyncCounters
+  c: SyncCounters,
+  opts?: MalCallOptions | AbortSignal
 ): Promise<SyncTarget[]> {
+  const rawOpts: MalCallOptions | undefined =
+    opts && typeof (opts as AbortSignal).aborted === 'boolean'
+      ? { signal: opts as AbortSignal }
+      : (opts as MalCallOptions | undefined);
+  const malOpts: MalCallOptions = {
+    checkCancel: () => checkTargetCancel(rawOpts),
+    signal: rawOpts?.signal
+  };
   const idx = buildTitleIndex(mal);
   const targets: SyncTarget[] = [];
   const pending: AniListSyncEntry[] = [];
@@ -117,9 +151,9 @@ export async function resolveTargets(
     async (entry) => {
       let id = 0;
       try {
-        id = await searchMalId(type, entry);
+        id = await searchMalId(type, entry, malOpts);
       } catch (e: any) {
-        if (e.auth || e.cancelled) throw e;
+        if (e?.auth || e?.cancelled || e?.abort || isAbortError(e)) throw e;
         c.transient++;
         markDone();
         log(
@@ -136,7 +170,8 @@ export async function resolveTargets(
         markDone();
       }
     },
-    3
+    3,
+    malOpts
   );
 
   if (unmatched.length)

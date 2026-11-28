@@ -49,7 +49,7 @@ export function validatePresets(raw: unknown): { valid: boolean; value?: Preset[
 }
 ```
 
-When a validator returns an object, the cleaned value is taken from the first of `value`, `tiers`, `config`, or `overrides` that is present. Use `value` unless you have a reason not to. If the validator returns `{ valid: true }` with none of those, the original input is kept as is. A validator that throws is treated as invalid.
+When a validator returns an object, the cleaned value is taken from the first of `value`, `tiers`, `config`, or `overrides` that is present. Use `value` unless you have a reason not to. If the validator returns `{ valid: true }` with none of those, the input is kept as is (deep-cloned with own `__proto__` keys stripped). A validator that throws is treated as invalid.
 
 ### 2. Write the editor
 
@@ -59,81 +59,61 @@ The editor receives a `JsonEditorContext`. It has no `ctx`, so everything comes 
 | :--- | :--- |
 | `value` | The staged value to start from. Clone it. |
 | `onApply(next)` | Hand the edited value back to the Settings panel. |
+| `signal` | Read-only `AbortSignal` that aborts when the editor session closes (when its last modal closes or when the Settings panel closes). |
 | `getId(name?)` | Allocate a namespaced element id. |
-| `addStyle(css)` / `addStyle(id, css)` | Inject CSS (`CssSource`: string or lazy function). Returns a cleanup. |
-| `listen(target, type, fn, options?)` | Add a listener on `document` or `window`. Returns a cleanup. |
-| `timeout(fn, ms)` | Tracked `setTimeout` cleared on panel close. Returns a cleanup. |
-| `modal(opts)` | Open a managed modal dialog (`{ backdrop, sheet, body, footer, close }`), auto-closed on panel close. |
-| `api` | The AniList client, if the editor needs to look things up. May be missing. |
+| `addStyle(css)` / `addStyle(id, css)` | Inject CSS (`CssSource`: string or lazy function), disposed when the editor's modal or Settings panel closes. Returns a cleanup. |
+| `listen(target, type, fn, options?)` | Add a listener on `document` or `window`, removed when the editor's modal or Settings panel closes. Returns a cleanup. |
+| `timeout(fn, ms)` | Tracked `setTimeout` cleared when the editor's modal or Settings panel closes. Returns a cleanup. |
+| `observe(target, options, cb)` | Lifecycle-scoped `MutationObserver` on `target`, disconnected automatically when the editor session or Settings panel closes. Returns a cleanup. |
+| `modal(opts)` | Open a managed modal dialog (`{ id, selector, signal, backdrop, sheet, body, footer, close, listen, timeout, onCleanup }`) supporting `subtitle`, `style`, and `[data-ala-close]` click delegation; auto-closed on panel close and triggering session cleanup when the last session modal closes. |
+| `confirm(opts)` | Open a stacked, non-blocking confirmation dialog (`string \| ConfirmOptions`, with optional `signal?: AbortSignal`) returning `Promise<boolean>` (resolves `false` on Cancel, `Escape`, backdrop click, `signal` abort, or session close). |
+| `alert(opts)` | Open a stacked, non-blocking alert dialog (`string \| AlertOptions`, with optional `signal?: AbortSignal`) returning `Promise<void>` (resolves on OK, `Escape`, backdrop click, `signal` abort, or session close). |
+| `toast` | Show a non-blocking toast (`{ show, success, error }`, `ToastApi`), ignored once the editor session closes or the Settings panel detaches. |
+| `onCleanup(fn)` | Register custom cleanup logic run when the editor session closes (immediately if already closed). |
+| `api` | Optional lifecycle-scoped AniList client (`Omit<AniListClient, 'session'>`) bound to `ec.signal` (aborts in-flight queries/reads and rejects post-close mutations when the editor session or Settings panel closes). May be missing. |
 | `log` | An optional logger with `warn` and `error`. |
 
 ```ts
 import type { JsonEditorContext } from '../../types';
 import { esc } from '../../utils/helpers';
 
-const MODAL_ID = 'ala-example-editor';
-const MODAL_CSS = `
-  #${MODAL_ID} { position: fixed; inset: 0; z-index: 100001; display: flex; align-items: center; justify-content: center; background: rgba(5, 12, 20, .72); }
-  #${MODAL_ID} .ala-ex-sheet { width: min(560px, 100%); max-height: 90vh; overflow: auto; padding: 16px 20px; border-radius: 10px; background: rgb(var(--color-foreground)); color: rgb(var(--color-text)); }
+const buildEditorCss = (sel: string): string => `
+  ${sel} .ala-ex-list { margin: 0; padding-left: 18px; }
+  ${sel} .ala-ex-list li { margin: 4px 0; }
 `;
 
 export function openExampleEditor(ec: JsonEditorContext): void {
-  ec.addStyle('ala-example-editor-style', MODAL_CSS);
-  document.getElementById(MODAL_ID)?.remove();
-
   const draft: Preset[] = structuredClone(ec.value);
 
-  const backdrop = document.createElement('div');
-  backdrop.id = MODAL_ID;
-
-  const render = () => {
-    backdrop.innerHTML = `
-      <div class="ala-ex-sheet" role="dialog" aria-modal="true">
-        <h2>Presets</h2>
-        <ul>${draft.map((p) => `<li>${esc(p.name)}</li>`).join('')}</ul>
-        <button type="button" class="ala-btn ala-btn--primary" data-act="apply">Apply</button>
-        <button type="button" class="ala-btn" data-act="cancel">Cancel</button>
-      </div>`;
-  };
-
-  const close = () => {
-    unlistenKey();
-    backdrop.remove();
-  };
-
-  const unlistenKey = ec.listen(
-    document,
-    'keydown',
-    ((e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        close();
-      }
-    }) as EventListener,
-    true
-  );
-
-  backdrop.addEventListener('click', (e) => {
-    const target = e.target as HTMLElement;
-    if (target === backdrop || target.dataset.act === 'cancel') return close();
-    if (target.dataset.act === 'apply') {
-      ec.onApply(draft);
-      close();
-    }
+  const modal = ec.modal({
+    id: 'example-editor',
+    title: 'Presets',
+    maxWidth: '560px',
+    style: buildEditorCss,
+    bodyHtml: `<ul class="ala-ex-list">${draft.map((p) => `<li>${esc(p.name)}</li>`).join('')}</ul>`,
+    footerHtml: `
+      <button type="button" class="ala-btn ala-btn--primary" data-act="apply">Apply</button>
+      <button type="button" class="ala-btn" data-ala-close>Cancel</button>
+    `
   });
 
-  render();
-  document.body.appendChild(backdrop);
+  modal.footer.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+    if (!btn) return;
+    if (btn.dataset.act === 'apply') {
+      ec.onApply(draft);
+      modal.close();
+    }
+  });
 }
 ```
 
 Rules that keep the editor safe:
 
 - Never call `Settings.get` or `Settings.set`, and never write to storage. `onApply` is the only way out.
-- Register the Escape handler with `ec.listen` and call its returned cleanup when closing. The Settings panel also removes anything left over when it closes, which covers a user who leaves the page with the editor open.
+- Open the dialog with `ec.modal(...)` so backdrop dismissal, top-of-stack `Escape` handling (without closing the Settings panel underneath), `[data-ala-close]` button delegation, and session cleanup (on last session modal close, or Settings panel close as fallback) are handled automatically; `ec.signal` aborts and `ec.addStyle`, `ec.listen`, `ec.timeout`, `ec.observe`, and `ec.onCleanup` registrations are disposed when the session closes (replacing a duplicate `modal({ id })` closes only the old modal while keeping the session alive).
 - Escape every dynamic string with `esc(...)` before putting it into `innerHTML`.
-- Give the modal an id that starts with `ala-` and style against that id, see [Styles](./context-api.md#styles).
-- Pressing Escape inside the editor must not also close the Settings panel underneath, hence `stopPropagation` in the capture phase.
+- Pass short unprefixed IDs (`'example-editor'`, `'editor-style'`) to `ec.modal` and `ec.addStyle`, and scope custom CSS against `style: (sel) => ...` or `modal.selector`, see [Styles](./context-api.md#styles) and [Modals](./context-api.md#modals).
 
 ### 3. Wire it into the option
 
@@ -179,8 +159,8 @@ connect: [
 ```ts
 interface SearchResult { id: number; title: string }
 
-async function search(ctx: FeatureContext, query: string): Promise<SearchResult[]> {
-  const res = await ctx.http.request(
+async function search(http: FeatureContext['http'], query: string): Promise<SearchResult[]> {
+  const res = await http.request(
     `https://api.example.com/search?q=${encodeURIComponent(query)}`,
     { headers: { Accept: 'application/json' }, timeout: 10000 }
   );
@@ -190,7 +170,7 @@ async function search(ctx: FeatureContext, query: string): Promise<SearchResult[
 }
 ```
 
-Use `ctx.http.json` when any non-2xx status can simply be an error. Use `request` when you need to treat specific statuses differently, as above. The full API is in [Networking](./context-api.md#networking).
+Use `http.json` (`ctx.http.json` or `rc.http.json`) when any non-2xx status can simply be an error. Use `request` when you need to treat specific statuses differently, as above. The full API is in [Networking](./context-api.md#networking).
 
 ### 3. Respect the route lifecycle
 
@@ -198,7 +178,7 @@ Use `ctx.http.json` when any non-2xx status can simply be an error. Use `request
 ctx.onRoute(/^\/(anime|manga)\/(\d+)/, async (rc) => {
   let results: SearchResult[];
   try {
-    results = await search(ctx, `media ${rc.match![2]}`);
+    results = await search(rc.http, `media ${rc.match![2]}`);
   } catch (e: any) {
     if (rc.signal.aborted || e?.message === 'Request aborted') return;
     ctx.log.warn('Search failed:', e);
@@ -206,17 +186,17 @@ ctx.onRoute(/^\/(anime|manga)\/(\d+)/, async (rc) => {
   }
   if (rc.signal.aborted) return;
 
-  rc.mount({ id: 'ala-results', anchor: '.overview', position: 'beforeend', create: () => buildResults(results) });
+  rc.mount({ id: 'results', anchor: '.overview', position: 'beforeend', create: () => buildResults(results) });
 });
 ```
 
-- If the module unloads mid-request, `ctx.http` rejects with `Request aborted`. That is expected, so return quietly.
+- Using `rc.http` binds the request to `rc.signal`, so navigating away or unloading the module aborts it and rejects with `Request aborted`. Treat that as normal control flow and return quietly.
 - Check `rc.signal.aborted` after every `await`. The user may have navigated away.
 
 ### 4. Be a good citizen
 
-- **Cache results.** Use `ctx.persistent` with an expiry per entry, see [Persistent Caches](./context-api.md#persistent-caches). `memo` from `utils/helpers` de-duplicates concurrent identical lookups.
-- **Limit the rate.** Create a `RateLimiter` for each external service and `await limiter.acquire()` before each request, see [utils/limiter.ts](./platform-apis.md#utilslimiterts). Call `limiter.limit(ms)` when the server answers 429, using its `Retry-After` header when present.
+- **Cache results.** Use `ctx.persistent` with an expiry per entry, see [Persistent Caches](./context-api.md#persistent-caches). `memo` from `utils/helpers` caches async lookups by key, and `createSharedFlight` from `utils/flight` coordinates waiter-isolated concurrent flights.
+- **Limit the rate.** Create a `RateLimiter` for each external service and `await limiter.acquire({ signal: rc.signal })` before each request, see [utils/limiter.ts](./platform-apis.md#utilslimiterts). Call `limiter.limit(ms)` when the server answers 429, using its `Retry-After` header when present.
 - **Fail soft.** A broken third-party site should never break the page. Catch, log with `ctx.log.warn`, and render nothing.
 
 ---
@@ -225,7 +205,7 @@ ctx.onRoute(/^\/(anime|manga)\/(\d+)/, async (rc) => {
 
 Migrations carry users' saved data across script versions. They run on every page load, for every module including disabled ones, before any module starts. See [Migrations](./define-module.md#migrations) for the rules. The patterns below all follow the same shape: check whether the old data exists, move it, delete it.
 
-Every file that defines a migration must contain a valid annotation:
+Every `migrate` hook or migration helper must carry an adjacent leading or in-body valid annotation:
 
 ```ts
 // @migration(from: "v0.9.1", kind: "storage", sunset: "2-3 releases")

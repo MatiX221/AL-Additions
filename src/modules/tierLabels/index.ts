@@ -178,8 +178,12 @@ defineModule({
       if (!compareRoot) return 'UNKNOWN';
 
       const label = el.getAttribute('label') || '';
+      const entry = el.closest('.entry');
+      const entryScores = entry ? Array.from(entry.querySelectorAll<HTMLElement>('.score')) : [];
+      const hasScoreLabel = entryScores.some((s) => s.getAttribute('label') === 'Score');
       const isAuthUser =
-        label === 'Score' || !!el.matches('.entry > .cell.score:first-of-type, .entry > .score:first-of-type');
+        label === 'Score' ||
+        (!hasScoreLabel && (label ? entryScores.length >= 2 && entryScores[0] === el : entryScores[0] === el));
       const sideKey = isAuthUser ? 'auth' : 'target';
 
       if (!compareRoot._colFormats) compareRoot._colFormats = {};
@@ -190,17 +194,59 @@ defineModule({
         return viewerScoreFormat;
       }
 
-      const colSelector = isAuthUser
-        ? '.entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label="Score"]'
-        : '.entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label="Score"])';
+      const entries = compareRoot.querySelectorAll<HTMLElement>('.entry');
+      let cells: HTMLElement[] = [];
+      if (entries.length > 0) {
+        for (const row of entries) {
+          const rowScores = Array.from(row.querySelectorAll<HTMLElement>('.score'));
+          if (rowScores.length === 0) continue;
+          const labeledAuth = rowScores.find((s) => s.getAttribute('label') === 'Score');
+          if (isAuthUser) {
+            const cell = labeledAuth || (rowScores[0].hasAttribute('label') ? null : rowScores[0]);
+            if (cell) cells.push(cell);
+          } else {
+            const cell = labeledAuth
+              ? rowScores.find((s) => s !== labeledAuth)
+              : rowScores[1] || (rowScores[0].getAttribute('label') ? rowScores[0] : null);
+            if (cell) cells.push(cell);
+          }
+        }
+      } else {
+        const fallbackSelector = isAuthUser ? '.score[label="Score"]' : '.score:not([label="Score"])';
+        cells = Array.from(compareRoot.querySelectorAll<HTMLElement>(fallbackSelector));
+      }
 
-      const cells = compareRoot.querySelectorAll<HTMLElement>(colSelector);
       let maxScore = 0;
       let hasDecimal = false;
       let hasStarIcon = false;
+      let hasSmileyIcon = false;
 
       for (const cell of cells) {
-        if (cell.querySelector('svg, .icon')) hasStarIcon = true;
+        const icons = cell.querySelectorAll<Element>('svg, .icon, [data-icon]');
+        if (icons.length > 0) {
+          let cellIsSmiley = false;
+          const cellClass = (cell.getAttribute('class') || '').toLowerCase();
+          if (/(?:point_3|smiley)/.test(cellClass)) {
+            cellIsSmiley = true;
+          } else {
+            for (const icon of icons) {
+              const sig = [
+                icon.getAttribute('data-icon') || '',
+                icon.getAttribute('class') || '',
+                icon.getAttribute('aria-label') || '',
+                icon.getAttribute('title') || ''
+              ]
+                .join(' ')
+                .toLowerCase();
+              if (/(?:smile|smiley|meh|frown)/.test(sig)) {
+                cellIsSmiley = true;
+                break;
+              }
+            }
+          }
+          if (cellIsSmiley) hasSmileyIcon = true;
+          else hasStarIcon = true;
+        }
         const s = cell.getAttribute('score') || (cell.textContent || '').replace('%', '').trim();
         const num = parseFloat(s);
         if (!isNaN(num) && num > 0) {
@@ -213,11 +259,18 @@ defineModule({
       if (maxScore > 10) detected = 'POINT_100';
       else if (hasDecimal) detected = 'POINT_10_DECIMAL';
       else if (hasStarIcon) detected = 'POINT_5';
+      else if (hasSmileyIcon && maxScore <= 3) detected = 'POINT_3';
+      else if (hasSmileyIcon) detected = 'POINT_5';
       else if (maxScore > 5) detected = 'POINT_10';
       else if (maxScore > 0) detected = 'POINT_10';
 
       compareRoot._colFormats[sideKey] = detected;
-      ctx.log.debug(`Detected score system for ${isAuthUser ? 'viewer' : 'other'}:`, detected, { maxScore, hasDecimal, hasStarIcon });
+      ctx.log.debug(`Detected score system for ${isAuthUser ? 'viewer' : 'other'}:`, detected, {
+        maxScore,
+        hasDecimal,
+        hasStarIcon,
+        hasSmileyIcon
+      });
       return detected;
     }
 
@@ -240,6 +293,19 @@ defineModule({
       }
     }
 
+    function clearProcessedCell(el: HTMLElement, fallbackText = ''): void {
+      const container = el.querySelector('.ala-tier-container');
+      if (container) {
+        if (fallbackText) {
+          container.replaceWith(document.createTextNode(fallbackText));
+        } else {
+          container.remove();
+        }
+      }
+      delete el.dataset.tierModified;
+      delete el.dataset.tierSource;
+    }
+
     function processScoreElement(
       el: HTMLElement,
       tiers: TierConfig[],
@@ -258,20 +324,32 @@ defineModule({
       }
 
       const attr = el.getAttribute('score');
-      const rawText = (attr || el.textContent || '').replace('%', '').trim();
-      if (!rawText || rawText === '-' || rawText === '0') return;
+      const rawText = (attr !== null ? attr : el.textContent || '').replace('%', '').trim();
+      if (!rawText || rawText === '-' || rawText === '0') {
+        clearProcessedCell(el, rawText);
+        return;
+      }
 
       const num = parseFloat(rawText);
-      if (isNaN(num) || num <= 0) return;
+      if (isNaN(num) || num <= 0) {
+        clearProcessedCell(el, rawText);
+        return;
+      }
 
       const scoreSystem = el.closest('.compare')
         ? getCompareColumnFormat(el, viewerScoreFormat)
         : getScoreSystem(viewerScoreFormat);
       const normalizedRating = normalizeScore(num, scoreSystem, isPercentage);
-      if (normalizedRating === null) return;
+      if (normalizedRating === null) {
+        clearProcessedCell(el, rawText);
+        return;
+      }
 
       const tier = getTier(normalizedRating, tiers);
-      if (!tier) return;
+      if (!tier) {
+        clearProcessedCell(el, rawText);
+        return;
+      }
       ctx.log.debug('Applied tier badge:', tier.label, 'to raw score:', rawText, 'normalized:', normalizedRating);
 
       el.dataset.tierModified = 'true';
@@ -378,11 +456,52 @@ defineModule({
       processTop100Elements(tiers, colorScore);
     }
 
+    function cleanupTierDom(): void {
+      document.querySelectorAll<HTMLElement>('.ala-tier-container').forEach((container) => {
+        const parent = container.parentElement;
+        if (!parent) {
+          container.remove();
+          return;
+        }
+        const scoreSpan = container.querySelector<HTMLElement>('.ala-tier-score-text');
+        if (scoreSpan) {
+          while (scoreSpan.firstChild) {
+            parent.insertBefore(scoreSpan.firstChild, container);
+          }
+        }
+        container.remove();
+      });
+      document.querySelectorAll<HTMLElement>('[data-tier-modified]').forEach((el) => {
+        delete el.dataset.tierModified;
+        delete el.dataset.tierSource;
+      });
+      document.querySelectorAll<HTMLElement & { _colFormats?: Record<string, string> }>('.compare').forEach((c) => {
+        delete c._colFormats;
+      });
+    }
+
     const HINT_KEY = 'standalone_seen';
     let paused = !!ctx.storage.get<boolean>(HINT_KEY, false);
-    const runScan = (): void => {
-      if (!paused) applyTierLabels();
+    let disposed = false;
+    let cancelScanTimer: (() => void) | null = null;
+
+    const cancelPendingScan = (): void => {
+      if (cancelScanTimer) {
+        cancelScanTimer();
+        cancelScanTimer = null;
+      }
     };
+
+    const runScan = (): void => {
+      if (!paused && !disposed) applyTierLabels();
+    };
+
+    ctx.onCleanup(() => {
+      disposed = true;
+      cancelPendingScan();
+      cleanupTierDom();
+      probeCache = null;
+    });
 
     ctx.ready(() => {
       runScan();
@@ -392,31 +511,35 @@ defineModule({
         });
         runScan();
       });
-      let scanQueued = false;
       const unsubBody = ctx.onBodyMutation(() => {
-        if (scanQueued) return;
-        scanQueued = true;
-        ctx.timeout(() => {
-          scanQueued = false;
+        if (paused || disposed || cancelScanTimer) return;
+        cancelScanTimer = ctx.timeout(() => {
+          cancelScanTimer = null;
           runScan();
         }, 100);
       });
 
       void probeTierLabels().then((found) => {
+        if (disposed) return;
         ctx.storage.set(HINT_KEY, found);
         const wasPaused = paused;
         paused = found;
-        ctx.setStandalonePaused(found);
         if (found) {
+          cancelPendingScan();
           unsubNav();
           unsubBody();
+          cleanupTierDom();
           if (!wasPaused) {
             ctx.log.warn(
               'Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.'
             );
           }
-        } else if (wasPaused) {
-          runScan();
+          ctx.setStandalonePaused(true);
+        } else {
+          ctx.setStandalonePaused(false);
+          if (wasPaused) {
+            runScan();
+          }
         }
       });
     });

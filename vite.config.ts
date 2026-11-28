@@ -35,7 +35,6 @@ export default defineConfig({
             'myanimelist.net',
             'api.myanimelist.net',
             'rs.animethemes.moe',
-            'api.animethemes.moe',
             'api.mangaupdates.com',
             'www.mangaupdates.com',
             'www.novelupdates.com',

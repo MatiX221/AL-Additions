@@ -11,7 +11,10 @@ import {
   MAGIC_ENCRYPTED,
   encryptData,
   decryptData,
-  FORMAT_VERSION
+  compressDeflateRaw,
+  FORMAT_VERSION,
+  SALT_LENGTH,
+  IV_LENGTH
 } from '../src/settings/backup';
 import { getAccountSecretKeys, registerAccountProvider } from '../src/core/accounts';
 import { CoreHooks } from '../src/core/bus';
@@ -38,6 +41,14 @@ describe('Settings Backup & Crypto Engine', () => {
   it('rejects exporting credentials if no password is provided', async () => {
     await expect(createBackup(true)).rejects.toThrow('A password is required to export credentials.');
     await expect(createBackup(true, '   ')).rejects.toThrow('A password is required to export credentials.');
+  });
+
+  it('rejects whitespace-only passwords when includeSecrets is false while still allowing empty strings', async () => {
+    await expect(createBackup(false, '   ')).rejects.toThrow('Password cannot contain only whitespace.');
+    await expect(createBackup(false, '\t\n')).rejects.toThrow('Password cannot contain only whitespace.');
+
+    const plainBytes = await createBackup(false, '');
+    expect(plainBytes.subarray(0, 4)).toEqual(MAGIC_PLAIN);
   });
 
   it('performs full roundtrip AES-GCM encryption and decryption', async () => {
@@ -379,5 +390,98 @@ describe('Settings Backup: B1-22 Regression Guards', () => {
       store.del('custom_token');
       store.del('custom_expires_at');
     }
+  });
+});
+
+async function buildPlainBinaryBackup(payload: unknown): Promise<Uint8Array> {
+  const compressed = await compressDeflateRaw(JSON.stringify(payload));
+  const out = new Uint8Array(5 + compressed.length);
+  out.set(MAGIC_PLAIN, 0);
+  out[4] = FORMAT_VERSION;
+  out.set(compressed, 5);
+  return out;
+}
+
+async function buildEncryptedBinaryBackup(payload: unknown, password: string): Promise<Uint8Array> {
+  const compressed = await compressDeflateRaw(JSON.stringify(payload));
+  const salt = window.crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
+  const iv = window.crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+  const baseKey = await window.crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  const key = await window.crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: salt as unknown as BufferSource, iterations: 100_000, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+  const ciphertext = new Uint8Array(
+    await window.crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+      key,
+      compressed as unknown as BufferSource
+    )
+  );
+  const out = new Uint8Array(5 + SALT_LENGTH + IV_LENGTH + ciphertext.length);
+  out.set(MAGIC_ENCRYPTED, 0);
+  out[4] = FORMAT_VERSION;
+  out.set(salt, 5);
+  out.set(iv, 5 + SALT_LENGTH);
+  out.set(ciphertext, 5 + SALT_LENGTH + IV_LENGTH);
+  return out;
+}
+
+describe('Settings Backup: BUG-38 Payload Validation & Strict UTF-8', () => {
+  it('rejects unsupported payload.version: 2 in both plain and encrypted binary backups', async () => {
+    Settings.set('tagPercentage', 50);
+    const v2Payload = { version: 2, exportedAt: Date.now(), data: { tagPercentage: 91 } };
+
+    const plainBytes = await buildPlainBinaryBackup(v2Payload);
+    await expect(importBackup(plainBytes)).rejects.toThrow(
+      'Unsupported backup version: 2. This version of AL Additions only supports version 1.'
+    );
+
+    const encBytes = await buildEncryptedBinaryBackup(v2Payload, 'SecretPass123');
+    await expect(importBackup(encBytes, async () => 'SecretPass123')).rejects.toThrow(
+      'Unsupported backup version: 2. This version of AL Additions only supports version 1.'
+    );
+
+    expect(Settings.get('tagPercentage')).toBe(50);
+  });
+
+  it('rejects { version: 1, data: null } without falling back to the outer envelope', async () => {
+    Settings.set('tagPercentage', 50);
+    const nullDataEnvelope = { version: 1, exportedAt: Date.now(), data: null, tagPercentage: 99 };
+
+    const plainBytes = await buildPlainBinaryBackup(nullDataEnvelope);
+    await expect(importBackup(plainBytes)).rejects.toThrow('Backup data is invalid or empty.');
+
+    const encBytes = await buildEncryptedBinaryBackup(nullDataEnvelope, 'SecretPass123');
+    await expect(importBackup(encBytes, async () => 'SecretPass123')).rejects.toThrow(
+      'Backup data is invalid or empty.'
+    );
+
+    await expect(importBackup(JSON.stringify(nullDataEnvelope))).rejects.toThrow('Backup data is invalid or empty.');
+    await expect(importBackup(JSON.stringify({ version: 1, tagPercentage: 99 }))).rejects.toThrow(
+      'Backup data is invalid or empty.'
+    );
+    await expect(importBackup(await buildPlainBinaryBackup({ version: 1, data: [] }))).rejects.toThrow(
+      'Backup data is invalid or empty.'
+    );
+    await expect(importBackup(await buildPlainBinaryBackup([{ tagPercentage: 99 }]))).rejects.toThrow(
+      'Invalid backup file: root must be an object.'
+    );
+
+    expect(Settings.get('tagPercentage')).toBe(50);
+  });
+
+  it('rejects invalid UTF-8 byte input in the text fallback path', async () => {
+    const invalidUtf8 = new Uint8Array([0xff, 0xfe, 0xfd]);
+    await expect(importBackup(invalidUtf8)).rejects.toThrow('Failed to decode backup file as UTF-8 text.');
   });
 });

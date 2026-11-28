@@ -67,7 +67,7 @@ defineModule({
 Why `ctx.onRoute` instead of listening to `popstate` yourself:
 
 - It runs immediately if the user is already on a matching URL when `setup(ctx)` runs, and again on every URL change.
-- Each run receives a fresh route context (`rc`). Anything you attach through `rc` (mounts, listeners, timers, `rc.onCleanup` callbacks, `rc.signal`) is torn down the moment the user navigates or the module is disabled.
+- Each run receives a fresh route context (`rc`). Anything you attach through `rc` (mounts, listeners, timers, HTTP requests, modals, `rc.onCleanup` callbacks, `rc.signal`) is torn down the moment the user navigates or the module is disabled.
 
 There is no shared route-parser or selector module. Each module keeps its own pattern and selector constants. Ready-made patterns for the common AniList pages are in [Route Patterns](./context-api.md#route-patterns), and every `rc.*` member is in [Routing](./context-api.md#routing).
 
@@ -127,7 +127,7 @@ Four things worth knowing here:
 - **Automatic cleanup:** `rc.mount` registers cleanups for both the element and its `style`, so leaving the page or disabling the module removes the badge and its `<style>` tag immediately.
 - **Repeated `create()` calls:** the mount is re-checked after page mutations, so `create()` can run again if the page drops your element. Keep it cheap and free of side effects.
 - **`ownUi: true`:** tells the shared DOM observer to ignore mutations inside the badge, so updating your own UI never wakes your own `ctx.onBodyMutation` callbacks. It is opt-in.
-- **Namespaced IDs:** `ctx.getId('badge')` resolves to `ala-mediaIdBadge-badge` (or pass `id: 'badge'` directly to `rc.mount`), and `mount` assigns that id on `el` and passes `#ala-mediaIdBadge-badge` to `style(sel)`. Never pass hardcoded `'ala-'`, `'daiya-'`, or `'almal-'` string literals to `addStyle` or `mount({ id })`.
+- **Namespaced IDs:** `ctx.getId('badge')` resolves to `ala-mediaIdBadge-badge` (or pass `id: 'badge'` directly to `rc.mount`), and `mount` assigns that id on `el` and passes `#ala-mediaIdBadge-badge` to `style(sel)`. Never pass hardcoded `'ala-'`, `'daiya-'`, or `'almal-'` string literals to `addStyle`, `mount({ id })`, or `modal({ id })`.
 
 Full details are in [Element IDs](./context-api.md#element-ids), [Mounting DOM Elements](./context-api.md#mounting-dom-elements), [Styles](./context-api.md#styles), and [Observer Exclusions](./context-api.md#observer-exclusions).
 

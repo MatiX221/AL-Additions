@@ -515,33 +515,37 @@ describe('Settings: Legacy Key Parity & Registry Guarantees', () => {
       Settings.set('tierLabelsEnabled', true);
 
       const host = createModuleHost();
-      initSettingsPage(host);
-      const styleText = document.getElementById('ala-settings-style')?.textContent || '';
-      expect(styleText).toContain('#ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}');
-      expect(styleText).toContain('.ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}');
-      expect(styleText).toContain('.ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}');
+      const cleanupSettingsPage = initSettingsPage(host);
+      try {
+        const styleText = document.getElementById('ala-settings-style')?.textContent || '';
+        expect(styleText).toContain('#ala-settings-panel .ala-section-title{margin:18px 2px 8px;color:rgb(var(--color-blue));font-size:13px;font-weight:600}');
+        expect(styleText).toContain('.ala-section-dropdown{margin-top:14px;border-radius:6px;background:rgb(var(--color-background));overflow:hidden;contain:paint}');
+        expect(styleText).toContain('.ala-section-dropdown.is-expanded .ala-chevron{transform:rotate(180deg)}');
 
-      showPanel(host);
+        showPanel(host);
 
-      const saveBtn = document.querySelector<HTMLButtonElement>('#ala-settings-panel .ala-save')!;
-      const statusEl = document.querySelector<HTMLElement>('#ala-settings-panel .ala-status')!;
-      const reloadSpy = vi.spyOn(host, 'reload');
+        const saveBtn = document.querySelector<HTMLButtonElement>('#ala-settings-panel .ala-save')!;
+        const statusEl = document.querySelector<HTMLElement>('#ala-settings-panel .ala-status')!;
+        const reloadSpy = vi.spyOn(host, 'reload');
 
-      expect(saveBtn.textContent).toBe('Save');
+        expect(saveBtn.textContent).toBe('Save');
 
-      saveBtn.click();
-      expect(reloadSpy).not.toHaveBeenCalled();
-      expect(statusEl.textContent).toBe('Saved.');
-      expect(saveBtn.textContent).toBe('Save');
+        saveBtn.click();
+        expect(reloadSpy).not.toHaveBeenCalled();
+        expect(statusEl.textContent).toBe('Saved.');
+        expect(saveBtn.textContent).toBe('Save');
 
-      const pctInput = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="tagPercentage"]')!;
-      pctInput.value = '65';
-      pctInput.dispatchEvent(new Event('change', { bubbles: true }));
-      expect(saveBtn.textContent).toBe('Save and reload');
+        const pctInput = document.querySelector<HTMLInputElement>('#ala-settings-panel input[data-key="tagPercentage"]')!;
+        pctInput.value = '65';
+        pctInput.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(saveBtn.textContent).toBe('Save and reload');
 
-      pctInput.value = '50';
-      pctInput.dispatchEvent(new Event('change', { bubbles: true }));
-      expect(saveBtn.textContent).toBe('Save');
+        pctInput.value = '50';
+        pctInput.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(saveBtn.textContent).toBe('Save');
+      } finally {
+        cleanupSettingsPage();
+      }
     } finally {
       closePanel();
       Settings.set('tagFilterEnabled', prevTag);
@@ -683,5 +687,279 @@ describe('Settings: B1-21 Regression Guards', () => {
       '0',
       'B'
     ]);
+  });
+
+  it('preserves CORE_DEBUG_SCOPE defaults even if features contains a colliding core entry (BUG-37)', async () => {
+    const { getDefaultDebugSettings } = await import('../src/settings/devMode');
+    features.push({
+      id: 'core',
+      section: 'General',
+      title: 'Fake',
+      help: 'Fake',
+      toggle: { key: 'fakeCoreToggle', type: 'toggle', def: false, title: 'Fake', help: 'Fake', legacy: [] },
+      options: [],
+      hosts: ['anilist.co'],
+      layer: 'feature',
+      requiresReload: false,
+      dependsOn: [],
+      after: [],
+      debug: { title: 'Colliding', help: 'Colliding' }
+    });
+    try {
+      const defaults = getDefaultDebugSettings();
+      expect(defaults.core.channels).toEqual({
+        general: true,
+        settings: true,
+        anilist: true,
+        mal: true
+      });
+    } finally {
+      features.pop();
+    }
+  });
+});
+
+describe('Settings: BUG-34 / BUG-35 / BUG-36 Regression Guards', () => {
+  it('isolates localStorage SecurityError and per-row errors while normalizing & skipping corrupt legacy values (BUG-34)', () => {
+    const numKey = 'migGuardNum';
+    const jsonKey = 'migGuardJson';
+    const okKey = 'migGuardOk';
+
+    Settings.registerCoreSetting({
+      key: numKey,
+      type: 'number',
+      def: 25,
+      min: 0,
+      max: 100,
+      legacy: ['oldMigGuardNum'],
+      title: 'Num',
+      help: 'Help'
+    });
+    Settings.registerCoreSetting({
+      key: jsonKey,
+      type: 'json',
+      def: { safe: true },
+      legacy: ['oldMigGuardJson'],
+      title: 'Json',
+      help: 'Help'
+    });
+    Settings.registerCoreSetting({
+      key: okKey,
+      type: 'number',
+      def: 10,
+      min: 0,
+      max: 100,
+      legacy: ['oldMigGuardOk'],
+      title: 'Ok',
+      help: 'Help'
+    });
+
+    const getSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('Access denied', 'SecurityError');
+    });
+    const origGet = store.get;
+    const storeGetSpy = vi.spyOn(store, 'get').mockImplementation((k: string, def?: any) => {
+      if (k === PREFIX + numKey) throw new Error('row read failed');
+      return origGet(k, def);
+    });
+
+    try {
+      store.set(PREFIX + 'oldMigGuardOk', 250);
+
+      expect(() => Settings.migrate()).not.toThrow();
+      expect(store.get(PREFIX + okKey, undefined)).toBe(100);
+      expect(Settings.get(okKey)).toBe(100);
+    } finally {
+      getSpy.mockRestore();
+      storeGetSpy.mockRestore();
+      store.del(PREFIX + numKey);
+      store.del(PREFIX + 'oldMigGuardNum');
+      store.del(PREFIX + jsonKey);
+      store.del(PREFIX + 'oldMigGuardJson');
+      store.del(PREFIX + okKey);
+      store.del(PREFIX + 'oldMigGuardOk');
+      localStorage.removeItem('ALAdditions:oldMigGuardNum');
+      localStorage.removeItem('ALAdditions:oldMigGuardJson');
+      localStorage.removeItem('ALAdditions:oldMigGuardOk');
+      delete ROWS[numKey];
+      delete ROWS[jsonKey];
+      delete ROWS[okKey];
+    }
+  });
+
+  it('skips corrupt unparseable json/number legacy strings instead of polluting Settings.has() (BUG-34)', () => {
+    const numKey = 'migSkipNum';
+    const jsonKey = 'migSkipJson';
+    const sanitizedJsonKey = 'migSanitizeJson';
+
+    Settings.registerCoreSetting({
+      key: numKey,
+      type: 'number',
+      def: 50,
+      min: 0,
+      max: 100,
+      legacy: ['oldSkipNum'],
+      title: 'Skip Num',
+      help: 'Help'
+    });
+    Settings.registerCoreSetting({
+      key: jsonKey,
+      type: 'json',
+      def: { safe: 1 },
+      legacy: ['oldSkipJson'],
+      title: 'Skip Json',
+      help: 'Help'
+    });
+    Settings.registerCoreSetting({
+      key: sanitizedJsonKey,
+      type: 'json',
+      def: {},
+      legacy: ['oldSanitizeJson'],
+      title: 'Sanitize Json',
+      help: 'Help'
+    });
+
+    try {
+      localStorage.setItem('ALAdditions:oldSkipNum', 'not-a-number');
+      localStorage.setItem('ALAdditions:oldSkipJson', '{corrupt_json');
+      localStorage.setItem('ALAdditions:oldSanitizeJson', '{"ok":1,"__proto__":{"polluted":true}}');
+
+      Settings.migrate();
+
+      expect(Settings.has(numKey)).toBe(false);
+      expect(Settings.has(jsonKey)).toBe(false);
+      expect(Settings.has(sanitizedJsonKey)).toBe(true);
+      const migratedObj = store.get(PREFIX + sanitizedJsonKey);
+      expect(migratedObj).toEqual({ ok: 1 });
+      expect(Object.prototype.hasOwnProperty.call(migratedObj, '__proto__')).toBe(false);
+    } finally {
+      store.del(PREFIX + numKey);
+      store.del(PREFIX + jsonKey);
+      store.del(PREFIX + sanitizedJsonKey);
+      localStorage.removeItem('ALAdditions:oldSkipNum');
+      localStorage.removeItem('ALAdditions:oldSkipJson');
+      localStorage.removeItem('ALAdditions:oldSanitizeJson');
+      delete ROWS[numKey];
+      delete ROWS[jsonKey];
+      delete ROWS[sanitizedJsonKey];
+    }
+  });
+
+  it('escapes keys, option values, labels, and numeric attributes across all TYPES.*.html templates (BUG-35)', () => {
+    const specialKey = 'k" onclick="alert(1)" data-x="<>&\'';
+    const toggleHtml = TYPES.toggle.html(
+      { key: specialKey, type: 'toggle', def: false, title: 'T', help: 'H', legacy: [] },
+      true
+    );
+    const numHtml = TYPES.number.html(
+      {
+        key: specialKey,
+        type: 'number',
+        def: 5,
+        min: '0" autofocus="' as any,
+        max: '10" onmouseover="' as any,
+        title: 'N',
+        help: 'H',
+        legacy: []
+      },
+      '5" data-bad="1'
+    );
+    const selectHtml = TYPES.select.html(
+      {
+        key: specialKey,
+        type: 'select',
+        def: 'a" onclick="bad()',
+        options: [
+          ['a" onclick="bad()', '<img src=x onerror=alert(1)>'],
+          ['b&c', "Label 'quoted'"]
+        ],
+        title: 'S',
+        help: 'H',
+        legacy: []
+      },
+      'a" onclick="bad()'
+    );
+    const listHtml = TYPES.list.html(
+      { key: specialKey, type: 'list', def: [], title: 'L', help: 'H', legacy: [] },
+      ['"xss"', '<tag>']
+    );
+    const jsonHtml = TYPES.json.html(
+      { key: specialKey, type: 'json', def: {}, title: 'J', help: 'H', legacy: [] },
+      { html: '<img src=x>' }
+    );
+
+    for (const html of [toggleHtml, numHtml, selectHtml, listHtml, jsonHtml]) {
+      const container = document.createElement('div');
+      container.innerHTML = html;
+      expect(container.querySelector('img')).toBeNull();
+      const target = container.querySelector('[data-key]') as HTMLElement | null;
+      expect(target).not.toBeNull();
+      expect(target!.dataset.key).toBe(specialKey);
+      expect(target!.getAttribute('onclick')).toBeNull();
+    }
+
+    const selWrap = document.createElement('div');
+    selWrap.innerHTML = selectHtml;
+    const opts = selWrap.querySelectorAll('option');
+    expect(opts).toHaveLength(2);
+    expect(opts[0].value).toBe('a" onclick="bad()');
+    expect(opts[0].getAttribute('onclick')).toBeNull();
+    expect(opts[0].textContent).toBe('<img src=x onerror=alert(1)>');
+    expect(opts[0].selected).toBe(true);
+    expect(opts[1].value).toBe('b&c');
+    expect(opts[1].textContent).toBe("Label 'quoted'");
+
+    const jsonWrap = document.createElement('div');
+    jsonWrap.innerHTML = jsonHtml;
+    expect(jsonWrap.querySelector('button')!.id).toBe(`ala-btn-edit-${specialKey}`);
+  });
+
+  it('deep-clones non-primitive results and strips own __proto__ in unvalidated and validated TYPES.json.normalize (BUG-36)', () => {
+    const unvalidatedRow: SettingRow = {
+      key: 'unvalidatedJson',
+      type: 'json',
+      def: { nested: { items: [1] } },
+      title: 'Unvalidated',
+      help: 'Help',
+      legacy: []
+    };
+
+    const callerObj = { nested: { items: [10, 20] } };
+    const normFromObj = TYPES.json.normalize(callerObj, unvalidatedRow);
+    expect(normFromObj).toEqual({ nested: { items: [10, 20] } });
+    expect(normFromObj).not.toBe(callerObj);
+    expect(normFromObj.nested).not.toBe(callerObj.nested);
+    normFromObj.nested.items.push(30);
+    expect(callerObj.nested.items).toEqual([10, 20]);
+
+    const normFromStr = TYPES.json.normalize(
+      '{"ok":true,"__proto__":{"polluted":true},"nested":{"__proto__":{"deep":true},"a":2}}',
+      unvalidatedRow
+    );
+    expect(normFromStr).toEqual({ ok: true, nested: { a: 2 } });
+    expect(Object.prototype.hasOwnProperty.call(normFromStr, '__proto__')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(normFromStr.nested, '__proto__')).toBe(false);
+    expect(({} as any).polluted).toBeUndefined();
+
+    const parsedWithOwnProto = JSON.parse('{"x":1,"__proto__":{"polluted":true}}');
+    const normFromParsedObj = TYPES.json.normalize(parsedWithOwnProto, unvalidatedRow);
+    expect(normFromParsedObj).toEqual({ x: 1 });
+    expect(Object.prototype.hasOwnProperty.call(normFromParsedObj, '__proto__')).toBe(false);
+
+    const sharedValidatedOutput = { wrapped: [1, 2] };
+    const validatedRow: SettingRow = {
+      key: 'validatedJson',
+      type: 'json',
+      def: { wrapped: [] },
+      title: 'Validated',
+      help: 'Help',
+      legacy: [],
+      validate: () => ({ valid: true, value: sharedValidatedOutput })
+    };
+    const normValidated = TYPES.json.normalize({ any: 1 }, validatedRow);
+    expect(normValidated).toEqual({ wrapped: [1, 2] });
+    expect(normValidated).not.toBe(sharedValidatedOutput);
+    normValidated.wrapped.push(3);
+    expect(sharedValidatedOutput.wrapped).toEqual([1, 2]);
   });
 });

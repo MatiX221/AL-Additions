@@ -34,7 +34,10 @@ defineModule({
         const links = el.matches('a[href]') ? [el] : el.querySelectorAll('a[href]');
         for (const a of links) {
           const href = a.getAttribute('href');
-          if (href && SLUG_HREF.test(href)) a.setAttribute('href', strip(href));
+          if (href && SLUG_HREF.test(href)) {
+            const next = strip(href);
+            if (next !== href) a.setAttribute('href', next);
+          }
         }
       }
     }

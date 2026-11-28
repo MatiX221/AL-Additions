@@ -1,4 +1,9 @@
-import { safe, sleep, store } from './helpers';
+import { createAbortError, raceWithSignal, safe, sleep, store } from './helpers';
+
+export interface AcquireOptions {
+  check?: () => void;
+  signal?: AbortSignal;
+}
 
 export interface RateLimiterOptions {
   rate: number;
@@ -68,21 +73,29 @@ export class RateLimiter {
     this.rate = Math.min(this.max, Math.max(this.min, n));
   }
 
-  acquire(check?: () => void): Promise<void> {
-    const run = this.queue.then(() => this._take(check));
+  acquire(checkOrOpts?: (() => void) | AcquireOptions): Promise<void> {
+    const opts: AcquireOptions =
+      typeof checkOrOpts === 'function' ? { check: checkOrOpts } : checkOrOpts ?? {};
+    if (opts.signal?.aborted) {
+      return Promise.reject(createAbortError(opts.signal));
+    }
+    const run = this.queue.then(() => this._take(opts));
     this.queue = run.catch(() => {});
-    return run;
+    return raceWithSignal(run, opts.signal);
   }
 
-  private async _take(check?: () => void): Promise<void> {
+  private async _take({ check, signal }: AcquireOptions = {}): Promise<void> {
     for (;;) {
       check?.();
+      if (signal?.aborted) {
+        throw createAbortError(signal);
+      }
       const now = Date.now();
       const resume = this.resumeAt;
       if (resume) {
         this.tokens = 0;
         this.last = resume;
-        await sleep(Math.min(1000, Math.max(0, resume - now)));
+        await sleep(Math.min(1000, Math.max(0, resume - now)), signal);
         continue;
       }
       const elapsed = Math.max(0, now - this.last);
@@ -92,7 +105,7 @@ export class RateLimiter {
         this.tokens -= 1;
         return;
       }
-      await sleep(Math.max(15, ((1 - this.tokens) / this.rate) * 60000));
+      await sleep(Math.min(1000, Math.max(15, ((1 - this.tokens) / this.rate) * 60000)), signal);
     }
   }
 

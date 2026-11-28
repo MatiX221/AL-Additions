@@ -7,8 +7,43 @@ import type { FeatureContext } from '../../types';
 let activeCandidate: { mediaId: number; type: SyncMediaType; title: string; malId?: number } | null = null;
 let activeRouteMedia: { id: number; type: SyncMediaType } | null = null;
 
+function isDialogVisible(el: Element | null): boolean {
+  let cur: Element | null = el;
+  while (cur && cur !== document.documentElement) {
+    if (cur instanceof HTMLElement) {
+      if (cur.hidden) return false;
+      if (cur.style.display === 'none' || cur.style.visibility === 'hidden') return false;
+      if (typeof getComputedStyle === 'function') {
+        const cs = getComputedStyle(cur);
+        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return true;
+}
+
+function findVisibleDialogBody(root: Element): Element | null {
+  const ownWrapper = root.closest('.el-dialog, .el-dialog__wrapper');
+  if (ownWrapper) {
+    const body =
+      ownWrapper.querySelector('.el-dialog__body') ||
+      (ownWrapper.matches('.el-dialog__body') ? ownWrapper : null);
+    return body && isDialogVisible(body) ? body : null;
+  }
+  for (const wrapper of Array.from(document.querySelectorAll('.el-dialog__wrapper'))) {
+    if (!isDialogVisible(wrapper)) continue;
+    const body = wrapper.querySelector('.el-dialog__body');
+    if (body && isDialogVisible(body)) return body;
+  }
+  for (const body of Array.from(document.querySelectorAll('.el-dialog__body'))) {
+    if (isDialogVisible(body)) return body;
+  }
+  return null;
+}
+
 export function extractDialogMedia(root: Element = document.body): { mediaId: number; type: SyncMediaType; title: string; malId?: number } | null {
-  const dialog = root.closest('.el-dialog, .el-dialog__wrapper, body')?.querySelector('.el-dialog__body') || document.querySelector('.el-dialog__body');
+  const dialog = findVisibleDialogBody(root);
   if (!dialog) return null;
 
   const titleEl = dialog.querySelector('.title, .header .title');
@@ -37,7 +72,8 @@ export function extractDialogMedia(root: Element = document.body): { mediaId: nu
   }
 
   if (!mediaId && title) {
-    const link = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/anime/"], a[href*="/manga/"]')).find(
+    const dialogRoot = dialog.closest('.el-dialog, .el-dialog__wrapper') || dialog;
+    const link = Array.from(dialogRoot.querySelectorAll<HTMLAnchorElement>('a[href*="/anime/"], a[href*="/manga/"]')).find(
       (a) => a.textContent?.trim() === title
     );
     if (link) {
@@ -82,27 +118,58 @@ export function initDeletionInterceptor(ctx: FeatureContext<true>): void {
     const queryStr = ev.query || ev.operationName || '';
     if (!queryStr) return;
 
-    if (ev.phase === 'request' && queryStr.includes('DeleteMediaListEntry')) {
-      ctx.log.debug('DeleteMediaListEntry intercepted for variables:', ev.variables);
-      if (ctx.get('syncMode') === 'exact') {
-        const candidate = activeCandidate || extractDialogMedia(document.body);
-        if (candidate) {
-          addPendingDelete({
-            mediaId: candidate.mediaId,
-            malId: candidate.malId,
-            type: candidate.type,
-            title: candidate.title,
-            deletedAt: Date.now()
-          });
-          ctx.log.debug('Queued pending deletion for exact match:', candidate);
-          activeCandidate = null;
-          log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, 'info');
+    if (queryStr.includes('DeleteMediaListEntry')) {
+      if (ev.phase === 'request') {
+        ctx.log.debug('DeleteMediaListEntry request intercepted for variables:', ev.variables);
+        if (ctx.get('syncMode') === 'exact' && !activeCandidate) {
+          const candidate = extractDialogMedia(document.body);
+          if (candidate) activeCandidate = candidate;
         }
+        return;
+      }
+
+      if (ev.phase === 'response') {
+        const confirmed =
+          ev.ok === true &&
+          !ev.errors?.length &&
+          ev.data?.DeleteMediaListEntry?.deleted === true;
+
+        if (!confirmed) {
+          ctx.log.debug('DeleteMediaListEntry response not confirmed, clearing candidate:', ev.status, ev.data);
+          activeCandidate = null;
+          return;
+        }
+
+        if (ctx.get('syncMode') === 'exact') {
+          const candidate = activeCandidate || extractDialogMedia(document.body);
+          if (candidate) {
+            addPendingDelete({
+              mediaId: candidate.mediaId,
+              malId: candidate.malId,
+              type: candidate.type,
+              title: candidate.title,
+              deletedAt: Date.now()
+            });
+            ctx.log.debug('Queued pending deletion for exact match:', candidate);
+            activeCandidate = null;
+            log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, 'info');
+          }
+        } else {
+          activeCandidate = null;
+        }
+        return;
       }
       return;
     }
 
-    if (ev.phase === 'response' && queryStr.includes('SaveMediaListEntry') && ev.variables?.mediaId) {
+    if (
+      ev.phase === 'response' &&
+      queryStr.includes('SaveMediaListEntry') &&
+      ev.variables?.mediaId &&
+      ev.ok === true &&
+      !ev.errors?.length &&
+      Boolean(ev.data?.SaveMediaListEntry)
+    ) {
       const mediaId = Number(ev.variables.mediaId);
       ctx.log.debug('SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:', mediaId);
       removePendingDelete(mediaId, 'ANIME');
@@ -112,11 +179,31 @@ export function initDeletionInterceptor(ctx: FeatureContext<true>): void {
 
   ctx.listen(
     document,
+    'keydown',
+    (e) => {
+      if ((e as KeyboardEvent).key === 'Escape') {
+        activeCandidate = null;
+      }
+    },
+    true
+  );
+
+  ctx.listen(
+    document,
     'click',
     (e) => {
       if (ctx.get('syncMode') !== 'exact') return;
       const target = e.target as HTMLElement;
       if (!target) return;
+
+      if (
+        target.classList.contains('el-message-box__wrapper') ||
+        target.classList.contains('el-dialog__wrapper') ||
+        target.closest('.el-message-box__headerbtn, .el-dialog__headerbtn, .el-message-box__close, .el-dialog__close')
+      ) {
+        activeCandidate = null;
+        return;
+      }
 
       const deleteBtn = target.closest('.delete-btn, .delete, button, [role="button"]') || target;
       const btnText = (deleteBtn.textContent || '').trim().toLowerCase();
@@ -142,17 +229,9 @@ export function initDeletionInterceptor(ctx: FeatureContext<true>): void {
         !!target.closest('.el-message-box__btns .el-button--primary');
 
       if (isOkClick && inWarningBox) {
-        const candidate = activeCandidate || extractDialogMedia(document.body);
-        if (candidate) {
-          addPendingDelete({
-            mediaId: candidate.mediaId,
-            malId: candidate.malId,
-            type: candidate.type,
-            title: candidate.title,
-            deletedAt: Date.now()
-          });
-          activeCandidate = null;
-          log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, 'info');
+        if (!activeCandidate) {
+          const candidate = extractDialogMedia(document.body);
+          if (candidate) activeCandidate = candidate;
         }
         return;
       }

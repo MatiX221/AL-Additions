@@ -1,5 +1,5 @@
 import { SETTING_PREFIX, type ManualOverride, type ManualOverrideStore, type SyncMediaType } from '../types';
-import { createCoreLogger, parseToggle, store } from '../utils/helpers';
+import { createCoreLogger, isAbortError, parseToggle, store } from '../utils/helpers';
 import { AniList } from './anilist';
 
 const malLog = createCoreLogger('mal');
@@ -53,8 +53,11 @@ function normalizeOverrideEntry(
         ? o.updatedAt
         : defaultUpdatedAt
   };
-  if (typeof o.cover === 'string' && o.cover.trim()) {
-    entry.cover = o.cover.trim();
+  if (typeof o.cover === 'string') {
+    const cover = o.cover.trim();
+    if (/^https?:\/\//i.test(cover)) {
+      entry.cover = cover;
+    }
   }
 
   return { id, entry };
@@ -186,8 +189,9 @@ export function importOverrides(
 const STALE_MS = 24 * 3600 * 1000;
 let refreshing = false;
 
-export async function refreshStaleOverrides(): Promise<void> {
-  if (refreshing) return;
+export async function refreshStaleOverrides(opts?: { signal?: AbortSignal }): Promise<void> {
+  const signal = opts?.signal;
+  if (refreshing || signal?.aborted) return;
   const initial = getManualOverrides();
   const keys = Object.keys(initial);
   if (!keys.length) return;
@@ -202,6 +206,7 @@ export async function refreshStaleOverrides(): Promise<void> {
   refreshing = true;
   try {
     for (let i = 0; i < staleIds.length; i += 50) {
+      if (signal?.aborted) break;
       const batch = staleIds.slice(i, i + 50);
       const q = `query ($ids: [Int]) {
         Page(page: 1, perPage: 50) {
@@ -215,7 +220,8 @@ export async function refreshStaleOverrides(): Promise<void> {
       }`;
 
       try {
-        const res = await AniList.query(q, { ids: batch });
+        const res = await AniList.query(q, { ids: batch }, { signal });
+        if (signal?.aborted) break;
         const list = Array.isArray(res?.Page?.media) ? res.Page.media : [];
         const current = getManualOverrides();
         let changed = false;
@@ -227,7 +233,7 @@ export async function refreshStaleOverrides(): Promise<void> {
             const existing = current[idStr];
             const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || existing.title;
             const cover = m.coverImage?.medium || existing.cover;
-            const type = (m.type === 'MANGA' ? 'MANGA' : 'ANIME') as SyncMediaType;
+            const type = (m.type === 'MANGA' || m.type === 'ANIME' ? m.type : existing.type) as SyncMediaType;
             const nextEntry: ManualOverride = {
               ...existing,
               title: t,
@@ -241,10 +247,11 @@ export async function refreshStaleOverrides(): Promise<void> {
           }
         }
 
-        if (changed) {
+        if (changed && !signal?.aborted) {
           saveManualOverrides(current);
         }
       } catch (e) {
+        if (signal?.aborted || isAbortError(e)) break;
         malLog.warn('Failed to refresh stale overrides batch:', e);
         break;
       }

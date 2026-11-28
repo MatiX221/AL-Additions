@@ -1,7 +1,7 @@
 import { defineModule } from '../../core/registry';
 import { externalReleased } from '../../api/scrapers';
 import { tryOr, safe } from '../../utils/helpers';
-import type { CleanupFn, MediaRoute } from '../../types';
+import type { CleanupFn, MediaRoute, RouteContext } from '../../types';
 
 defineModule({
   id: 'mediaInfo',
@@ -81,9 +81,12 @@ defineModule({
       const d = new Date();
       return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
     };
-    const scoreFormat = async (): Promise<string | null> => (await tryOr(() => ctx.api.viewer()))?.scoreFormat || null;
+    const scoreFormat = async (rc: RouteContext | null = currentRc): Promise<string | null> =>
+      (await tryOr(() => (rc?.api ?? ctx.api).viewer()))?.scoreFormat || null;
 
     let currentRoute: MediaRoute | null = null;
+    let currentRc: RouteContext | null = null;
+    let disposed = false;
     let shown: string | null = null;
     let gen = 0;
     let rendering = false;
@@ -96,13 +99,22 @@ defineModule({
     const panel = (): HTMLElement | null => document.getElementById(ID);
     const schedule = (ms = 300): void => {
       cancelSchedule?.();
-      cancelSchedule = ctx.timeout(() => {
+      const rc = currentRc;
+      if (disposed || !rc || rc.signal.aborted) {
+        cancelSchedule = null;
+        return;
+      }
+      cancelSchedule = rc.timeout(() => {
         cancelSchedule = null;
         render();
       }, ms);
     };
 
-    function renderConnect(key: string, reason: 'none' | 'rejected' = 'none'): void {
+    function renderConnect(
+      key: string,
+      reason: 'none' | 'rejected' = 'none',
+      rc: RouteContext | null = currentRc
+    ): void {
       const spot = findSpot();
       if (!spot) return void schedule(800);
       const box = document.createElement('div');
@@ -117,16 +129,16 @@ defineModule({
       spot.parent.insertBefore(box, spot.before);
       shown = key;
 
-      if (reason === 'none') {
-        ctx.timeout(() => {
-          if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
+      if (reason === 'none' && rc && !rc.signal.aborted) {
+        rc.timeout(() => {
+          if (!rc.signal.aborted && panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
         }, 3000);
       }
     }
 
     function changeProgress(delta: number, input: HTMLInputElement, limit: number | null): void {
       const next = Number(input.value) + delta;
-      if (!Number.isInteger(next) || next < 0 || (limit !== null && next > limit)) return;
+      if (!Number.isInteger(next) || next < 0 || (delta > 0 && limit !== null && next > limit)) return;
       input.value = String(next);
     }
 
@@ -134,18 +146,25 @@ defineModule({
       media: MediaRoute,
       info: any,
       scoreInput: HTMLInputElement,
-      progressInput: HTMLInputElement
+      progressInput: HTMLInputElement,
+      fallbackFmt: string | null = null,
+      rc: RouteContext | null = currentRc
     ): Promise<any | false | null> {
       if (saving) return null;
-      const fmt = await scoreFormat();
+      const fmt = (await scoreFormat(rc)) ?? fallbackFmt;
       const max = maxOf(info, media.type);
       const scoreText = scoreInput.value.trim();
       const score = scoreText === '' ? 0 : Number(scoreText);
-      let progress = Number(progressInput.value);
       if (!Number.isFinite(score) || score < 0 || score > scoreMax(fmt)) {
         scoreInput.focus();
         return null;
       }
+      const progressText = progressInput.value.trim();
+      if (progressText === '') {
+        progressInput.focus();
+        return null;
+      }
+      let progress = Number(progressText);
       if (!Number.isInteger(progress) || progress < 0) {
         progressInput.focus();
         return null;
@@ -153,7 +172,14 @@ defineModule({
       if (max !== null) progress = Math.min(progress, max);
       progressInput.value = String(progress);
       const prev = info.mediaListEntry || {};
-      const finishNow = max !== null && progress >= max && (prev.status !== 'COMPLETED' || !prev.completedAt?.year);
+      const prevProgress = Number.isFinite(Number(prev.progress)) ? Number(prev.progress) : 0;
+      const progressChanged = progress !== prevProgress;
+      const finishNow =
+        progressChanged &&
+        max !== null &&
+        progress >= max &&
+        prev.status !== 'REPEATING' &&
+        (prev.status !== 'COMPLETED' || !prev.completedAt?.year);
       const isStarting = (!prev.status || prev.status === 'PLANNING') && progress > 0;
       const status = finishNow ? 'COMPLETED' : isStarting ? 'CURRENT' : undefined;
       saving = true;
@@ -179,7 +205,8 @@ defineModule({
 
     async function render(force = false): Promise<void> {
       const route = currentRoute;
-      if (!route) {
+      const rc = currentRc;
+      if (disposed || !route || !rc || rc.signal.aborted) {
         shown = null;
         panel()?.remove();
         return;
@@ -189,36 +216,42 @@ defineModule({
         if (force) rerender = true;
         return;
       }
-      if (saving && !force) return;
       if (!force && shown === key && panel()) return;
+      if (saving && !force) {
+        rerender = true;
+        schedule(200);
+        return;
+      }
       if (!force && retry.key === key && (retry.count >= MAX_FAILURES || Date.now() < retry.at)) return;
       if (!findSpot()) {
         if (Date.now() - routeAt < 15000) schedule(800);
         return;
       }
 
-      if (!ctx.api.hasAuth()) return renderConnect(key, 'none');
+      if (!ctx.api.hasAuth()) return renderConnect(key, 'none', rc);
 
       const g = gen;
-      const stale = (): boolean => g !== gen || currentRoute?.id !== route.id;
+      const stale = (): boolean => disposed || g !== gen || rc.signal.aborted || currentRoute?.id !== route.id;
+      cancelSchedule?.();
+      cancelSchedule = null;
       rendering = true;
       ctx.log.debug('Rendering media info panel for:', key);
       try {
         let info: any = null;
         let fmt: string | null = null;
         try {
-          info = await ctx.api.media.get(route.id, route.type, { throwAuth: true });
+          info = await rc.api.media.get(route.id, route.type, { throwAuth: true });
           if (stale()) return;
-          if (info) fmt = (await ctx.api.viewer())?.scoreFormat || null;
+          if (info) fmt = (await rc.api.viewer())?.scoreFormat || null;
         } catch (e: any) {
           if (stale()) return;
-          if (e?.auth) return renderConnect(key, 'rejected');
+          if (e?.auth) return renderConnect(key, 'rejected', rc);
           info = null;
         }
 
         if (stale()) return;
         if (!info || !fmt) {
-          if (!ctx.api.hasAuth()) return renderConnect(key, 'none');
+          if (!ctx.api.hasAuth()) return renderConnect(key, 'none', rc);
           retry = { key, at: Date.now() + 15000, count: retry.key === key ? retry.count + 1 : 1 };
           if (retry.count < MAX_FAILURES) schedule(15500);
           return;
@@ -319,12 +352,18 @@ defineModule({
 
           let res: any | false | null = null;
           try {
-            res = await save(route, info, scoreInput, progressInput);
+            res = await save(route, info, scoreInput, progressInput, fmt, rc);
           } finally {
             saveBtn.classList.remove('is-saving');
           }
 
-          if (!box.isConnected) return;
+          if (!box.isConnected) {
+            if (!disposed && currentRoute && currentRc && !currentRc.signal.aborted && (rerender || !panel())) {
+              rerender = false;
+              safe(() => render(true), 'media info refresh');
+            }
+            return;
+          }
 
           if (res && res !== false) {
             scoreInput.value = formatScore(res.score, fmt);
@@ -335,9 +374,9 @@ defineModule({
             saveBtn.classList.add('is-saved');
             saveBtn.textContent = 'Saved';
             saveBtn.disabled = true;
-            cancelSavedTimer = ctx.timeout(() => {
+            cancelSavedTimer = rc.timeout(() => {
               cancelSavedTimer = null;
-              if (!box.isConnected) return;
+              if (rc.signal.aborted || !box.isConnected) return;
               saveBtn.classList.remove('is-saved');
               saveBtn.textContent = 'Save';
               paint();
@@ -346,9 +385,9 @@ defineModule({
           } else if (res === false) {
             saveBtn.textContent = 'Failed';
             saveBtn.disabled = false;
-            cancelFailedTimer = ctx.timeout(() => {
+            cancelFailedTimer = rc.timeout(() => {
               cancelFailedTimer = null;
-              if (box.isConnected && saveBtn.textContent === 'Failed') {
+              if (!rc.signal.aborted && box.isConnected && saveBtn.textContent === 'Failed') {
                 saveBtn.textContent = 'Save';
                 paint();
               }
@@ -393,12 +432,19 @@ defineModule({
         paint();
 
         if (!anime) {
-          externalReleased(info).then((n) => {
-            if (stale() || !box.isConnected) return;
-            released = n;
-            lookupPending = false;
-            paint();
-          });
+          externalReleased(info, { http: ctx.http, signal: rc.signal }).then(
+            (n) => {
+              if (stale() || !box.isConnected) return;
+              released = n;
+              lookupPending = false;
+              paint();
+            },
+            () => {
+              if (stale() || !box.isConnected) return;
+              lookupPending = false;
+              paint();
+            }
+          );
         }
       } finally {
         rendering = false;
@@ -417,43 +463,42 @@ defineModule({
         id: Number(rc.match![2])
       };
       currentRoute = r;
+      currentRc = rc;
       gen++;
       shown = null;
+      rerender = false;
       routeAt = Date.now();
       retry = { key: null, at: 0, count: 0 };
       panel()?.remove();
 
-      const scheduleRoute = (ms = 300) => {
-        cancelSchedule?.();
-        cancelSchedule = rc.timeout(() => {
-          cancelSchedule = null;
-          render();
-        }, ms);
-      };
-
-      scheduleRoute(document.readyState === 'complete' ? 500 : 1200);
-      rc.listen(window, 'load', () => scheduleRoute(500), { once: true });
+      schedule(document.readyState === 'complete' ? 500 : 1200);
+      rc.listen(window, 'load', () => schedule(500), { once: true });
       rc.listen(window, 'focus', () => {
         if (panel()?.dataset.mode === 'connect' && ctx.api.hasAuth()) render(true);
       });
-      rc.onCleanup(
-        ctx.onBodyMutation(() => {
-          if (rc.signal.aborted || currentRoute !== r || panel() || rendering || saving) return;
-          if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
-          scheduleRoute(500);
-        })
-      );
+      rc.onBodyMutation(() => {
+        if (currentRoute !== r || panel() || rendering || saving) return;
+        if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
+        schedule(500);
+      });
       return () => {
         cancelSchedule?.();
         cancelSchedule = null;
-        if (currentRoute === r) currentRoute = null;
+        if (currentRoute === r) {
+          currentRoute = null;
+          currentRc = null;
+        }
+        rerender = false;
         gen++;
         shown = null;
         panel()?.remove();
       };
     });
     ctx.onCleanup(() => {
+      disposed = true;
       currentRoute = null;
+      currentRc = null;
+      rerender = false;
       gen++;
       cancelSchedule?.();
       cancelSchedule = null;

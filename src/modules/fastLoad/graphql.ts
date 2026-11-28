@@ -7,14 +7,15 @@ import {
   inflight,
   bytes,
   epoch,
+  pausedUntil,
   freshFloor,
   setBytes,
   setPausedUntil,
-  clearGlobalCache,
-  getViewerFromWindow
+  clearGlobalCache
 } from './state';
 import { CFG, stats, attempt } from './config';
 import {
+  getTaxonomyKind,
   isMediaListQuery,
   isTaxonomyQuery,
   isViewerQuery,
@@ -22,9 +23,11 @@ import {
   isVolatile,
   noStore,
   normalizeVariables,
-  normalizeGqlQuery,
+  hashGqlQuery,
   stableStringify,
-  parseBody
+  parseBody,
+  buildQueryCacheKey,
+  isRpcBlocked
 } from './helpers';
 import { extractUsersFromRpcResult } from './worker';
 import { rememberQuery } from './routes';
@@ -54,7 +57,9 @@ function toResponse(snap: any, live?: Response) {
       if (RATE_HEADERS.test(k)) headers.set(k, v);
     }
   }
-  return new ResponseCtor(snap.buf, { status: snap.status || 200, statusText: snap.statusText || 'OK', headers });
+  const status = snap.status || 200;
+  const body = status === 204 || status === 304 ? null : snap.buf;
+  return new ResponseCtor(body, { status, statusText: snap.statusText || 'OK', headers });
 }
 
 function abortable(promise: Promise<any>, signal?: AbortSignal | null) {
@@ -105,37 +110,30 @@ function put(key: string, snap: any) {
 }
 
 const decoder = new TextDecoder();
-const ERROR_SCAN_BYTES = 2048;
-function hasGraphQLErrors(buf: ArrayBuffer) {
+function hasGraphQLErrors(buf: ArrayBuffer): boolean {
   try {
-    const view = new Uint8Array(buf);
-    const head = decoder.decode(view.subarray(0, ERROR_SCAN_BYTES));
-    return /^\s*\{\s*"errors"\s*:/.test(head);
+    const json = JSON.parse(decoder.decode(buf));
+    if (!json || typeof json !== 'object') return true;
+    return Array.isArray(json.errors) && json.errors.length > 0;
   } catch {
-    return false;
+    return true;
   }
 }
 
 export function makeKey(d: any, parsed: any): string {
-  if (isMediaListQuery(parsed)) {
-    const { type = 'ANIME', userId, userName, ...rest } = normalizeVariables(parsed?.variables);
-    const who = userId || (userName ? String(userName).toLowerCase() : getViewerFromWindow().id || 'me');
-    return `gql:MediaListCollection:${String(type).toUpperCase()}:${who}:${stableStringify(rest)}`;
-  }
-  if (isTaxonomyQuery(parsed)) {
-    return 'gql:Taxonomy';
-  }
-  if (isViewerQuery(parsed)) {
-    return 'gql:Viewer';
-  }
-  const normQuery = normalizeGqlQuery(parsed?.query || '');
-  const normVars = stableStringify(normalizeVariables(parsed?.variables));
-  const auth = d.headers?.get?.('authorization') ? 'a' : '';
-  return `${d.url}\u0001${auth}\u0001${normQuery}\u0001${normVars}`;
+  const authHeader = String(d.headers?.get?.('authorization') || '');
+  return buildQueryCacheKey('gql', d.url, parsed?.query || '', parsed?.variables, authHeader);
 }
 
-const TAXONOMY_STORAGE_KEY = 'taxonomy:v1';
 const TAXONOMY_TTL = 24 * 3600 * 1000;
+
+function getTaxonomyStorageKey(parsed: any): string | null {
+  const taxKind = getTaxonomyKind(parsed);
+  if (!taxKind) return null;
+  const normVars = stableStringify(normalizeVariables(parsed?.variables));
+  if (normVars !== '{}') return null;
+  return `taxonomy:v2:${taxKind}:${hashGqlQuery(parsed?.query || '')}`;
+}
 
 function getQueryTtl(parsed: any): number {
   if (isTaxonomyQuery(parsed)) return TAXONOMY_TTL;
@@ -144,7 +142,7 @@ function getQueryTtl(parsed: any): number {
   return CFG.gqlTtl;
 }
 
-function loadStoredTaxonomy(): {
+function loadStoredTaxonomy(storageKey: string): {
   time: number;
   text: string;
   status: number;
@@ -152,7 +150,7 @@ function loadStoredTaxonomy(): {
   headers: [string, string][];
 } | null {
   try {
-    const raw = coreStorage?.get<any>(TAXONOMY_STORAGE_KEY, null);
+    const raw = coreStorage?.get<any>(storageKey, null);
     if (!raw) return null;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (parsed && typeof parsed.time === 'number' && typeof parsed.text === 'string') return parsed;
@@ -160,10 +158,10 @@ function loadStoredTaxonomy(): {
   return null;
 }
 
-function persistStoredTaxonomy(snap: any) {
+function persistStoredTaxonomy(storageKey: string, snap: any) {
   attempt(() => {
     const text = decoder.decode(snap.buf);
-    coreStorage?.set(TAXONOMY_STORAGE_KEY, {
+    coreStorage?.set(storageKey, {
       time: Date.now(),
       text,
       status: snap.status,
@@ -245,11 +243,7 @@ export function cachedFetch(
   const skipLearn = alflMode === true || alflMode === 'replay' || alflMode === 'internal';
   if (!skipLearn) attempt(() => rememberQuery(desc, parsed));
 
-  const blocker = (win as any).__ALFL_RPC_BLOCK__;
-  const isBlocked =
-    coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) ||
-    (typeof blocker === 'function' && blocker(parsed?.query, parsed?.variables));
-  if (isBlocked) {
+  if (isRpcBlocked(parsed?.query, parsed?.variables)) {
     fastLoadLog?.debug('Blocked GQL fetch:', JSON.stringify(parsed?.variables));
     const dummy = {
       data: {
@@ -279,12 +273,13 @@ export function cachedFetch(
   const now = Date.now();
 
   const cached = store.get(key);
+  const taxStorageKey = getTaxonomyStorageKey(parsed);
 
-  if (isTaxonomyQuery(parsed)) {
-    const storedTax = loadStoredTaxonomy();
+  if (taxStorageKey) {
+    const storedTax = loadStoredTaxonomy(taxStorageKey);
     if (storedTax && now - storedTax.time < TAXONOMY_TTL) {
       stats.cacheHits++;
-      fastLoadLog?.debug('Cache HIT (24h storage): GenreCollection & MediaTagCollection');
+      fastLoadLog?.debug('Cache HIT (24h storage):', getTaxonomyKind(parsed));
       const HeadersCtor = win.Headers || Headers;
       const ResponseCtor = win.Response || Response;
       return Promise.resolve(
@@ -307,7 +302,8 @@ export function cachedFetch(
     return Promise.resolve(toResponse(cached.snap));
   }
 
-  const flying = inflight.get(key);
+  type SnapshotResult = { snap: any; cacheable: boolean };
+  const flying = inflight.get(key) as Promise<SnapshotResult | null> | undefined;
   if (flying) {
     stats.deduped++;
     fastLoadLog?.debug(
@@ -316,8 +312,25 @@ export function cachedFetch(
     );
     return abortable(
       flying.then(
-        (snap) => toResponse(snap),
-        () => nativeFetch(input, init)
+        (result) => {
+          if (result) return toResponse(result.snap);
+          if (init?.signal?.aborted) {
+            throw (init.signal as any).reason ?? new DOMException('The operation was aborted.', 'AbortError');
+          }
+          if (Date.now() < pausedUntil) {
+            throw new Error('FastLoad paused due to rate limit');
+          }
+          return nativeFetch(input, init);
+        },
+        (err: any) => {
+          if (init?.signal?.aborted) {
+            throw (init.signal as any).reason ?? new DOMException('The operation was aborted.', 'AbortError');
+          }
+          if (Date.now() < pausedUntil) {
+            throw err;
+          }
+          return nativeFetch(input, init);
+        }
       ),
       init?.signal
     );
@@ -334,32 +347,40 @@ export function cachedFetch(
   );
   const original = trackedNativeFetch(nativeFetch, job, input, init);
 
-  const snapshot = original.then(async (res: Response) => {
+  const snapshot: Promise<SnapshotResult | null> = original.then(async (res: Response) => {
     note429(res);
-    if (res.status !== 200 || res.bodyUsed || typeof res.clone !== 'function') {
+    if (res.bodyUsed || typeof res.clone !== 'function') {
       fastLoadLog?.debug('Response not cacheable:', res.status, opName);
-      throw new Error('not cacheable');
+      return null;
     }
     const copy = res.clone();
     const buf = await copy.arrayBuffer();
-    if (hasGraphQLErrors(buf)) {
-      fastLoadLog?.debug('Response had GraphQL errors:', opName);
-      throw new Error('graphql errors');
+    const hasErrors = res.status === 200 ? hasGraphQLErrors(buf) : false;
+    const cacheable = res.status === 200 && !hasErrors;
+    if (!cacheable) {
+      fastLoadLog?.debug(
+        res.status !== 200 ? 'Response not cacheable:' : 'Response had GraphQL errors:',
+        res.status,
+        opName
+      );
     }
-    return {
+    const snap = {
       buf,
       status: res.status,
       statusText: res.statusText,
       headers: [...(res.headers as any).entries()].filter(
-        ([k]: [string]) => !SKIP_HEADERS.test(k) && !RATE_HEADERS.test(k)
+        ([k]: [string]) => !SKIP_HEADERS.test(k) && (!cacheable || !RATE_HEADERS.test(k))
       )
     };
+    return { snap, cacheable };
   });
 
   inflight.set(key, snapshot);
   snapshot.then(
-    (snap: any) => {
+    (result) => {
       if (inflight.get(key) === snapshot) inflight.delete(key);
+      if (!result || !result.cacheable) return;
+      const { snap } = result;
       if (epoch === myEpoch) {
         put(key, snap);
         fastLoadLog?.debug('Cached in RAM:', opName, `${Math.round(snap.buf.byteLength / 1024)} KB`);
@@ -369,8 +390,8 @@ export function cachedFetch(
           extractUsersFromRpcResult(JSON.parse(decoder.decode(snap.buf))?.data);
         }
       });
-      if (isTaxonomyQuery(parsed) && snap.status === 200) {
-        persistStoredTaxonomy(snap);
+      if (taxStorageKey && snap.status === 200) {
+        persistStoredTaxonomy(taxStorageKey, snap);
       }
     },
     () => {
@@ -420,10 +441,12 @@ function trackedNativeFetch(nativeFetch: any, job: any, input: any, init?: Reque
     p.then(
       async (res: Response) => {
         let data: any = undefined;
+        let errors: readonly { message?: string; [key: string]: any }[] | undefined = undefined;
         if (res && !res.bodyUsed && typeof res.clone === 'function') {
           try {
             const json = await res.clone().json();
             data = json?.data;
+            errors = Array.isArray(json?.errors) ? json.errors : undefined;
           } catch {}
         }
         coreHooks?.emitGqlFetch({
@@ -434,7 +457,8 @@ function trackedNativeFetch(nativeFetch: any, job: any, input: any, init?: Reque
           operationName,
           status: res.status,
           ok: res.ok,
-          data
+          data,
+          errors
         });
       },
       () => {}

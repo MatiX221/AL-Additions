@@ -36,7 +36,7 @@ export function getDefaultDebugSettings(): DebugSettingsMap {
 
   const debugModules = features
     .filter((f): f is RegisteredFeature & { debug: ModuleDebugEnabledDef } =>
-      Boolean(f.debug && f.debug.debug !== false)
+      Boolean(f.debug && f.debug.debug !== false && f.id !== CORE_DEBUG_SCOPE)
     )
     .sort((a, b) => a.id.localeCompare(b.id));
 

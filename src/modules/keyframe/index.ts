@@ -50,10 +50,11 @@ defineModule({
       const kind = rc.match![1] as 'staff' | 'studio';
       const id = rc.match![2];
 
-      const link = rc.mount({
+      const link = rc.mount<HTMLAnchorElement>({
         id: 'link',
         anchor: SLOT,
         position: 'afterbegin',
+        ownUi: true,
         style: (sel) => `
           ${sel}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
           ${sel}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
@@ -68,13 +69,13 @@ defineModule({
           a.title = `Open on ${LABEL}`;
           a.setAttribute('aria-label', `Open on ${LABEL}`);
           a.innerHTML = `${icon('external', 14)}<span>${LABEL}</span>`;
-          rc.listen(a, 'click', (e) => e.stopPropagation());
-          skin(a, document.querySelector(SLOT));
+          a.addEventListener('click', (e) => e.stopPropagation());
           return a;
-        }
+        },
+        onMount: (a) => skin(a)
       });
 
-      rc.onCleanup(ctx.onBodyMutation(() => skin(link.el())));
+      rc.onBodyMutation(() => skin(link.el()));
     });
   }
 });

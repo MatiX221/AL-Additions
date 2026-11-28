@@ -2,20 +2,17 @@ import { GM_xmlhttpRequest } from 'vite-plugin-monkey/dist/client';
 import { Settings } from '../settings/settings';
 import {
   type AccountProvider,
-  type AddStyleFn,
   type AniListClient,
   type AniListSession,
   type ChannelLogger,
   type CleanupFn,
   type CoreHooksApi,
-  type CssSource,
   type FeatureContext,
   type FeatureLayer,
+  type HttpClient,
   type HttpDownloadOptions,
   type HttpRequestOptions,
   type MigrateContext,
-  type ModalHandle,
-  type ModalOptions,
   type ModuleDebugDef,
   type ModuleDef,
   type ModuleDisableReason,
@@ -25,11 +22,13 @@ import {
   type ModuleStatus,
   type MountHandle,
   type MountSpec,
+  type PersistentCache,
   type RouteContext,
   type ServiceMap,
   type StorageScope
 } from '../types';
 import {
+  composeAbortSignals,
   createCoreLogger,
   createLogger,
   downloadFile,
@@ -45,8 +44,8 @@ import {
   watchAccountProvider
 } from './accounts';
 import { CoreHooks, EventBus, ServiceRegistry } from './bus';
+import { createContextScope, drainCleanupsReverse, scopeAniListClient, type ContextScopeCounters } from './contextScope';
 import { registerMenuCommand } from './menu';
-import { createModal } from './modal';
 import { Core } from './observer';
 import { addStyle } from './styles';
 import { showToast, toastError, toastSuccess } from './toast';
@@ -64,6 +63,8 @@ const LAYER_ORDER: Record<ModuleLayer, number> = {
 };
 
 const ID_RE = /^[a-z][A-Za-z0-9]*$/;
+const RESERVED_MODULE_IDS = new Set(['core', 'devMode']);
+const teardownStarters = new WeakMap<Set<CleanupFn>, () => void>();
 
 interface CoreServices {
   api: AniListClient;
@@ -113,7 +114,7 @@ interface ModuleRecord {
   runtimeError?: string;
   booted: boolean;
   bootSeq: number;
-  cleanups: CleanupFn[];
+  cleanups: Set<CleanupFn>;
   abortController: AbortController | null;
 }
 
@@ -122,6 +123,7 @@ const recordsById = new Map<string, ModuleRecord>();
 const invalidIds = new Map<string, ModuleStatus>();
 const liveStatuses = new Map<string, ModuleStatus>();
 const statusListeners = new Set<(id: string, status: ModuleStatus) => void>();
+let deferredStarted = false;
 
 function currentHost(): string {
   return location.hostname;
@@ -361,6 +363,13 @@ function resolveAllStates(stagedEnabled?: Record<string, boolean>): ResolvedGrap
 
 function syncAllLiveStatuses(statuses: Record<string, ModuleStatus>): void {
   for (const [id, st] of Object.entries(statuses)) {
+    if (st.active) {
+      const rec = recordsById.get(id);
+      if (!rec || !rec.booted || rec.standalonePaused || rec.runtimeError) {
+        emitStatusChange(id, { active: false });
+        continue;
+      }
+    }
     emitStatusChange(id, st);
   }
 }
@@ -369,7 +378,8 @@ function createScopedStorage(
   storagePrefix: string,
   isDisposed: () => boolean,
   wrapWatch: (fn: () => CleanupFn) => CleanupFn = (fn) => fn(),
-  guardClear = false
+  guardClear = false,
+  onClear?: () => void
 ): StorageScope {
   return {
     get: <T>(k: string, d?: T) => store.get<T>(`${storagePrefix}${k}`, d),
@@ -390,6 +400,7 @@ function createScopedStorage(
     },
     clear: () => {
       if (guardClear && isDisposed()) return;
+      onClear?.();
       for (const k of store.list()) {
         if (k.startsWith(storagePrefix)) store.del(k);
       }
@@ -397,42 +408,49 @@ function createScopedStorage(
   };
 }
 
-function runCleanupsReverse(id: string, cleanups: CleanupFn[]): void {
-  for (let i = cleanups.length - 1; i >= 0; i--) {
-    try {
-      cleanups[i]();
-    } catch (e) {
-      coreLog.error(`Module "${id}" failed during cleanup:`, e);
-    }
-  }
-  cleanups.length = 0;
+function runCleanupsReverse(id: string, cleanups: Set<CleanupFn>): void {
+  teardownStarters.get(cleanups)?.();
+  drainCleanupsReverse(id, cleanups, (err) => {
+    coreLog.error(`Module "${id}" failed during cleanup:`, err);
+  });
 }
 
 function createContextForRecord(
   rec: ModuleRecord,
-  cleanups: CleanupFn[],
+  cleanups: Set<CleanupFn>,
   ac: AbortController
 ): FeatureContext<any, any> {
   let disposed = false;
+  let tearingDown = false;
+  const isClosed = (): boolean => disposed || tearingDown;
   let localClearingDepth = 0;
   const noop: CleanupFn = () => {};
-  const activeRequests = new Set<{ abort?: () => void; reject?: (e: Error) => void }>();
+  const activeRequests = new Set<{ abort?: () => void; reject?: (e: Error) => void; cleanupAbort?: () => void }>();
+  const persistentHandles = new Set<{ cancel: () => void; flush: () => void }>();
+  let pagehideRegistered = false;
+  const counters: ContextScopeCounters = { idSeq: 0, styleSeq: 0, modalSeq: 0 };
 
-  const track = <T extends CleanupFn>(fn: T): T => {
-    if (disposed) {
-      try {
-        fn();
-      } catch {}
-      return fn;
+  teardownStarters.set(cleanups, () => {
+    tearingDown = true;
+    try {
+      ac.abort();
+    } catch (e) {
+      coreLog.error(`Module "${rec.id}" failed during abort:`, e);
     }
-    cleanups.push(fn);
-    return fn;
-  };
+  });
 
-  const whenAlive = (fn: () => CleanupFn): CleanupFn => {
-    if (disposed) return noop;
-    return track(fn());
-  };
+  const rootScope = createContextScope({
+    prefix: rec.id,
+    signal: ac.signal,
+    isClosed,
+    cleanups,
+    styleKind: 'style',
+    counters,
+    onError: (e) => coreLog.error(`Module "${rec.id}" failed during cleanup:`, e)
+  });
+
+  const track = rootScope.track;
+  const whenAlive = rootScope.whenAlive;
 
   track(() => {
     disposed = true;
@@ -444,6 +462,9 @@ function createContextForRecord(
     }
     ac.abort();
     for (const req of [...activeRequests]) {
+      try {
+        req.cleanupAbort?.();
+      } catch {}
       try {
         req.abort?.();
       } catch {}
@@ -462,72 +483,58 @@ function createContextForRecord(
     }
   };
 
-  let idSeq = 0;
-  let styleSeq = 0;
   let mountSeq = 0;
-  let modalSeq = 0;
 
-  const getId = (name?: string): string => {
-    const trimmed = name?.trim();
-    if (!trimmed) return `ala-${rec.id}-${++idSeq}`;
-    return trimmed.startsWith('ala-') ? trimmed : `ala-${rec.id}-${trimmed}`;
-  };
-
-  const makeAddStyle =
-    (push: (fn: CleanupFn) => void, signal: AbortSignal, autoPrefix: 'style' | 'route-style'): AddStyleFn =>
-    (idOrCss: CssSource, maybeCss?: CssSource): CleanupFn => {
-      if (disposed || signal.aborted) return noop;
-      const isOneArg = maybeCss === undefined;
-      const css = isOneArg ? idOrCss : maybeCss;
-      let styleId: string;
-      if (isOneArg) {
-        styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
-      } else {
-        const raw = String(idOrCss || '').trim();
-        if (!raw) {
-          styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
-        } else if (raw.startsWith('ala-')) {
-          styleId = raw;
-        } else {
-          styleId = `ala-${rec.id}-${raw}${raw.endsWith('-style') ? '' : '-style'}`;
-        }
-      }
-      const clean = addStyle(styleId, css);
-      push(clean);
-      return clean;
-    };
-
-  const addMount = (spec: MountSpec, pushCleanup: (fn: CleanupFn) => void, signal?: AbortSignal): MountHandle => {
-    const resolvedId = spec.id ? getId(spec.id) : `ala-${rec.id}-mount-${++mountSeq}`;
+  const addMount = <T extends Element = HTMLElement>(
+    spec: MountSpec<T>,
+    trackFn: <F extends CleanupFn>(fn: F) => F,
+    signal?: AbortSignal
+  ): MountHandle<T> => {
+    const resolvedId = spec.id ? rootScope.getId(spec.id) : `ala-${rec.id}-mount-${++mountSeq}`;
     const selector = `#${resolvedId}`;
-    if (disposed || signal?.aborted) {
-      return { id: resolvedId, selector, el: () => null, unmount: noop };
+    if (isClosed() || signal?.aborted) {
+      return { id: resolvedId, selector, el: () => null, unmount: noop, refresh: noop };
     }
-    let mountedEl: Element | null = null;
+    let mountedEl: T | null = null;
+    let elCleanup: CleanupFn | null = null;
     let mountDisposed = false;
     let ownDisposer: CleanupFn | null = null;
     let mountStyleDisposer: CleanupFn | null = null;
 
-    const tryMount = () => {
-      if (mountDisposed || disposed || signal?.aborted) return;
-      if (spec.match && !spec.match()) {
-        if (mountedEl) {
-          mountedEl.remove();
-          mountedEl = null;
+    const runElCleanup = () => {
+      const fn = elCleanup;
+      elCleanup = null;
+      if (fn) {
+        try {
+          fn();
+        } catch (e) {
+          coreLog.error(`Module "${rec.id}" mount onMount cleanup failed:`, e);
         }
-        return;
       }
-      if (mountedEl?.isConnected) return;
-      const existing = document.getElementById(resolvedId);
-      if (existing?.isConnected) {
-        mountedEl = existing;
-        return;
+    };
+
+    const invokeOnMount = (el: T) => {
+      runElCleanup();
+      if (!spec.onMount) return;
+      try {
+        const res = spec.onMount(el);
+        if (typeof res === 'function') {
+          if (mountDisposed || isClosed() || signal?.aborted) {
+            try {
+              res();
+            } catch (e) {
+              coreLog.error(`Module "${rec.id}" mount onMount cleanup failed:`, e);
+            }
+          } else {
+            elCleanup = res;
+          }
+        }
+      } catch (e) {
+        coreLog.error(`Module "${rec.id}" mount onMount failed:`, e);
       }
-      const anchor = typeof spec.anchor === 'string' ? document.querySelector(spec.anchor) : spec.anchor();
-      if (!anchor) return;
-      const el = spec.create();
-      if (!el) return;
-      el.id = resolvedId;
+    };
+
+    const ensureStyle = () => {
       if (spec.style !== undefined && !mountStyleDisposer) {
         const styleCss = spec.style;
         mountStyleDisposer = addStyle(
@@ -535,24 +542,64 @@ function createContextForRecord(
           typeof styleCss === 'function' ? () => styleCss(selector) : styleCss
         );
       }
-      anchor.insertAdjacentElement(spec.position ?? 'afterend', el);
-      mountedEl = el;
+    };
+
+    const ensureOwnUi = () => {
       if (spec.ownUi && !ownDisposer) {
         ownDisposer = Core.registerOwnUi(selector);
       }
     };
 
+    const tryMount = () => {
+      if (mountDisposed || isClosed() || signal?.aborted) return;
+      if (spec.match && !spec.match()) {
+        if (mountedEl) {
+          runElCleanup();
+          mountedEl.remove();
+          mountedEl = null;
+        }
+        return;
+      }
+      if (mountedEl?.isConnected) return;
+      if (mountedEl) {
+        runElCleanup();
+        mountedEl = null;
+      }
+      const existing = document.getElementById(resolvedId) as T | null;
+      if (existing?.isConnected) {
+        ensureStyle();
+        ensureOwnUi();
+        mountedEl = existing;
+        invokeOnMount(existing);
+        return;
+      }
+      const anchor = typeof spec.anchor === 'string' ? document.querySelector(spec.anchor) : spec.anchor();
+      if (!anchor) return;
+      const pos = spec.position ?? 'afterend';
+      if ((pos === 'beforebegin' || pos === 'afterend') && !anchor.parentElement) return;
+      const el = spec.create();
+      if (!el) return;
+      el.id = resolvedId;
+      ensureStyle();
+      anchor.insertAdjacentElement(pos, el);
+      mountedEl = el;
+      ensureOwnUi();
+      invokeOnMount(el);
+    };
+
     let unsubReady: CleanupFn = noop;
     let unsubNav: CleanupFn = noop;
     let unsubBody: CleanupFn = noop;
+    let disposeTracked: CleanupFn = noop;
 
     const disposeMount = () => {
       if (mountDisposed) return;
       mountDisposed = true;
-      signal?.removeEventListener('abort', disposeMount);
+      signal?.removeEventListener('abort', disposeTracked);
       unsubReady();
       unsubNav();
       unsubBody();
+      runElCleanup();
       ownDisposer?.();
       ownDisposer = null;
       mountStyleDisposer?.();
@@ -564,60 +611,175 @@ function createContextForRecord(
     unsubReady = Core.ready(tryMount);
     unsubNav = Core.onNavigate(tryMount);
     unsubBody = Core.onBodyMutation(tryMount);
-    if (disposed || signal?.aborted) {
+    if (isClosed() || signal?.aborted) {
       disposeMount();
-      return { id: resolvedId, selector, el: () => null, unmount: noop };
+      return { id: resolvedId, selector, el: () => null, unmount: noop, refresh: noop };
     }
-    signal?.addEventListener('abort', disposeMount, { once: true });
-    pushCleanup(disposeMount);
+    disposeTracked = trackFn(disposeMount);
+    signal?.addEventListener('abort', disposeTracked, { once: true });
     return {
       id: resolvedId,
       selector,
-      el: () => document.getElementById(resolvedId),
-      unmount: disposeMount
+      el: () =>
+        mountDisposed || isClosed() || signal?.aborted
+          ? null
+          : (document.getElementById(resolvedId) as T | null),
+      unmount: disposeTracked,
+      refresh: tryMount
     };
   };
 
-  const makeScopedHelpers = (
-    push: (fn: CleanupFn) => void,
-    signal: AbortSignal,
-    stylePrefix: 'style' | 'route-style'
-  ) => ({
-    listen: (
-      target: EventTarget,
-      type: string,
-      listener: EventListenerOrEventListenerObject,
-      options?: boolean | AddEventListenerOptions
-    ): CleanupFn => {
-      if (disposed || signal.aborted) return noop;
-      target.addEventListener(type, listener, options);
-      const cleanup = () => target.removeEventListener(type, listener, options);
-      push(cleanup);
-      return cleanup;
-    },
-    interval: (fn: () => void, ms: number): CleanupFn => {
-      if (disposed || signal.aborted) return noop;
-      const id = setInterval(fn, ms);
-      const cleanup = () => clearInterval(id);
-      push(cleanup);
-      return cleanup;
-    },
-    timeout: (fn: () => void, ms: number): CleanupFn => {
-      if (disposed || signal.aborted) return noop;
-      const id = setTimeout(fn, ms);
-      const cleanup = () => clearTimeout(id);
-      push(cleanup);
-      return cleanup;
-    },
-    mount: (spec: MountSpec): MountHandle => addMount(spec, push, signal),
-    addStyle: makeAddStyle(push, signal, stylePrefix),
-    waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs = 8000): Promise<T | null> => {
-      if (disposed || signal.aborted) return Promise.resolve(null);
-      return Core.waitForSelector<T>(selector, timeoutMs, signal);
-    }
-  });
+  const makeHttpClient = (scopeSignal?: AbortSignal): HttpClient => {
+    const request = (url: string, opts: HttpRequestOptions = {}): Promise<any> => {
+      const { signal: callerSignal, ...xhrOpts } = opts || {};
+      if (isClosed() || ac.signal.aborted || scopeSignal?.aborted || callerSignal?.aborted) {
+        return Promise.reject(new Error('Request aborted'));
+      }
+      const composed = scopeSignal ? composeAbortSignals(scopeSignal, callerSignal) : { signal: callerSignal, dispose: noop };
+      const effectiveSignal = composed.signal;
+      if (effectiveSignal?.aborted) {
+        composed.dispose();
+        return Promise.reject(new Error('Request aborted'));
+      }
+      return new Promise((resolve, reject) => {
+        let handle: any;
+        const entry: { abort?: () => void; reject?: (e: Error) => void; cleanupAbort?: () => void } = { reject };
+        activeRequests.add(entry);
+        const onAbort = () => {
+          try {
+            handle?.abort?.();
+          } catch {}
+          settle(() => reject(new Error('Request aborted')));
+        };
+        const settle = (fn: () => void) => {
+          if (!activeRequests.has(entry)) return;
+          activeRequests.delete(entry);
+          effectiveSignal?.removeEventListener('abort', onAbort);
+          composed.dispose();
+          fn();
+        };
+        entry.cleanupAbort = () => {
+          effectiveSignal?.removeEventListener('abort', onAbort);
+          composed.dispose();
+        };
+        effectiveSignal?.addEventListener('abort', onAbort, { once: true });
+        const g = globalThis as any;
+        const xhr =
+          (Object.prototype.hasOwnProperty.call(g, 'GM_xmlhttpRequest') && typeof g.GM_xmlhttpRequest === 'function'
+            ? g.GM_xmlhttpRequest
+            : GM_xmlhttpRequest) as typeof GM_xmlhttpRequest;
+        try {
+          handle = xhr({
+            method: 'GET',
+            timeout: 15000,
+            ...(xhrOpts as any),
+            url,
+            onload: (res: any) => settle(() => resolve(res)),
+            onerror: () => settle(() => reject(new Error('Network error'))),
+            ontimeout: () => settle(() => reject(new Error('Timeout'))),
+            onabort: () => settle(() => reject(new Error('Request aborted')))
+          });
+        } catch (err) {
+          settle(() => reject(err));
+          return;
+        }
+        if (effectiveSignal?.aborted) {
+          onAbort();
+          return;
+        }
+        entry.abort = () => {
+          try {
+            handle?.abort?.();
+          } catch {}
+        };
+      });
+    };
 
-  const rootScoped = makeScopedHelpers(track, ac.signal, 'style');
+    const text = async (url: string, opts?: HttpRequestOptions): Promise<string> => {
+      const r = await request(url, opts);
+      if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+      return r.responseText || '';
+    };
+
+    const json = async <T = any>(url: string, opts?: HttpRequestOptions): Promise<T> => {
+      const r = await request(url, opts);
+      if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+      if (opts?.responseType === 'json' && r.response !== undefined) {
+        return r.response as T;
+      }
+      return JSON.parse(r.responseText || '') as T;
+    };
+
+    const download = (url: string, name: string, opts: HttpDownloadOptions = {}): Promise<'download' | 'tab'> => {
+      const { signal: callerSignal, ...dlOpts } = opts || {};
+      if (isClosed() || ac.signal.aborted || scopeSignal?.aborted || callerSignal?.aborted) {
+        return Promise.reject(new Error('Download aborted'));
+      }
+      const composed = scopeSignal ? composeAbortSignals(scopeSignal, callerSignal) : { signal: callerSignal, dispose: noop };
+      const effectiveSignal = composed.signal;
+      if (effectiveSignal?.aborted) {
+        composed.dispose();
+        return Promise.reject(new Error('Download aborted'));
+      }
+      return new Promise((resolve, reject) => {
+        const entry: { abort?: () => void; reject?: (e: Error) => void; cleanupAbort?: () => void } = { reject };
+        activeRequests.add(entry);
+        let settled = false;
+        let handle: { abort: () => void } | null = null;
+        const onAbort = () => {
+          settled = true;
+          try {
+            handle?.abort?.();
+          } catch {}
+          settle(() => reject(new Error('Download aborted')));
+        };
+        const settle = (fn: () => void) => {
+          if (!activeRequests.has(entry)) return;
+          activeRequests.delete(entry);
+          effectiveSignal?.removeEventListener('abort', onAbort);
+          composed.dispose();
+          fn();
+        };
+        entry.cleanupAbort = () => {
+          effectiveSignal?.removeEventListener('abort', onAbort);
+          composed.dispose();
+        };
+        effectiveSignal?.addEventListener('abort', onAbort, { once: true });
+        handle = downloadFile(url, name, {
+          saveAs: dlOpts.saveAs,
+          openTabOnError: () =>
+            !isClosed() && !ac.signal.aborted && !effectiveSignal?.aborted && dlOpts.openTabOnError !== false,
+          onComplete: (outcome) => {
+            settled = true;
+            settle(() => resolve(outcome));
+          },
+          onAbort: () => {
+            settled = true;
+            settle(() => reject(new Error('Download aborted')));
+          },
+          onError: (err) => {
+            settled = true;
+            settle(() => reject(err instanceof Error ? err : new Error(String(err || 'Download failed'))));
+          }
+        });
+        if (!settled && effectiveSignal?.aborted) {
+          onAbort();
+          return;
+        }
+        if (!settled) {
+          entry.abort = () => {
+            try {
+              handle?.abort?.();
+            } catch {}
+          };
+        }
+      });
+    };
+
+    return { request, text, json, download };
+  };
+
+  const rootHttp = makeHttpClient(ac.signal);
 
   const onRoute = (
     matchOrHandler:
@@ -630,7 +792,7 @@ function createContextForRecord(
       const matcher = typeof maybeHandler === 'function' ? (matchOrHandler as RegExp | ((url: URL) => boolean)) : null;
       const handler = (maybeHandler ?? matchOrHandler) as (rc: RouteContext) => void | Promise<void> | CleanupFn;
 
-      let routeCleanups: CleanupFn[] = [];
+      let routeCleanups = new Set<CleanupFn>();
       let routeAc: AbortController | null = null;
       let routeSubDisposed = false;
 
@@ -641,7 +803,7 @@ function createContextForRecord(
       };
 
       const evaluate = () => {
-        if (routeSubDisposed || disposed) return;
+        if (routeSubDisposed || isClosed()) return;
         teardownRoute();
 
         let url: URL;
@@ -662,25 +824,62 @@ function createContextForRecord(
 
           const localAc = new AbortController();
           routeAc = localAc;
-          const localCleanups: CleanupFn[] = [];
+          const localCleanups = new Set<CleanupFn>();
           routeCleanups = localCleanups;
-          const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal, 'route-style');
+          const routeScope = createContextScope({
+            prefix: rec.id,
+            signal: localAc.signal,
+            isClosed: () => isClosed() || localAc.signal.aborted,
+            cleanups: localCleanups,
+            styleKind: 'route-style',
+            counters,
+            onError: (e) => coreLog.error(`Module "${rec.id}" failed during cleanup:`, e)
+          });
 
+          let routeApiWrapper: Omit<AniListClient, 'session'> | null = null;
           const rc: RouteContext = {
             url,
             pathname: url.pathname,
             match: matchArr,
             signal: localAc.signal,
-            onCleanup: (fn) => {
-              if (localAc.signal.aborted) {
-                try {
-                  fn();
-                } catch {}
-              } else {
-                localCleanups.push(fn);
+            getId: routeScope.getId,
+            onCleanup: routeScope.onCleanup,
+            ready: (cb) =>
+              routeScope.whenAlive(() =>
+                Core.ready(() => {
+                  if (!isClosed() && !localAc.signal.aborted) cb();
+                })
+              ),
+            onBodyMutation: (cb) =>
+              routeScope.whenAlive(() =>
+                Core.onBodyMutation((mutations) => {
+                  if (!isClosed() && !localAc.signal.aborted) cb(mutations);
+                })
+              ),
+            observe: routeScope.observe,
+            listen: routeScope.listen,
+            interval: routeScope.interval,
+            timeout: routeScope.timeout,
+            debounce: routeScope.debounce,
+            raf: routeScope.raf,
+            mount: <T extends Element = HTMLElement>(spec: MountSpec<T>): MountHandle<T> =>
+              addMount(spec, routeScope.track, localAc.signal),
+            addStyle: routeScope.addStyle,
+            modal: routeScope.modal,
+            confirm: routeScope.confirm,
+            alert: routeScope.alert,
+            waitForSelector: routeScope.waitForSelector,
+            http: makeHttpClient(localAc.signal),
+            get api(): Omit<AniListClient, 'session'> {
+              if (!routeApiWrapper) {
+                routeApiWrapper = scopeAniListClient(
+                  getCoreApi,
+                  localAc.signal,
+                  () => isClosed() || localAc.signal.aborted
+                );
               }
-            },
-            ...localScoped
+              return routeApiWrapper;
+            }
           };
 
           const res = handler(rc);
@@ -694,17 +893,21 @@ function createContextForRecord(
               (err) => {
                 if (!localAc.signal.aborted) {
                   coreLog.error(`Module "${rec.id}" route handler failed:`, err);
+                  if (routeAc === localAc) {
+                    teardownRoute();
+                  }
                 }
               }
             );
           }
         } catch (err) {
           coreLog.error(`Module "${rec.id}" route handler failed:`, err);
+          teardownRoute();
         }
       };
 
       evaluate();
-      const unsubNav = routeSubDisposed || disposed ? noop : Core.onNavigate(evaluate);
+      const unsubNav = routeSubDisposed || isClosed() ? noop : Core.onNavigate(evaluate);
 
       const disposeRouteWatcher = () => {
         if (routeSubDisposed) return;
@@ -715,89 +918,11 @@ function createContextForRecord(
       return disposeRouteWatcher;
     });
 
-  const httpRequest = (url: string, opts: HttpRequestOptions = {}): Promise<any> => {
-    if (disposed || ac.signal.aborted) {
-      return Promise.reject(new Error('Request aborted'));
-    }
-    return new Promise((resolve, reject) => {
-      const entry: { abort?: () => void; reject?: (e: Error) => void } = { reject };
-      activeRequests.add(entry);
-      const settle = (fn: () => void) => {
-        if (!activeRequests.has(entry)) return;
-        activeRequests.delete(entry);
-        fn();
-      };
-      const g = globalThis as any;
-      const xhr =
-        (Object.prototype.hasOwnProperty.call(g, 'GM_xmlhttpRequest') && typeof g.GM_xmlhttpRequest === 'function'
-          ? g.GM_xmlhttpRequest
-          : GM_xmlhttpRequest) as typeof GM_xmlhttpRequest;
-      let handle: any;
-      try {
-        handle = xhr({
-          method: 'GET',
-          timeout: 15000,
-          ...(opts as any),
-          url,
-          onload: (res: any) => settle(() => resolve(res)),
-          onerror: () => settle(() => reject(new Error('Network error'))),
-          ontimeout: () => settle(() => reject(new Error('Timeout'))),
-          onabort: () => settle(() => reject(new Error('Request aborted')))
-        });
-      } catch (err) {
-        settle(() => reject(err));
-        return;
-      }
-      entry.abort = () => {
-        try {
-          handle?.abort?.();
-        } catch {}
-      };
-    });
-  };
-
-  const httpDownload = (url: string, name: string, opts: HttpDownloadOptions = {}): Promise<'download' | 'tab'> => {
-    if (disposed || ac.signal.aborted) {
-      return Promise.reject(new Error('Download aborted'));
-    }
-    return new Promise((resolve, reject) => {
-      const entry: { abort?: () => void; reject?: (e: Error) => void } = { reject };
-      activeRequests.add(entry);
-      const settle = (fn: () => void) => {
-        if (!activeRequests.has(entry)) return;
-        activeRequests.delete(entry);
-        fn();
-      };
-      let settled = false;
-      const handle = downloadFile(url, name, {
-        saveAs: opts.saveAs,
-        openTabOnError: () => !disposed && !ac.signal.aborted && opts.openTabOnError !== false,
-        onComplete: (outcome) => {
-          settled = true;
-          settle(() => resolve(outcome));
-        },
-        onAbort: () => {
-          settled = true;
-          settle(() => reject(new Error('Download aborted')));
-        },
-        onError: (err) => {
-          settled = true;
-          settle(() => reject(err instanceof Error ? err : new Error(String(err || 'Download failed'))));
-        }
-      });
-      if (!settled) {
-        entry.abort = () => {
-          try {
-            handle?.abort?.();
-          } catch {}
-        };
-      }
-    });
-  };
-
+  const contextFetchLeases = new Set<CleanupFn>();
   const trackedHooks: CoreHooksApi = {
     setSessionClearing: (active) => {
       if (disposed) return;
+      if (tearingDown && active) return;
       if (active) {
         localClearingDepth++;
         CoreHooks.setSessionClearing(true);
@@ -809,19 +934,36 @@ function createContextForRecord(
     isSessionClearing: () => CoreHooks.isSessionClearing(),
     getAuthHeader: () => CoreHooks.getAuthHeader(),
     setAuthHeader: (header) => {
-      if (!disposed) CoreHooks.setAuthHeader(header);
+      if (!isClosed()) CoreHooks.setAuthHeader(header);
     },
     clearAuth: () => {
-      if (!disposed) CoreHooks.clearAuth();
+      if (!isClosed()) CoreHooks.clearAuth();
     },
     registerCacheBridge: (bridge) => whenAlive(() => CoreHooks.registerCacheBridge(bridge)),
     getCacheBridge: () => CoreHooks.getCacheBridge(),
     markFetchOwner: (active) => {
-      if (!disposed) CoreHooks.markFetchOwner(active);
+      if (!active) {
+        if (!disposed) {
+          for (const release of [...contextFetchLeases]) {
+            release();
+          }
+          contextFetchLeases.clear();
+        }
+        return noop;
+      }
+      if (isClosed()) return noop;
+      let leaseRef: CleanupFn = noop;
+      const rawRelease = CoreHooks.markFetchOwner(true);
+      leaseRef = track(() => {
+        contextFetchLeases.delete(leaseRef);
+        rawRelease();
+      });
+      contextFetchLeases.add(leaseRef);
+      return leaseRef;
     },
     hasGqlFetchSubscribers: () => CoreHooks.hasGqlFetchSubscribers(),
     emitGqlFetch: (event) => {
-      if (!disposed) CoreHooks.emitGqlFetch(event);
+      if (!isClosed()) CoreHooks.emitGqlFetch(event);
     },
     onGqlFetch: (cb) => whenAlive(() => CoreHooks.onGqlFetch(cb)),
     blockRpc: (fn) => whenAlive(() => CoreHooks.blockRpc(fn)),
@@ -891,12 +1033,12 @@ function createContextForRecord(
   });
 
   let sessionWrapper: AniListSession | null = null;
-  let apiWrapper: AniListClient | null = null;
+  let apiWrapper: Omit<AniListClient, 'session'> | null = null;
   const getSessionWrapper = (): AniListSession => {
     if (!sessionWrapper) {
       sessionWrapper = {
         peek: (opts) =>
-          getCoreSession().peek(disposed && opts?.reconcile ? { ...opts, reconcile: false } : opts),
+          getCoreSession().peek(isClosed() && opts?.reconcile ? { ...opts, reconcile: false } : opts),
         get userId() {
           return getCoreSession().userId;
         },
@@ -906,36 +1048,24 @@ function createContextForRecord(
         get scoreFormat() {
           return getCoreSession().scoreFormat;
         },
-        hasAuth: () => getCoreSession().hasAuth(),
+        hasAuth: (opts) =>
+          getCoreSession().hasAuth(isClosed() ? { ...opts, reconcile: false } : opts),
         clear: () => {
-          if (!disposed) getCoreSession().clear();
+          if (!isClosed()) getCoreSession().clear();
         },
         syncFromPage: () => {
-          if (!disposed) getCoreSession().syncFromPage?.();
+          if (!isClosed()) getCoreSession().syncFromPage?.();
         },
         recordHint: (hint) => {
-          if (!disposed) getCoreSession().recordHint(hint);
+          if (!isClosed()) getCoreSession().recordHint(hint);
         }
       };
     }
     return sessionWrapper;
   };
-  const getApiWrapper = (): AniListClient => {
+  const getApiWrapper = (): Omit<AniListClient, 'session'> => {
     if (!apiWrapper) {
-      apiWrapper = {
-        query: (...args) => getCoreApi().query(...args),
-        getMediaList: (...args) => getCoreApi().getMediaList(...args),
-        viewer: (...args) => getCoreApi().viewer(...args),
-        clearViewer: () => getCoreApi().clearViewer(),
-        invalidate: (...args) => getCoreApi().invalidate(...args),
-        invalidateMediaList: (...args) => getCoreApi().invalidateMediaList(...args),
-        hasAuth: () => getCoreApi().hasAuth(),
-        resumeAt: () => getCoreApi().resumeAt(),
-        media: getCoreApi().media,
-        get session() {
-          return getSessionWrapper();
-        }
-      };
+      apiWrapper = scopeAniListClient(getCoreApi, ac.signal, isClosed);
     }
     return apiWrapper;
   };
@@ -943,68 +1073,86 @@ function createContextForRecord(
   const eventOwner = Symbol(`events:${rec.id}`);
   let retainedTracked = false;
 
-  const openModuleModal = (opts: ModalOptions): ModalHandle => {
-    if (disposed) {
-      const deadEl = document.createElement('div');
-      return {
-        backdrop: deadEl,
-        sheet: deadEl,
-        body: deadEl,
-        footer: deadEl,
-        close: noop
-      };
+  const cancelAllPersistent = () => {
+    for (const h of persistentHandles) {
+      h.cancel();
     }
-    const modalId = getId(opts.id ?? `modal-${++modalSeq}`);
-    const handle = createModal({ ...opts, id: modalId });
-    track(handle.close);
-    return handle;
   };
 
   const ctx: FeatureContext<any, any> = {
     id: rec.id,
     title: rec.title,
     help: rec.help,
-    getId,
+    signal: ac.signal,
+    getId: rootScope.getId,
     get: (key) => Settings.get(key),
-    set: (key, val) => Settings.set(key, val),
-    storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
-    persistent: <T extends Record<string, any>>(key: string, prune?: (data: T) => void) =>
-      persistent<T>(`${storagePrefix}${key}`, prune),
+    set: (key, val) => {
+      if (!isClosed()) Settings.set(key, val);
+    },
+    storage: createScopedStorage(storagePrefix, () => disposed, whenAlive, false, cancelAllPersistent),
+    persistent: <T extends Record<string, any>>(key: string, prune?: (data: T) => void): PersistentCache<T> => {
+      const p = persistent<T>(`${storagePrefix}${key}`, prune);
+      const handle = { cancel: p.cancel, flush: p.flush };
+      if (!isClosed()) {
+        persistentHandles.add(handle);
+        if (!pagehideRegistered && typeof window !== 'undefined') {
+          pagehideRegistered = true;
+          rootScope.listen(window, 'pagehide', () => {
+            if (isClosed()) return;
+            for (const h of persistentHandles) {
+              h.flush();
+            }
+          });
+        }
+        track(() => {
+          persistentHandles.delete(handle);
+          p.cancel();
+        });
+      }
+      return {
+        get data(): T {
+          return p.data;
+        },
+        set data(val: T) {
+          p.data = val;
+        },
+        save: () => {
+          if (!isClosed()) p.save();
+        },
+        cancel: () => p.cancel(),
+        flush: () => {
+          if (!isClosed()) p.flush();
+        }
+      };
+    },
     ready: (cb) => whenAlive(() => Core.ready(cb)),
     onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
     onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
     onRoute,
-    mount: rootScoped.mount,
-    addStyle: rootScoped.addStyle,
-    modal: openModuleModal,
-    listen: rootScoped.listen,
-    interval: rootScoped.interval,
-    timeout: rootScoped.timeout,
+    mount: <T extends Element = HTMLElement>(spec: MountSpec<T>): MountHandle<T> =>
+      addMount(spec, rootScope.track, ac.signal),
+    addStyle: rootScope.addStyle,
+    modal: rootScope.modal,
+    confirm: rootScope.confirm,
+    alert: rootScope.alert,
+    listen: rootScope.listen,
+    interval: rootScope.interval,
+    timeout: rootScope.timeout,
+    debounce: rootScope.debounce,
+    raf: rootScope.raf,
+    observe: rootScope.observe,
     trackEl: <T extends Element>(el: T): T => {
       track(() => el.remove());
       return el;
     },
-    waitForSelector: rootScoped.waitForSelector,
-    silently: (fn) => Core.silently(fn),
+    waitForSelector: rootScope.waitForSelector,
+    silently: (fn) => {
+      if (!isClosed()) Core.silently(fn);
+    },
     ownUi: (selector) => whenAlive(() => Core.registerOwnUi(selector)),
-    onCleanup: (fn) => {
-      track(fn);
-    },
-    http: {
-      request: httpRequest,
-      text: async (url: string, opts?: HttpRequestOptions) => {
-        const r = await httpRequest(url, opts);
-        if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
-        return r.responseText || '';
-      },
-      json: async <T = any>(url: string, opts?: HttpRequestOptions) => {
-        const r = await httpRequest(url, opts);
-        if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
-        return JSON.parse(r.responseText || '') as T;
-      },
-      download: httpDownload
-    },
-    get api(): AniListClient {
+    onCleanup: rootScope.onCleanup,
+    http: rootHttp,
+    get api(): Omit<AniListClient, 'session'> {
       return getApiWrapper();
     },
     get session(): AniListSession {
@@ -1021,18 +1169,19 @@ function createContextForRecord(
       },
       connect: (id: string) => {
         assertAccountAllowed(id);
-        if (!disposed) getAccountProvider(id)?.connect();
+        if (!isClosed()) getAccountProvider(id)?.connect();
       },
       disconnect: (id: string) => {
         assertAccountAllowed(id);
-        if (!disposed) getAccountProvider(id)?.disconnect();
+        if (!isClosed()) getAccountProvider(id)?.disconnect();
       },
       clearSecrets: (providerId?: string) => {
         if (providerId !== undefined) {
           assertAccountAllowed(providerId);
-          clearAccountSecrets(providerId);
+          if (!isClosed()) clearAccountSecrets(providerId);
           return;
         }
+        if (isClosed()) return;
         for (const id of allowedAccounts) clearAccountSecrets(id);
       },
       watch: (id: string, cb: (connected: boolean) => void): CleanupFn => {
@@ -1041,9 +1190,15 @@ function createContextForRecord(
       }
     },
     toast: {
-      show: showToast,
-      success: toastSuccess,
-      error: toastError
+      show: (msg, opts) => {
+        if (!isClosed()) showToast(msg, opts);
+      },
+      success: (msg, opts) => {
+        if (!isClosed()) toastSuccess(msg, opts);
+      },
+      error: (msg, opts) => {
+        if (!isClosed()) toastError(msg, opts);
+      }
     },
     menuCommand: (label, onClick) => whenAlive(() => registerMenuCommand(label, onClick)),
     services: {
@@ -1054,10 +1209,10 @@ function createContextForRecord(
     },
     events: {
       emit: (event, ...args) => {
-        if (!disposed) EventBus.emit(event, ...args);
+        if (!isClosed()) EventBus.emit(event, ...args);
       },
       emitRetained: (event, ...args) => {
-        if (disposed) return;
+        if (isClosed()) return;
         if (!retainedTracked) {
           retainedTracked = true;
           track(() => EventBus.clearRetainedByOwner(eventOwner));
@@ -1070,7 +1225,7 @@ function createContextForRecord(
     hooks: trackedHooks,
     log: ctxLog as any,
     setStandalonePaused: (paused: boolean) => {
-      if (disposed) return;
+      if (isClosed()) return;
       const next = !!paused;
       rec.standalonePaused = next;
       if (next) {
@@ -1086,7 +1241,7 @@ function createContextForRecord(
 
 function disposeRecord(rec: ModuleRecord, resetStandalone = true): void {
   rec.bootSeq++;
-  const hadCleanups = rec.cleanups.length > 0;
+  const hadCleanups = rec.cleanups.size > 0;
   if (rec.booted || hadCleanups) {
     runCleanupsReverse(rec.id, rec.cleanups);
   }
@@ -1160,7 +1315,7 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
   const seq = ++rec.bootSeq;
   rec.runtimeError = undefined;
   const ac = new AbortController();
-  const cleanups: CleanupFn[] = [];
+  const cleanups = new Set<CleanupFn>();
   rec.cleanups = cleanups;
   rec.abortController = ac;
   rec.booted = true;
@@ -1189,6 +1344,10 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
           }
           if (rec.standalonePaused) {
             rec.booted = false;
+            return;
+          }
+          if (!rec.runtimeError && rec.booted) {
+            emitStatusChange(rec.id, { active: true });
           }
         },
         (err) => {
@@ -1198,6 +1357,10 @@ function bootRecord(rec: ModuleRecord): Promise<void> {
     }
     if (rec.standalonePaused) {
       rec.booted = false;
+      return Promise.resolve();
+    }
+    if (!rec.runtimeError && rec.booted) {
+      emitStatusChange(rec.id, { active: true });
     }
     return Promise.resolve();
   } catch (err) {
@@ -1226,8 +1389,8 @@ export function defineModule<
   const TDebug extends ModuleDebugDef<any> | undefined = undefined,
   const TAccounts extends readonly string[] = readonly []
 >(meta: ModuleMeta<TId, TDebug, TAccounts>): void {
-  if (!ID_RE.test(meta.id)) {
-    coreLog.error(`Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+  if (!ID_RE.test(meta.id) || RESERVED_MODULE_IDS.has(meta.id)) {
+    coreLog.error(`Invalid or reserved module ID "${meta.id}". Must match ${ID_RE} and not be reserved.`);
     invalidIds.set(meta.id, { active: false, reason: 'invalid-id' });
     emitStatusChange(meta.id, { active: false, reason: 'invalid-id' });
     return;
@@ -1288,18 +1451,18 @@ export function defineModule<
     standalonePaused: false,
     booted: false,
     bootSeq: 0,
-    cleanups: [],
+    cleanups: new Set(),
     abortController: null
   });
 }
 
 export function registerShellModule(
   name: string,
-  init: () => void | Promise<void>,
+  init: () => void | Promise<void> | CleanupFn,
   hosts: string[] = ['anilist.co']
 ): void {
-  if (!ID_RE.test(name)) {
-    coreLog.error(`Invalid shell module ID "${name}". Must match ${ID_RE}.`);
+  if (!ID_RE.test(name) || RESERVED_MODULE_IDS.has(name)) {
+    coreLog.error(`Invalid or reserved shell module ID "${name}". Must match ${ID_RE} and not be reserved.`);
     invalidIds.set(name, { active: false, reason: 'invalid-id' });
     emitStatusChange(name, { active: false, reason: 'invalid-id' });
     return;
@@ -1313,6 +1476,15 @@ export function registerShellModule(
     return;
   }
 
+  const runShellInit = (ctx?: FeatureContext<any, any>): void | Promise<void> => {
+    const res = init();
+    if (typeof res === 'function') {
+      ctx?.onCleanup(res);
+      return;
+    }
+    return res;
+  };
+
   registerRecord({
     id: name,
     title: name,
@@ -1325,14 +1497,14 @@ export function registerShellModule(
     dependsOn: [],
     after: [],
     accounts: [],
-    setup: () => init(),
-    legacyInit: init,
+    setup: (ctx) => runShellInit(ctx),
+    legacyInit: () => runShellInit(),
     invalidId: false,
     idCollision: false,
     standalonePaused: false,
     booted: false,
     bootSeq: 0,
-    cleanups: [],
+    cleanups: new Set(),
     abortController: null
   });
 }
@@ -1393,6 +1565,7 @@ export function runMigrations(): void {
 }
 
 export function startModules(early: boolean): void {
+  if (!early) deferredStarted = true;
   const graph = resolveAllStates();
   syncAllLiveStatuses(graph.statuses);
 
@@ -1468,7 +1641,31 @@ export function createModuleHost(): ModuleHost {
         const rec = recordsById.get(id);
         if (rec && !rec.booted) {
           rec.runtimeError = undefined;
-          rec.standalonePaused = false;
+          if (rec.standalone) {
+            let probeRes: boolean | Promise<boolean> = false;
+            try {
+              probeRes = rec.standalone.probe();
+            } catch {
+              probeRes = false;
+            }
+            if (probeRes && typeof (probeRes as Promise<boolean>).then === 'function') {
+              rec.standalonePaused = false;
+              Promise.resolve(probeRes).then(
+                (found) => {
+                  if (!found) return;
+                  rec.standalonePaused = true;
+                  cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
+                  const postGraph = resolveAllStates();
+                  syncAllLiveStatuses(postGraph.statuses);
+                },
+                () => {}
+              );
+            } else {
+              rec.standalonePaused = !!probeRes;
+            }
+          } else {
+            rec.standalonePaused = false;
+          }
         }
       }
 
@@ -1477,6 +1674,7 @@ export function createModuleHost(): ModuleHost {
 
       for (const rec of freshGraph.ordered) {
         if (rec.booted) continue;
+        if (!rec.early && !deferredStarted && !document.body) continue;
         const failedDeps = getFailedDeps(rec);
         if (failedDeps.length > 0) {
           emitStatusChange(rec.id, { active: false, reason: 'dep-unavailable', missingDeps: failedDeps });
@@ -1489,7 +1687,15 @@ export function createModuleHost(): ModuleHost {
       const live = liveStatuses.get(id);
       if (live) return live;
       const graph = resolveAllStates();
-      return graph.statuses[id] || { active: false, reason: 'disabled' };
+      const st = graph.statuses[id];
+      if (!st) return { active: false, reason: 'disabled' };
+      if (st.active) {
+        const rec = recordsById.get(id);
+        if (!rec || !rec.booted || rec.standalonePaused || rec.runtimeError) {
+          return { active: false };
+        }
+      }
+      return st;
     },
     resolveStagedStates(stagedEnabled: Record<string, boolean>): Record<string, ModuleStatus> {
       return resolveAllStates(stagedEnabled).statuses;

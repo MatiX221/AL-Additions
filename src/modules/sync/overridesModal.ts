@@ -1,6 +1,7 @@
 import { malFetchList, malDeleteEntry } from '../../api/mal';
-import { stores, syncApi } from './state';
+import { stores, syncApi, syncStoresInitialized } from './state';
 import { alFetchAll } from './engine';
+import { composeAbortSignals, esc, isAbortError } from '../../utils/helpers';
 import {
   getManualOverrides,
   setOverride,
@@ -12,8 +13,8 @@ import {
 } from '../../api/malOverrides';
 import { SyncMediaType } from './types';
 import type {
-  AniListClient,
   CleanupFn,
+  ConfirmOptions,
   FeatureContext,
   JsonEditorContext,
   ManualOverride,
@@ -131,6 +132,11 @@ function matchesSearch(text: string, id: number | string, extraId: number | stri
   return qIdx === q.length;
 }
 
+const safeCoverUrl = (url: string | undefined): string => {
+  const trimmed = String(url || '').trim();
+  return /^https?:\/\//i.test(trimmed) ? trimmed : '';
+};
+
 interface LoadedPreview {
   mediaId: number;
   type: SyncMediaType;
@@ -149,12 +155,14 @@ const unmatchedMetaCache = new Map<number, UnmatchedMediaMeta>();
 async function batchFetchUnmatchedMeta(
   ids: number[],
   log?: JsonEditorContext['log'],
-  api: AniListClient | null = syncApi
+  api: FeatureContext['api'] | null = syncApi,
+  signal?: AbortSignal
 ): Promise<void> {
   const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
-  if (!needed.length) return;
+  if (!needed.length || signal?.aborted) return;
 
   for (let i = 0; i < needed.length; i += 50) {
+    if (signal?.aborted) break;
     const batch = needed.slice(i, i + 50);
     const q = `query ($ids: [Int]) {
       Page(page: 1, perPage: 50) {
@@ -166,7 +174,8 @@ async function batchFetchUnmatchedMeta(
       }
     }`;
     try {
-      const res = await api?.query(q, { ids: batch });
+      const res = await api?.query(q, { ids: batch }, { signal });
+      if (signal?.aborted) break;
       const list = res?.Page?.media || [];
       for (const m of list) {
         const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
@@ -176,6 +185,7 @@ async function batchFetchUnmatchedMeta(
         });
       }
     } catch (e) {
+      if (signal?.aborted || isAbortError(e)) break;
       log?.warn('Failed to batch fetch unmatched metadata:', e);
       break;
     }
@@ -188,6 +198,7 @@ export async function openQuickOverrideModal(
   ctx: FeatureContext,
   onUpdated?: () => void
 ): Promise<void> {
+  if (ctx.signal?.aborted) return;
   const api = ctx.api ?? syncApi;
   const currentOverrides = getManualOverrides();
   const existingOverride = currentOverrides[String(mediaId)];
@@ -196,6 +207,7 @@ export async function openQuickOverrideModal(
     id: 'quick-override',
     title: 'Set MAL Mapping',
     maxWidth: '480px',
+    style: (sel) => buildOverridesCss(sel, false),
     bodyHtml: `
       <div id="ala-qo-preview" class="ala-ov-preview">
         <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
@@ -212,11 +224,14 @@ export async function openQuickOverrideModal(
         ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ''}
       </div>
     `,
-    footerHtml: `<button class="ala-btn ala-qo-close" type="button">Cancel</button>`
+    footerHtml: `<button class="ala-btn ala-qo-close" type="button" data-ala-close>Cancel</button>`
   });
-  ctx.addStyle('quick-override', () => buildOverridesCss(`#${modal.backdrop.id}`, false));
-  const { backdrop, close } = modal;
-  backdrop.querySelectorAll('.ala-qo-close').forEach((btn) => btn.addEventListener('click', close));
+  const { backdrop, close, signal, listen, onCleanup } = modal;
+  const isClosed = (): boolean => signal.aborted || !!ctx.signal?.aborted || !backdrop.isConnected;
+  if (isClosed()) return;
+  const composedQuick = composeAbortSignals(signal, ctx.signal);
+  const quickSignal = composedQuick.signal;
+  onCleanup(composedQuick.dispose);
 
   const previewBox = backdrop.querySelector('#ala-qo-preview') as HTMLElement;
   const malInput = backdrop.querySelector('#ala-qo-mal-input') as HTMLInputElement;
@@ -229,7 +244,7 @@ export async function openQuickOverrideModal(
   }
 
   let loadedTitle = existingOverride?.title || `Media #${mediaId}`;
-  let loadedCover = existingOverride?.cover;
+  let loadedCover = safeCoverUrl(existingOverride?.cover) || undefined;
   let loadedType: SyncMediaType = existingOverride?.type || mediaType;
   let detectedMalId: number | undefined;
 
@@ -244,32 +259,37 @@ export async function openQuickOverrideModal(
   }`;
 
   try {
-    const res = await api?.query(q, { id: mediaId });
+    const res = await api?.query(q, { id: mediaId }, { signal: quickSignal });
+    if (isClosed()) return;
     const m = res?.Media;
     if (m) {
       loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
-      loadedCover = m.coverImage?.medium || loadedCover;
+      loadedCover = safeCoverUrl(m.coverImage?.medium) || loadedCover;
       loadedType = m.type === 'MANGA' ? 'MANGA' : 'ANIME';
       detectedMalId = Number(m.idMal) || undefined;
     }
-  } catch (_) {}
+  } catch (_) {
+    if (isClosed()) return;
+  }
 
+  if (isClosed()) return;
   const isIgnored = existingOverride && existingOverride.malId === 0;
   const isCustom = existingOverride && existingOverride.malId > 0;
+  const safeLoadedCover = safeCoverUrl(loadedCover);
 
   previewBox.innerHTML = `
-    ${loadedCover ? `<img class="ala-ov-preview-cover" src="${loadedCover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+    ${safeLoadedCover ? `<img class="ala-ov-preview-cover" src="${esc(safeLoadedCover)}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
     <div class="ala-ov-preview-info">
-      <div class="ala-ov-preview-title">${loadedTitle}</div>
+      <div class="ala-ov-preview-title">${esc(loadedTitle)}</div>
       <div class="ala-ov-preview-meta">
-        <span class="ala-ov-badge ${loadedType === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${loadedType}</span>
+        <span class="ala-ov-badge ${loadedType === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${esc(loadedType)}</span>
         ${
           isIgnored
             ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>`
             : isCustom
-            ? `<span>Overridden to MAL ID: <b>${existingOverride.malId}</b></span>`
+            ? `<span>Overridden to MAL ID: <b>${esc(existingOverride.malId)}</b></span>`
             : detectedMalId
-            ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>`
+            ? `<span>Detected MAL ID: <b>${esc(detectedMalId)}</b></span>`
             : `<span>No MAL ID on AniList</span>`
         }
       </div>
@@ -280,10 +300,24 @@ export async function openQuickOverrideModal(
     malInput.placeholder = `${detectedMalId} (AniList default)`;
   }
 
-  saveBtn.addEventListener('click', () => {
+  const showAlert = (message: string, title = 'Notice', id?: string): Promise<void> => {
+    if (isClosed()) return Promise.resolve();
+    return ctx.alert({ id, title, message, signal: quickSignal });
+  };
+
+  listen(saveBtn, 'click', async () => {
+    if (saveBtn.disabled || isClosed()) return;
     let malId = extractMalId(malInput.value);
     if (!malId && detectedMalId) malId = detectedMalId;
-    if (!malId) return alert('Please enter a valid MyAnimeList ID or URL.');
+    if (!malId) {
+      saveBtn.disabled = true;
+      try {
+        await showAlert('Please enter a valid MyAnimeList ID or URL.', 'Invalid MAL ID', 'qo-invalid-mal');
+      } finally {
+        if (!isClosed()) saveBtn.disabled = false;
+      }
+      return;
+    }
 
     setOverride(mediaId, {
       malId,
@@ -295,7 +329,7 @@ export async function openQuickOverrideModal(
     close();
   });
 
-  ignoreBtn.addEventListener('click', () => {
+  listen(ignoreBtn, 'click', () => {
     setOverride(mediaId, {
       malId: 0,
       type: loadedType,
@@ -306,14 +340,17 @@ export async function openQuickOverrideModal(
     close();
   });
 
-  removeBtn?.addEventListener('click', () => {
-    removeOverride(mediaId);
-    onUpdated?.();
-    close();
-  });
+  if (removeBtn) {
+    listen(removeBtn, 'click', () => {
+      removeOverride(mediaId);
+      onUpdated?.();
+      close();
+    });
+  }
 }
 
 export function openOverridesModal(ec: JsonEditorContext): void {
+  if (ec.signal?.aborted) return;
   const api = ec.api ?? syncApi;
   const staging = typeof ec?.onApply === 'function';
   const initCheck = staging ? validateOverrides(ec!.value) : null;
@@ -372,10 +409,12 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     return { success: true, count: Object.keys(check.overrides).length };
   };
 
+  let appliedInStaging = false;
   const modal = ec.modal({
     id: 'overrides',
     title: 'Manual Mappings & Sync Audit',
     maxWidth: '680px',
+    style: (sel) => buildOverridesCss(sel, true),
     bodyHtml: `
       <div class="ala-ov-tabs">
         <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
@@ -482,28 +521,41 @@ export function openOverridesModal(ec: JsonEditorContext): void {
         </div>
       </div>
     `,
-    footerHtml: `<button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>`,
-    onClose: () => {
-      cancelLookup?.();
-      cancelSearch?.();
-      cancelUnmatchedSearch?.();
-      cancelOrphansSearch?.();
-      cancelCopyTimer?.();
-    }
+    footerHtml: `<button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button" data-ala-close>Done</button>`
   });
-  ec.addStyle('overrides', () => buildOverridesCss(`#${modal.backdrop.id}`, true));
-  const { backdrop, close } = modal;
+  const { backdrop, signal, listen, timeout, onCleanup } = modal;
+  const isClosed = (): boolean => signal.aborted || !!ec.signal?.aborted || !backdrop.isConnected;
+  if (isClosed()) return;
+
+  const composedMal = composeAbortSignals(signal, ec.signal);
+  const malSignal = composedMal.signal;
+  onCleanup(composedMal.dispose);
+
+  const showAlert = (message: string, title = 'Notice', id?: string): Promise<void> => {
+    if (isClosed()) return Promise.resolve();
+    return ec.alert({ id, title, message, signal: malSignal });
+  };
+
+  const showConfirm = (opts: ConfirmOptions): Promise<boolean> => {
+    if (isClosed()) return Promise.resolve(false);
+    return ec.confirm({ ...opts, signal: opts.signal ?? malSignal });
+  };
 
   if (!staging) {
-    refreshStaleOverrides().then(() => {
-      if (backdrop.isConnected) renderList();
+    refreshStaleOverrides({ signal: malSignal }).then(() => {
+      if (!isClosed()) renderList();
     });
   }
 
-  backdrop.querySelector('#ala-ov-btn-done')?.addEventListener('click', () => {
-    if (staging) ec!.onApply!(draftOverrides);
-    close();
-  });
+  const doneBtn = backdrop.querySelector('#ala-ov-btn-done');
+  if (doneBtn) {
+    listen(doneBtn, 'click', () => {
+      if (staging) {
+        appliedInStaging = true;
+        ec!.onApply!(draftOverrides);
+      }
+    });
+  }
 
   const tabs = backdrop.querySelectorAll<HTMLButtonElement>('.ala-ov-tab');
   const viewOverrides = backdrop.querySelector('#ala-ov-view-overrides') as HTMLElement;
@@ -511,7 +563,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   const viewJson = backdrop.querySelector('#ala-ov-view-json') as HTMLElement;
 
   tabs.forEach((t) => {
-    t.addEventListener('click', () => {
+    listen(t, 'click', () => {
       tabs.forEach((o) => o.classList.toggle('is-active', o === t));
       const target = t.dataset.tab;
       viewOverrides.style.display = target === 'overrides' ? 'block' : 'none';
@@ -550,14 +602,15 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     }
 
     const { type, title, cover, detectedMalId } = activePreview;
+    const safeCover = safeCoverUrl(cover);
     previewBox.style.display = 'flex';
     previewBox.innerHTML = `
-      ${cover ? `<img class="ala-ov-preview-cover" src="${cover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+      ${safeCover ? `<img class="ala-ov-preview-cover" src="${esc(safeCover)}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
       <div class="ala-ov-preview-info">
-        <div class="ala-ov-preview-title">${title}</div>
+        <div class="ala-ov-preview-title">${esc(title)}</div>
         <div class="ala-ov-preview-meta">
-          <span class="ala-ov-badge ${type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${type}</span>
-          ${detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+          <span class="ala-ov-badge ${type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${esc(type)}</span>
+          ${detectedMalId ? `<span>Detected MAL ID: <b>${esc(detectedMalId)}</b></span>` : `<span>No MAL ID on AniList</span>`}
         </div>
       </div>
     `;
@@ -568,7 +621,10 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   };
 
 
+  let lookupSeq = 0;
+
   const doLookup = async (id: number) => {
+    const seq = ++lookupSeq;
     if (!id) {
       activePreview = null;
       updatePreviewUI();
@@ -603,8 +659,8 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     }`;
 
     try {
-      const res = await api?.query(q, { id });
-      if (extractAlId(alInput.value) !== id) return;
+      const res = await api?.query(q, { id }, { signal: malSignal });
+      if (seq !== lookupSeq || isClosed() || extractAlId(alInput.value) !== id) return;
 
       const m = res?.Media;
       if (!m) {
@@ -620,7 +676,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
         mediaId: m.id,
         type: m.type === 'MANGA' ? 'MANGA' : 'ANIME',
         title: t,
-        cover: m.coverImage?.medium || existing?.cover,
+        cover: safeCoverUrl(m.coverImage?.medium) || safeCoverUrl(existing?.cover) || undefined,
         detectedMalId: Number(m.idMal) || undefined
       };
       updatePreviewUI();
@@ -628,7 +684,8 @@ export function openOverridesModal(ec: JsonEditorContext): void {
       if (existing && existing.malId > 0 && !malInput.value) {
         malInput.value = String(existing.malId);
       }
-    } catch (_) {
+    } catch (err) {
+      if (seq !== lookupSeq || isClosed() || malSignal.aborted || isAbortError(err)) return;
       if (!existing && extractAlId(alInput.value) === id) {
         activePreview = null;
         updatePreviewUI();
@@ -636,9 +693,9 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     }
   };
 
-  alInput.addEventListener('input', () => {
+  listen(alInput, 'input', () => {
     cancelLookup?.();
-    cancelLookup = ec.timeout(() => {
+    cancelLookup = timeout(() => {
       cancelLookup = null;
       const id = extractAlId(alInput.value);
       doLookup(id);
@@ -650,6 +707,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   const clearBtn = backdrop.querySelector('#ala-ov-btn-clear') as HTMLButtonElement;
 
   const clearForm = () => {
+    lookupSeq++;
     cancelLookup?.();
     cancelLookup = null;
     alInput.value = '';
@@ -657,21 +715,71 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     activePreview = null;
     updatePreviewUI();
   };
-  clearBtn.addEventListener('click', clearForm);
+  listen(clearBtn, 'click', clearForm);
 
-  saveBtn.addEventListener('click', () => {
+  const fetchMissingMeta = (id: number) => {
+    api?.query(
+      `query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`,
+      { id },
+      { signal: staging ? ec.signal : malSignal }
+    )
+      .then((res: any) => {
+        const m = res?.Media;
+        if (!m) return;
+        if (ec.signal?.aborted) return;
+        if (signal.aborted && (!staging || !appliedInStaging)) return;
+        const current = { ...readOverrides() };
+        if (!current[String(id)]) return;
+        const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
+        const safeCover = safeCoverUrl(m.coverImage?.medium || current[String(id)].cover);
+        const updatedEntry: ManualOverride = {
+          ...current[String(id)],
+          title: t,
+          type: m.type === 'MANGA' ? 'MANGA' : 'ANIME',
+          updatedAt: Date.now()
+        };
+        if (safeCover) updatedEntry.cover = safeCover;
+        else delete updatedEntry.cover;
+        current[String(id)] = updatedEntry;
+        writeOverrides(current);
+        if (staging && appliedInStaging) {
+          ec.onApply(current);
+        }
+        if (!isClosed()) renderList();
+      })
+      .catch(() => {});
+  };
+
+  listen(saveBtn, 'click', async () => {
+    if (saveBtn.disabled || isClosed()) return;
     const id = activePreview?.mediaId || extractAlId(alInput.value);
-    if (!id) return alert('Please enter a valid AniList ID or URL.');
+    if (!id) {
+      saveBtn.disabled = true;
+      try {
+        await showAlert('Please enter a valid AniList ID or URL.', 'Invalid AniList ID', 'ov-invalid-al');
+      } finally {
+        if (!isClosed()) saveBtn.disabled = false;
+      }
+      return;
+    }
 
     let malId = extractMalId(malInput.value);
     if (!malId && activePreview?.detectedMalId) {
       malId = activePreview.detectedMalId;
     }
-    if (!malId) return alert('Please enter a valid MyAnimeList ID or URL.');
+    if (!malId) {
+      saveBtn.disabled = true;
+      try {
+        await showAlert('Please enter a valid MyAnimeList ID or URL.', 'Invalid MAL ID', 'ov-invalid-mal');
+      } finally {
+        if (!isClosed()) saveBtn.disabled = false;
+      }
+      return;
+    }
 
     const existing = readOverrides()[String(id)];
     const title = activePreview?.title || existing?.title || `Media #${id}`;
-    const cover = activePreview?.cover || existing?.cover;
+    const cover = safeCoverUrl(activePreview?.cover || existing?.cover) || undefined;
     const type: SyncMediaType = activePreview?.type || existing?.type || 'ANIME';
 
     patchOverride(id, {
@@ -685,40 +793,26 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     renderList();
 
     if (title === `Media #${id}`) {
-      api?.query(
-        `query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`,
-        { id }
-      )
-        .then((res: any) => {
-          const m = res?.Media;
-          if (m) {
-            const current = { ...readOverrides() };
-            if (current[String(id)]) {
-              const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-              const c = m.coverImage?.medium || current[String(id)].cover;
-              current[String(id)] = {
-                ...current[String(id)],
-                title: t,
-                cover: c,
-                type: m.type === 'MANGA' ? 'MANGA' : 'ANIME',
-                updatedAt: Date.now()
-              };
-              writeOverrides(current);
-              if (backdrop.isConnected) renderList();
-            }
-          }
-        })
-        .catch(() => {});
+      fetchMissingMeta(id);
     }
   });
 
-  ignoreBtn.addEventListener('click', () => {
+  listen(ignoreBtn, 'click', async () => {
+    if (ignoreBtn.disabled || isClosed()) return;
     const id = activePreview?.mediaId || extractAlId(alInput.value);
-    if (!id) return alert('Please enter a valid AniList ID or URL.');
+    if (!id) {
+      ignoreBtn.disabled = true;
+      try {
+        await showAlert('Please enter a valid AniList ID or URL.', 'Invalid AniList ID', 'ov-invalid-al');
+      } finally {
+        if (!isClosed()) ignoreBtn.disabled = false;
+      }
+      return;
+    }
 
     const existing = readOverrides()[String(id)];
     const title = activePreview?.title || existing?.title || `Media #${id}`;
-    const cover = activePreview?.cover || existing?.cover;
+    const cover = safeCoverUrl(activePreview?.cover || existing?.cover) || undefined;
     const type: SyncMediaType = activePreview?.type || existing?.type || 'ANIME';
 
     patchOverride(id, {
@@ -732,35 +826,12 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     renderList();
 
     if (title === `Media #${id}`) {
-      api?.query(
-        `query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`,
-        { id }
-      )
-        .then((res: any) => {
-          const m = res?.Media;
-          if (m) {
-            const current = { ...readOverrides() };
-            if (current[String(id)]) {
-              const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-              const c = m.coverImage?.medium || current[String(id)].cover;
-              current[String(id)] = {
-                ...current[String(id)],
-                title: t,
-                cover: c,
-                type: m.type === 'MANGA' ? 'MANGA' : 'ANIME',
-                updatedAt: Date.now()
-              };
-              writeOverrides(current);
-              if (backdrop.isConnected) renderList();
-            }
-          }
-        })
-        .catch(() => {});
+      fetchMissingMeta(id);
     }
   });
 
   backdrop.querySelectorAll<HTMLButtonElement>('[data-status-filter]').forEach((c) => {
-    c.addEventListener('click', () => {
+    listen(c, 'click', () => {
       backdrop.querySelectorAll('[data-status-filter]').forEach((o) => o.classList.toggle('is-active', o === c));
       statusFilter = c.dataset.statusFilter || 'all';
       renderList();
@@ -768,21 +839,23 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   });
 
   backdrop.querySelectorAll<HTMLButtonElement>('[data-type-filter]').forEach((c) => {
-    c.addEventListener('click', () => {
+    listen(c, 'click', () => {
       backdrop.querySelectorAll('[data-type-filter]').forEach((o) => o.classList.toggle('is-active', o === c));
       typeFilter = c.dataset.typeFilter || 'all';
       renderList();
     });
   });
 
-  searchInput?.addEventListener('input', () => {
-    cancelSearch?.();
-    cancelSearch = ec.timeout(() => {
-      cancelSearch = null;
-      searchQuery = searchInput.value.trim();
-      renderList();
-    }, 150);
-  });
+  if (searchInput) {
+    listen(searchInput, 'input', () => {
+      cancelSearch?.();
+      cancelSearch = timeout(() => {
+        cancelSearch = null;
+        searchQuery = searchInput.value.trim();
+        renderList();
+      }, 150);
+    });
+  }
 
   function renderList() {
     const all = readOverrides();
@@ -811,25 +884,26 @@ export function openOverridesModal(ec: JsonEditorContext): void {
         const isIgnoredEntry = o.malId === 0;
         const alUrl = `https://anilist.co/${o.type.toLowerCase()}/${id}`;
         const malUrl = o.malId > 0 ? `https://myanimelist.net/${o.type.toLowerCase()}/${o.malId}` : '#';
+        const safeCover = safeCoverUrl(o.cover);
 
         return `
-        <div class="ala-ov-item" data-id="${id}">
-          ${o.cover ? `<img class="ala-ov-item-cover" src="${o.cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+        <div class="ala-ov-item" data-id="${esc(id)}">
+          ${safeCover ? `<img class="ala-ov-item-cover" src="${esc(safeCover)}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
           <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="${alUrl}" target="_blank" rel="noopener" title="${o.title}">${o.title}</a>
+            <a class="ala-ov-item-title" href="${esc(alUrl)}" target="_blank" rel="noopener" title="${esc(o.title)}">${esc(o.title)}</a>
             <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${o.type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${o.type}</span>
-              <span>AniList ID: <b>${id}</b></span>
+              <span class="ala-ov-badge ${o.type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${esc(o.type)}</span>
+              <span>AniList ID: <b>${esc(id)}</b></span>
               ${
                 isIgnoredEntry
                   ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>`
-                  : `<span>MAL ID: <a href="${malUrl}" target="_blank" rel="noopener"><b>${o.malId}</b></a></span>`
+                  : `<span>MAL ID: <a href="${esc(malUrl)}" target="_blank" rel="noopener"><b>${esc(o.malId)}</b></a></span>`
               }
             </div>
           </div>
           <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${id}">Edit</button>
-            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${id}" title="Remove override">✕</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${esc(id)}">Edit</button>
+            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${esc(id)}" title="Remove override">✕</button>
           </div>
         </div>
       `;
@@ -853,6 +927,9 @@ export function openOverridesModal(ec: JsonEditorContext): void {
       btn.addEventListener('click', () => {
         const id = Number(btn.dataset.id);
         if (id) {
+          cancelLookup?.();
+          cancelLookup = null;
+          malInput.value = '';
           alInput.value = String(id);
           doLookup(id);
           viewOverrides.scrollTop = 0;
@@ -870,23 +947,26 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   const unmatchedSearchInput = backdrop.querySelector('#ala-ov-unmatched-search') as HTMLInputElement;
 
   backdrop.querySelectorAll<HTMLButtonElement>('[data-unmatched-type]').forEach((c) => {
-    c.addEventListener('click', () => {
+    listen(c, 'click', () => {
       backdrop.querySelectorAll('[data-unmatched-type]').forEach((o) => o.classList.toggle('is-active', o === c));
       unmatchedTypeFilter = c.dataset.unmatchedType || 'all';
       renderUnmatchedList();
     });
   });
 
-  unmatchedSearchInput?.addEventListener('input', () => {
-    cancelUnmatchedSearch?.();
-    cancelUnmatchedSearch = ec.timeout(() => {
-      cancelUnmatchedSearch = null;
-      unmatchedSearchQuery = unmatchedSearchInput.value.trim();
-      renderUnmatchedList();
-    }, 150);
-  });
+  if (unmatchedSearchInput) {
+    listen(unmatchedSearchInput, 'input', () => {
+      cancelUnmatchedSearch?.();
+      cancelUnmatchedSearch = timeout(() => {
+        cancelUnmatchedSearch = null;
+        unmatchedSearchQuery = unmatchedSearchInput.value.trim();
+        renderUnmatchedList();
+      }, 150);
+    });
+  }
 
   function getRawUnmatched(): Array<{ mediaId: number; type: SyncMediaType }> {
+    if (!syncStoresInitialized) return [];
     const configured = readOverrides();
     const unmatched: Array<{ mediaId: number; type: SyncMediaType }> = [];
     for (const t of ['ANIME', 'MANGA'] as const) {
@@ -903,6 +983,11 @@ export function openOverridesModal(ec: JsonEditorContext): void {
 
   function renderUnmatchedList() {
     const unmatchedBox = backdrop.querySelector('#ala-ov-audit-unmatched') as HTMLElement;
+    if (!syncStoresInitialized) {
+      unmatchedControls.style.display = 'none';
+      unmatchedBox.innerHTML = `<div class="ala-ov-empty">Enable <b>AniList → MyAnimeList Sync</b> and run a sync to view unmatched entries here.</div>`;
+      return;
+    }
     const raw = getRawUnmatched();
 
     if (!raw.length) {
@@ -930,21 +1015,21 @@ export function openOverridesModal(ec: JsonEditorContext): void {
       .map(({ mediaId, type }) => {
         const meta = unmatchedMetaCache.get(mediaId);
         const title = meta?.title || `Media #${mediaId}`;
-        const cover = meta?.cover;
+        const cover = safeCoverUrl(meta?.cover);
 
         return `
-        <div class="ala-ov-item" data-id="${mediaId}">
-          ${cover ? `<img class="ala-ov-item-cover" src="${cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+        <div class="ala-ov-item" data-id="${esc(mediaId)}">
+          ${cover ? `<img class="ala-ov-item-cover" src="${esc(cover)}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
           <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://anilist.co/${type.toLowerCase()}/${mediaId}" target="_blank" rel="noopener" title="${title}">${title}</a>
+            <a class="ala-ov-item-title" href="https://anilist.co/${esc(type.toLowerCase())}/${esc(mediaId)}" target="_blank" rel="noopener" title="${esc(title)}">${esc(title)}</a>
             <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${type}</span>
-              <span>AniList ID: <b>${mediaId}</b></span>
+              <span class="ala-ov-badge ${type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${esc(type)}</span>
+              <span>AniList ID: <b>${esc(mediaId)}</b></span>
             </div>
           </div>
           <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${mediaId}">Set MAL ID</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${mediaId}" data-type="${type}">Ignore</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${esc(mediaId)}">Set MAL ID</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${esc(mediaId)}" data-type="${esc(type)}">Ignore</button>
           </div>
         </div>
       `;
@@ -954,7 +1039,10 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     unmatchedBox.querySelectorAll<HTMLButtonElement>('.ala-ov-audit-set').forEach((btn) => {
       btn.addEventListener('click', () => {
         const id = Number(btn.dataset.id);
+        cancelLookup?.();
+        cancelLookup = null;
         tabs[0].click();
+        malInput.value = '';
         alInput.value = String(id);
         doLookup(id);
       });
@@ -965,7 +1053,7 @@ export function openOverridesModal(ec: JsonEditorContext): void {
         const id = Number(btn.dataset.id);
         const type = (btn.dataset.type || 'ANIME') as SyncMediaType;
         const meta = unmatchedMetaCache.get(id);
-        patchOverride(id, { malId: 0, type, title: meta?.title || `Media #${id}`, cover: meta?.cover });
+        patchOverride(id, { malId: 0, type, title: meta?.title || `Media #${id}`, cover: safeCoverUrl(meta?.cover) || undefined });
         renderUnmatchedList();
         renderList();
       });
@@ -975,12 +1063,14 @@ export function openOverridesModal(ec: JsonEditorContext): void {
   function renderAudit() {
     renderUnmatchedList();
 
-    const raw = getRawUnmatched();
-    const missingMetaIds = raw.map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
-    if (missingMetaIds.length > 0) {
-      batchFetchUnmatchedMeta(missingMetaIds, ec.log, api).then(() => {
-        renderUnmatchedList();
-      });
+    if (syncStoresInitialized) {
+      const raw = getRawUnmatched();
+      const missingMetaIds = raw.map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
+      if (missingMetaIds.length > 0) {
+        batchFetchUnmatchedMeta(missingMetaIds, ec.log, api, malSignal).then(() => {
+          if (!isClosed()) renderUnmatchedList();
+        });
+      }
     }
 
     renderOrphansList();
@@ -992,40 +1082,50 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     title: string;
   }
   let scannedOrphans: OrphanItem[] | null = null;
+  let orphanScanErrors: string[] = [];
+  const deletingOrphans = new Set<string>();
 
   const orphansControls = backdrop.querySelector('#ala-ov-orphans-controls') as HTMLElement;
   const orphansSearchInput = backdrop.querySelector('#ala-ov-orphans-search') as HTMLInputElement;
 
   backdrop.querySelectorAll<HTMLButtonElement>('[data-orphans-type]').forEach((c) => {
-    c.addEventListener('click', () => {
+    listen(c, 'click', () => {
       backdrop.querySelectorAll('[data-orphans-type]').forEach((o) => o.classList.toggle('is-active', o === c));
       orphansTypeFilter = c.dataset.orphansType || 'all';
       renderOrphansList();
     });
   });
 
-  orphansSearchInput?.addEventListener('input', () => {
-    cancelOrphansSearch?.();
-    cancelOrphansSearch = ec.timeout(() => {
-      cancelOrphansSearch = null;
-      orphansSearchQuery = orphansSearchInput.value.trim();
-      renderOrphansList();
-    }, 150);
-  });
+  if (orphansSearchInput) {
+    listen(orphansSearchInput, 'input', () => {
+      cancelOrphansSearch?.();
+      cancelOrphansSearch = timeout(() => {
+        cancelOrphansSearch = null;
+        orphansSearchQuery = orphansSearchInput.value.trim();
+        renderOrphansList();
+      }, 150);
+    });
+  }
 
   function renderOrphansList() {
     const orphansBox = backdrop.querySelector('#ala-ov-audit-orphans') as HTMLElement;
     if (!orphansBox) return;
 
+    const errorBanner = orphanScanErrors.length
+      ? `<div class="ala-ov-status ala-ov-status--error" style="display:block;margin-top:0;margin-bottom:10px">${orphanScanErrors.map(esc).join('<br>')}</div>`
+      : '';
+
     if (scannedOrphans === null) {
       orphansControls.style.display = 'none';
-      orphansBox.innerHTML = `<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
+      orphansBox.innerHTML = `${errorBanner}<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
       return;
     }
 
     if (!scannedOrphans.length) {
       orphansControls.style.display = 'none';
-      orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
+      orphansBox.innerHTML = orphanScanErrors.length
+        ? errorBanner
+        : `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
       return;
     }
 
@@ -1038,46 +1138,72 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     });
 
     if (!filtered.length) {
-      orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
+      orphansBox.innerHTML = `${errorBanner}<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
       return;
     }
 
-    orphansBox.innerHTML = filtered
-      .map(
-        (item) => `
-        <div class="ala-ov-item" data-mal-id="${item.malId}">
+    orphansBox.innerHTML =
+      errorBanner +
+      filtered
+        .map((item) => {
+          const delKey = `${item.type}:${item.malId}`;
+          const isDeleting = deletingOrphans.has(delKey);
+          return `
+        <div class="ala-ov-item" data-mal-id="${esc(item.malId)}">
           <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://myanimelist.net/${item.type.toLowerCase()}/${item.malId}" target="_blank" rel="noopener" title="${item.title}">${item.title}</a>
+            <a class="ala-ov-item-title" href="https://myanimelist.net/${esc(item.type.toLowerCase())}/${esc(item.malId)}" target="_blank" rel="noopener" title="${esc(item.title)}">${esc(item.title)}</a>
             <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${item.type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${item.type}</span>
-              <span>MAL ID: <b>${item.malId}</b></span>
+              <span class="ala-ov-badge ${item.type === 'MANGA' ? 'ala-ov-badge--manga' : ''}">${esc(item.type)}</span>
+              <span>MAL ID: <b>${esc(item.malId)}</b></span>
             </div>
           </div>
           <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${item.malId}" data-type="${item.type}">Delete from MAL</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${item.malId}">Keep on MAL</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${esc(item.malId)}" data-type="${esc(item.type)}"${isDeleting ? ' disabled' : ''}>${isDeleting ? 'Deleting...' : 'Delete from MAL'}</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${esc(item.malId)}" data-type="${esc(item.type)}">Keep on MAL</button>
           </div>
         </div>
-      `
-      )
-      .join('');
+      `;
+        })
+        .join('');
 
     orphansBox.querySelectorAll<HTMLButtonElement>('.ala-ov-btn-del-mal').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const id = Number(btn.dataset.malId);
         const type = (btn.dataset.type || 'ANIME') as SyncMediaType;
-        if (!id) return;
-        if (!confirm(`Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`)) return;
+        const delKey = `${type}:${id}`;
+        if (!id || btn.disabled || deletingOrphans.has(delKey) || isClosed()) return;
+        deletingOrphans.add(delKey);
         btn.disabled = true;
-        btn.textContent = 'Deleting...';
         try {
-          await malDeleteEntry(type, id);
-          scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
-          renderOrphansList();
+          const confirmed = await showConfirm({
+            id: 'ov-del-mal-confirm',
+            title: 'Delete from MyAnimeList',
+            message: `Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`,
+            confirmText: 'Delete',
+            danger: true
+          });
+          if (isClosed() || !confirmed) return;
+          btn.textContent = 'Deleting...';
+          await malDeleteEntry(type, id, { signal: malSignal });
+          if (isClosed()) return;
+          scannedOrphans = scannedOrphans?.filter((o) => !(o.malId === id && o.type === type)) || [];
         } catch (err: any) {
-          btn.disabled = false;
-          btn.textContent = 'Delete from MAL';
-          alert(`Failed to delete from MAL: ${err?.message || err}`);
+          if (isClosed() || malSignal.aborted || isAbortError(err)) return;
+          await showAlert(
+            `Failed to delete from MAL: ${err?.message || err}`,
+            'Delete Failed',
+            'ov-del-mal-error'
+          );
+        } finally {
+          deletingOrphans.delete(delKey);
+          if (!isClosed()) {
+            if (btn.isConnected) {
+              btn.disabled = false;
+              btn.textContent = 'Delete from MAL';
+            } else {
+              renderOrphansList();
+            }
+          }
         }
       });
     });
@@ -1085,75 +1211,104 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     orphansBox.querySelectorAll<HTMLButtonElement>('.ala-ov-btn-keep-mal').forEach((btn) => {
       btn.addEventListener('click', () => {
         const id = Number(btn.dataset.malId);
-        scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
+        const type = (btn.dataset.type || 'ANIME') as SyncMediaType;
+        scannedOrphans = scannedOrphans?.filter((o) => !(o.malId === id && o.type === type)) || [];
         renderOrphansList();
       });
     });
   }
 
   const scanOrphansBtn = backdrop.querySelector('#ala-ov-btn-scan-orphans') as HTMLButtonElement;
-  scanOrphansBtn?.addEventListener('click', async () => {
-    const orphansBox = backdrop.querySelector('#ala-ov-audit-orphans') as HTMLElement;
-    scanOrphansBtn.disabled = true;
-    scanOrphansBtn.textContent = 'Scanning...';
-    orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
+  if (scanOrphansBtn) {
+    listen(scanOrphansBtn, 'click', async () => {
+      if (scanOrphansBtn.disabled || isClosed()) return;
+      const orphansBox = backdrop.querySelector('#ala-ov-audit-orphans') as HTMLElement;
+      scanOrphansBtn.disabled = true;
+      scanOrphansBtn.textContent = 'Scanning...';
+      orphanScanErrors = [];
+      orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
 
-    try {
-      const viewer = await api?.viewer();
-      if (!viewer) {
-        orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
-        return;
-      }
+      try {
+        const viewer = await api?.viewer(false, { signal: malSignal });
+        if (isClosed()) return;
+        if (!viewer) {
+          orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
+          return;
+        }
 
-      const overrides = readOverrides();
-      const knownMalIds = new Set<number>();
+        const overrides = readOverrides();
+        const knownMalIdsByType: Record<SyncMediaType, Set<number>> = {
+          ANIME: new Set<number>(),
+          MANGA: new Set<number>()
+        };
+        const succeededTypes = new Set<SyncMediaType>();
 
-      for (const t of ['ANIME', 'MANGA'] as const) {
-        try {
-          const alEntries = await alFetchAll(viewer.id, t, api);
-          for (const e of alEntries) {
-            const ov = overrides[String(e.mediaId)];
-            if (ov) {
-              if (ov.malId > 0) knownMalIds.add(ov.malId);
-            } else {
-              const cached = stores[t].ids.data[e.mediaId]?.m;
-              if (cached && cached > 0) knownMalIds.add(cached);
-              else if (e.idMal > 0) knownMalIds.add(e.idMal);
+        for (const t of ['ANIME', 'MANGA'] as const) {
+          try {
+            const alEntries = await alFetchAll(viewer.id, t, api, malSignal);
+            if (isClosed()) return;
+            succeededTypes.add(t);
+            const known = knownMalIdsByType[t];
+            for (const e of alEntries) {
+              const ov = overrides[String(e.mediaId)];
+              if (ov) {
+                if (ov.malId > 0) {
+                  known.add(ov.malId);
+                } else if (ov.malId === 0) {
+                  if (e.idMal > 0) known.add(e.idMal);
+                  const cached = syncStoresInitialized ? Number(stores[t].ids.data[e.mediaId]?.m) || 0 : 0;
+                  if (cached > 0) known.add(cached);
+                }
+              } else {
+                const cached = syncStoresInitialized ? Number(stores[t].ids.data[e.mediaId]?.m) || 0 : 0;
+                if (cached > 0) known.add(cached);
+                else if (e.idMal > 0) known.add(e.idMal);
+              }
             }
+          } catch (e: any) {
+            if (isClosed() || malSignal.aborted || isAbortError(e)) return;
+            ec?.log?.warn(`Audit scan: failed to fetch AniList ${t}:`, e);
+            orphanScanErrors.push(`Failed to fetch AniList ${t.toLowerCase()} list: ${e?.message || e}`);
           }
-        } catch (e: any) {
-          ec?.log?.warn(`Audit scan: failed to fetch AniList ${t}:`, e);
+        }
+
+        const foundOrphans: OrphanItem[] = [];
+        for (const t of ['ANIME', 'MANGA'] as const) {
+          if (!succeededTypes.has(t)) continue;
+          try {
+            const malList = await malFetchList(t, { signal: malSignal });
+            if (isClosed()) return;
+            const known = knownMalIdsByType[t];
+            for (const [idStr, data] of Object.entries(malList)) {
+              const malId = Number(idStr);
+              if (malId > 0 && !known.has(malId)) {
+                foundOrphans.push({
+                  malId,
+                  type: t,
+                  title: data.__malTitle || `MAL #${malId}`
+                });
+              }
+            }
+          } catch (e: any) {
+            if (isClosed() || malSignal.aborted || isAbortError(e)) return;
+            ec?.log?.warn(`Audit scan: failed to fetch MAL ${t}:`, e);
+            orphanScanErrors.push(`Failed to fetch MAL ${t.toLowerCase()} list: ${e?.message || e}`);
+          }
+        }
+
+        scannedOrphans = foundOrphans;
+        renderOrphansList();
+      } catch (err: any) {
+        if (isClosed() || malSignal.aborted || isAbortError(err)) return;
+        orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${esc(err?.message || err)}</div>`;
+      } finally {
+        if (!isClosed()) {
+          scanOrphansBtn.disabled = false;
+          scanOrphansBtn.textContent = 'Scan MAL';
         }
       }
-
-      const foundOrphans: OrphanItem[] = [];
-      for (const t of ['ANIME', 'MANGA'] as const) {
-        try {
-          const malList = await malFetchList(t);
-          for (const [idStr, data] of Object.entries(malList)) {
-            const malId = Number(idStr);
-            if (malId > 0 && !knownMalIds.has(malId)) {
-              foundOrphans.push({
-                malId,
-                type: t,
-                title: data.__malTitle || `MAL #${malId}`
-              });
-            }
-          }
-        } catch (e: any) {
-          ec?.log?.warn(`Audit scan: failed to fetch MAL ${t}:`, e);
-        }
-      }
-
-      scannedOrphans = foundOrphans;
-      renderOrphansList();
-    } catch (err: any) {
-      orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${err?.message || err}</div>`;
-    } finally {
-      scanOrphansBtn.disabled = false;
-      scanOrphansBtn.textContent = 'Scan MAL';
-    }
-  });
+    });
+  }
 
   const jsonTextarea = backdrop.querySelector('#ala-ov-json-textarea') as HTMLTextAreaElement;
   const jsonStatus = backdrop.querySelector('#ala-ov-json-status') as HTMLElement;
@@ -1168,60 +1323,70 @@ export function openOverridesModal(ec: JsonEditorContext): void {
     jsonStatus.style.display = 'none';
   }
 
-  jsonCopyBtn?.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(jsonTextarea.value);
-      const prev = jsonCopyBtn.textContent;
-      jsonCopyBtn.textContent = 'Copied!';
-      cancelCopyTimer?.();
-      cancelCopyTimer = ec.timeout(() => {
-        cancelCopyTimer = null;
-        jsonCopyBtn.textContent = prev;
-      }, 1500);
-    } catch (_) {
-      jsonTextarea.select();
-      document.execCommand('copy');
-      const prev = jsonCopyBtn.textContent;
-      jsonCopyBtn.textContent = 'Copied!';
-      cancelCopyTimer?.();
-      cancelCopyTimer = ec.timeout(() => {
-        cancelCopyTimer = null;
-        jsonCopyBtn.textContent = prev;
-      }, 1500);
-    }
-  });
+  if (jsonCopyBtn) {
+    listen(jsonCopyBtn, 'click', async () => {
+      try {
+        await navigator.clipboard.writeText(jsonTextarea.value);
+        if (isClosed()) return;
+        const prev = jsonCopyBtn.textContent;
+        jsonCopyBtn.textContent = 'Copied!';
+        cancelCopyTimer?.();
+        cancelCopyTimer = timeout(() => {
+          cancelCopyTimer = null;
+          if (!isClosed()) jsonCopyBtn.textContent = prev;
+        }, 1500);
+      } catch (_) {
+        if (isClosed()) return;
+        jsonTextarea.select();
+        document.execCommand('copy');
+        const prev = jsonCopyBtn.textContent;
+        jsonCopyBtn.textContent = 'Copied!';
+        cancelCopyTimer?.();
+        cancelCopyTimer = timeout(() => {
+          cancelCopyTimer = null;
+          if (!isClosed()) jsonCopyBtn.textContent = prev;
+        }, 1500);
+      }
+    });
+  }
 
-  jsonResetBtn?.addEventListener('click', renderJsonView);
+  if (jsonResetBtn) {
+    listen(jsonResetBtn, 'click', renderJsonView);
+  }
 
-  jsonSaveBtn?.addEventListener('click', () => {
-    const res = importDraftOverrides(jsonTextarea.value, 'replace');
-    if (!res.success) {
-      jsonStatus.className = 'ala-ov-status ala-ov-status--error';
-      jsonStatus.textContent = res.error || 'Failed to parse JSON';
+  if (jsonSaveBtn) {
+    listen(jsonSaveBtn, 'click', () => {
+      const res = importDraftOverrides(jsonTextarea.value, 'replace');
+      if (!res.success) {
+        jsonStatus.className = 'ala-ov-status ala-ov-status--error';
+        jsonStatus.textContent = res.error || 'Failed to parse JSON';
+        jsonStatus.style.display = 'block';
+        return;
+      }
+      jsonStatus.className = 'ala-ov-status ala-ov-status--success';
+      jsonStatus.textContent = `Successfully saved ${res.count ?? 0} overrides!`;
       jsonStatus.style.display = 'block';
-      return;
-    }
-    jsonStatus.className = 'ala-ov-status ala-ov-status--success';
-    jsonStatus.textContent = `Successfully saved ${res.count ?? 0} overrides!`;
-    jsonStatus.style.display = 'block';
-    renderList();
-  });
+      renderList();
+    });
+  }
 
-  jsonMergeBtn?.addEventListener('click', () => {
-    const res = importDraftOverrides(jsonTextarea.value, 'merge');
-    if (!res.success) {
-      jsonStatus.className = 'ala-ov-status ala-ov-status--error';
-      jsonStatus.textContent = res.error || 'Failed to parse JSON';
+  if (jsonMergeBtn) {
+    listen(jsonMergeBtn, 'click', () => {
+      const res = importDraftOverrides(jsonTextarea.value, 'merge');
+      if (!res.success) {
+        jsonStatus.className = 'ala-ov-status ala-ov-status--error';
+        jsonStatus.textContent = res.error || 'Failed to parse JSON';
+        jsonStatus.style.display = 'block';
+        return;
+      }
+      const current = readOverrides();
+      jsonStatus.className = 'ala-ov-status ala-ov-status--success';
+      jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
       jsonStatus.style.display = 'block';
-      return;
-    }
-    const current = readOverrides();
-    jsonStatus.className = 'ala-ov-status ala-ov-status--success';
-    jsonStatus.textContent = `Successfully merged ${res.count ?? 0} overrides! (Total: ${Object.keys(current).length})`;
-    jsonStatus.style.display = 'block';
-    jsonTextarea.value = JSON.stringify(current, null, 2);
-    renderList();
-  });
+      jsonTextarea.value = JSON.stringify(current, null, 2);
+      renderList();
+    });
+  }
 
   renderList();
 }

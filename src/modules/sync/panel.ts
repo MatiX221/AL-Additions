@@ -6,15 +6,25 @@ import {
   exchangeMalCode,
   setMalUiSink
 } from '../../api/mal';
-import { tryOr, esc, debounce } from '../../utils/helpers';
+import { tryOr, esc } from '../../utils/helpers';
 import { icon } from '../../utils/dom';
-import type { CleanupFn, FeatureContext } from '../../types';
+import type { CleanupFn, FeatureContext, MountHandle } from '../../types';
 import { progress, syncStatus, syncStore, onProgressChange, onStateChange } from './state';
-import { startManualSync, fullResync, currentListType, maybeAutoSync, LIST_PATH_RE } from './engine';
+import {
+  startManualSync,
+  fullResync,
+  currentListType,
+  maybeAutoSync,
+  setSyncConfirm,
+  LIST_PATH_RE
+} from './engine';
+
+type PanelElement = HTMLElement & { _limitCancel?: CleanupFn | null };
 
 let panelCtx: FeatureContext<true, 'mal'> | null = null;
+let activeMount: MountHandle<PanelElement> | null = null;
 let routeOwner: string | null = null;
-const panelId = (): string => panelCtx?.getId('panel') ?? 'ala-sync-panel';
+let pendingConfirm = false;
 
 const buildPanelCss = (sel: string): string => `
   ${sel}{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
@@ -89,18 +99,20 @@ const buildPanelCss = (sel: string): string => `
 const ui = { manual: false, showLogs: false };
 let progressTimer: CleanupFn | null = null;
 
-export function updateProgressUI(force = false): void {
+export function updateProgressUI(force = false, targetEl?: PanelElement | null): void {
+  if (!panelCtx || panelCtx.signal.aborted) return;
   if (!force) {
-    if (!progressTimer && panelCtx)
+    if (!progressTimer)
       progressTimer = panelCtx.timeout(() => {
         progressTimer = null;
         updateProgressUI(true);
       }, 120);
     return;
   }
-  const fill = document.getElementById('almal-progress-fill');
-  const text = document.getElementById('almal-progress-text');
-  renderRateLimitWarning(document.getElementById(panelId()));
+  const panelEl = targetEl ?? activeMount?.el() ?? null;
+  renderRateLimitWarning(panelEl);
+  const fill = panelEl?.querySelector<HTMLElement>('#almal-progress-fill') ?? null;
+  const text = panelEl?.querySelector<HTMLElement>('#almal-progress-text') ?? null;
   if (!fill || !text) return;
   if (progress.phase === 'fetching') {
     fill.style.width = '100%';
@@ -113,8 +125,8 @@ export function updateProgressUI(force = false): void {
   }
 }
 
-export function renderRateLimitWarning(panelEl: HTMLElement | null): void {
-  if (!panelEl || !panelEl.isConnected) return;
+export function renderRateLimitWarning(panelEl: PanelElement | null): void {
+  if (!panelEl || !panelEl.isConnected || panelCtx?.signal.aborted) return;
   const now = Date.now();
   const limited = [
     ['AniList', panelCtx?.api.resumeAt() ?? 0],
@@ -122,6 +134,8 @@ export function renderRateLimitWarning(panelEl: HTMLElement | null): void {
   ].filter(([, at]) => Number(at) > now);
   let warn = panelEl.querySelector<HTMLElement>('#almal-api-limit-warning');
   if (!limited.length) {
+    panelEl._limitCancel?.();
+    panelEl._limitCancel = null;
     warn?.remove();
     return;
   }
@@ -138,8 +152,12 @@ export function renderRateLimitWarning(panelEl: HTMLElement | null): void {
         `<b>${name} API limit reached.</b> Requests resume in <b>${Math.ceil((Number(at) - now) / 1000)}s</b>.`
     )
     .join('<br>');
-  (panelEl as any)._limitCancel?.();
-  (panelEl as any)._limitCancel = panelCtx?.timeout(() => renderRateLimitWarning(panelEl), 1000) ?? null;
+  panelEl._limitCancel?.();
+  panelEl._limitCancel =
+    panelCtx?.timeout(() => {
+      panelEl._limitCancel = null;
+      renderRateLimitWarning(panelEl);
+    }, 1000) ?? null;
 }
 
 const LOGOS = {
@@ -176,7 +194,7 @@ const timeEl = (sec: number): string =>
   `<time data-ts="${sec || 0}" title="${sec ? esc(new Date(sec * 1000).toLocaleString()) : ''}">${ago(sec)}</time>`;
 
 const refreshTimes = (): void =>
-  document.getElementById(panelId())?.querySelectorAll<HTMLElement>('time[data-ts]').forEach((el) => {
+  activeMount?.el()?.querySelectorAll<HTMLElement>('time[data-ts]').forEach((el) => {
     el.textContent = ago(Number(el.dataset.ts));
   });
 
@@ -195,9 +213,8 @@ function connItem(connected: boolean): string {
   )}<span class="almal-conn-name"><span>MyAnimeList</span>${status}</span></div>${connect}${manual}</div>`;
 }
 
-export function renderPanel(): void {
-  const panelEl = document.getElementById(panelId());
-  if (!panelEl || !panelCtx) return;
+function renderPanelTo(panelEl: PanelElement): void {
+  if (!panelCtx || panelCtx.signal.aborted) return;
   const alOk = panelCtx.api.hasAuth();
   const malOk = panelCtx.accounts.isConnected('mal');
   const ready = alOk && malOk;
@@ -224,13 +241,13 @@ export function renderPanel(): void {
         ${
           syncStatus.syncing
             ? `<button class="almal-btn almal-btn--icon almal-btn--danger" data-act="stop" ${ syncStatus.cancelled ? 'disabled' : '' } aria-label="${syncStatus.cancelled ? 'Stopping' : 'Stop sync'}" title="${ syncStatus.cancelled ? 'Stopping…' : 'Stop sync' }">${icon('stop', 16)}</button>`
-            : `<button class="almal-btn almal-btn--icon" data-act="resync" aria-label="Full resync" title="Full resync">${icon(
+            : `<button class="almal-btn almal-btn--icon" data-act="resync" ${pendingConfirm ? 'disabled' : ''} aria-label="Full resync" title="Full resync">${icon(
                 'resync',
                 16
               )}</button>`
         }
         <button class="almal-btn almal-btn--primary almal-btn--grow" data-act="sync" ${
-          syncStatus.syncing ? 'disabled' : ''
+          syncStatus.syncing || pendingConfirm ? 'disabled' : ''
         }><span>${syncStatus.syncing ? 'Syncing…' : 'Sync'}</span></button>
         <button class="almal-btn almal-btn--icon${ui.showLogs ? ' is-on' : ''}" data-act="logs" aria-label="Show logs" aria-pressed="${
       ui.showLogs
@@ -276,11 +293,20 @@ export function renderPanel(): void {
       c.textContent = img.dataset.fallback || '';
     })
   );
-  const logBox = document.getElementById('almal-log');
+  const logBox = panelEl.querySelector<HTMLElement>('#almal-log');
   if (logBox) logBox.textContent = logLines.join('\n') || 'No activity yet.';
-  if (syncStatus.syncing) updateProgressUI(true);
+  if (syncStatus.syncing) updateProgressUI(true, panelEl);
   renderRateLimitWarning(panelEl);
 }
+
+export function renderPanel(): void {
+  const panelEl = activeMount?.el() ?? null;
+  if (panelEl) renderPanelTo(panelEl);
+}
+
+const tryAutoSync = (signal?: AbortSignal): void => {
+  if (!pendingConfirm) maybeAutoSync(signal);
+};
 
 const ACTIONS: Record<string, () => void> = {
   'mal-connect': () => panelCtx?.accounts.connect('mal'),
@@ -291,16 +317,46 @@ const ACTIONS: Record<string, () => void> = {
   'mal-manual-save': async () => {
     const code = (document.getElementById('almal-mal-manual') as HTMLInputElement | null)?.value.trim();
     if (!code) return;
+    const ctxRef = panelCtx;
+    const btn = activeMount?.el()?.querySelector<HTMLButtonElement>('[data-act="mal-manual-save"]');
+    if (btn?.disabled) return;
+    if (btn) btn.disabled = true;
     try {
       await exchangeMalCode(code);
       log('MAL connected (manual).');
+      if (panelCtx !== ctxRef || ctxRef?.signal.aborted) return;
       renderPanel();
-      maybeAutoSync();
+      tryAutoSync(ctxRef?.signal);
     } catch (e: any) {
-      log('MAL token exchange failed: ' + e.message);
+      log('MAL token exchange failed: ' + (e?.message || e), 'error');
+    } finally {
+      if (panelCtx === ctxRef && !ctxRef?.signal.aborted && btn?.isConnected) btn.disabled = false;
     }
   },
-  sync: startManualSync,
+  sync: async () => {
+    const ctxRef = panelCtx;
+    if (!ctxRef || ctxRef.signal.aborted || pendingConfirm) return;
+    pendingConfirm = true;
+    const panelEl = activeMount?.el();
+    const syncBtn = panelEl?.querySelector<HTMLButtonElement>('[data-act="sync"]');
+    const resyncBtn = panelEl?.querySelector<HTMLButtonElement>('[data-act="resync"]');
+    if (syncBtn) syncBtn.disabled = true;
+    if (resyncBtn) resyncBtn.disabled = true;
+    try {
+      await startManualSync(ctxRef.signal);
+    } finally {
+      if (panelCtx === ctxRef) {
+        pendingConfirm = false;
+        if (!ctxRef.signal.aborted && !syncStatus.syncing) {
+          const curPanel = activeMount?.el();
+          const curSync = curPanel?.querySelector<HTMLButtonElement>('[data-act="sync"]');
+          const curResync = curPanel?.querySelector<HTMLButtonElement>('[data-act="resync"]');
+          if (curSync) curSync.disabled = false;
+          if (curResync) curResync.disabled = false;
+        }
+      }
+    }
+  },
   stop: () => {
     if (syncStatus.syncing && !syncStatus.cancelled) {
       syncStatus.cancelled = true;
@@ -308,8 +364,37 @@ const ACTIONS: Record<string, () => void> = {
       renderPanel();
     }
   },
-  resync: () => {
-    if (confirm('This will re-check your entire AniList library against MAL. Continue?')) fullResync();
+  resync: async () => {
+    const ctxRef = panelCtx;
+    if (!ctxRef || ctxRef.signal.aborted || pendingConfirm) return;
+    pendingConfirm = true;
+    const panelEl = activeMount?.el();
+    const resyncBtn = panelEl?.querySelector<HTMLButtonElement>('[data-act="resync"]');
+    const syncBtn = panelEl?.querySelector<HTMLButtonElement>('[data-act="sync"]');
+    if (resyncBtn) resyncBtn.disabled = true;
+    if (syncBtn) syncBtn.disabled = true;
+    try {
+      const confirmed = await ctxRef.confirm({
+        id: 'full-resync-confirm',
+        title: 'Full Resync',
+        message: 'This will re-check your entire AniList library against MAL. Continue?',
+        confirmText: 'Continue',
+        cancelText: 'Cancel'
+      });
+      if (panelCtx !== ctxRef || ctxRef.signal.aborted || !confirmed) return;
+      await fullResync(ctxRef.signal);
+    } finally {
+      if (panelCtx === ctxRef) {
+        pendingConfirm = false;
+        if (!ctxRef.signal.aborted && !syncStatus.syncing) {
+          const curPanel = activeMount?.el();
+          const curResync = curPanel?.querySelector<HTMLButtonElement>('[data-act="resync"]');
+          const curSync = curPanel?.querySelector<HTMLButtonElement>('[data-act="sync"]');
+          if (curResync) curResync.disabled = false;
+          if (curSync) curSync.disabled = false;
+        }
+      }
+    }
   },
   logs: () => {
     ui.showLogs = !ui.showLogs;
@@ -317,8 +402,6 @@ const ACTIONS: Record<string, () => void> = {
   }
 };
 
-let lastMountTry = 0;
-let retryCancel: (() => void) | null = null;
 let selfLookup = false;
 
 function decodeOwner(raw: string): string {
@@ -346,34 +429,31 @@ function findPanelAnchor(): HTMLElement | null {
 function isOwnList(): boolean {
   let owner = routeOwner || '';
   if (!owner) {
-    const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
+    const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list\/?$/i);
     if (!m) return false;
     owner = decodeOwner(m[1]);
   }
   const me = panelCtx?.session.username || '';
   if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
     selfLookup = true;
-    void tryOr(() => panelCtx!.api.viewer()).then(() => mountSoon());
+    const ctxRef = panelCtx;
+    void tryOr(() => ctxRef.api.viewer())
+      .then((v) => {
+        if (panelCtx !== ctxRef || ctxRef.signal.aborted) return;
+        if (v) activeMount?.refresh();
+      })
+      .finally(() => {
+        if (panelCtx === ctxRef) selfLookup = false;
+      });
   }
   return !!me && me.toLowerCase() === owner.toLowerCase();
 }
 
 const onListRoute = (): boolean =>
-  !!panelCtx?.get('syncEnabled') && LIST_PATH_RE.test(location.pathname) && isOwnList();
+  !!panelCtx && !panelCtx.signal.aborted && !!panelCtx.get('syncEnabled') && LIST_PATH_RE.test(location.pathname) && isOwnList();
 
-export function mountPanel(): void {
-  retryCancel?.();
-  retryCancel = null;
-  const id = panelId();
-  if (!panelCtx || !onListRoute() || document.getElementById(id)) return;
-  lastMountTry = Date.now();
-  const anchor = findPanelAnchor();
-  if (!anchor) {
-    retryCancel = panelCtx.timeout(mountSoon, 700);
-    return;
-  }
-  const panelEl = document.createElement('div');
-  panelEl.id = id;
+function createPanelEl(): PanelElement {
+  const panelEl = document.createElement('div') as PanelElement;
   panelEl.addEventListener('click', (e) => {
     const a = (e.target as Element | null)?.closest<HTMLElement>('[data-act]');
     if (a && a.dataset.act && ACTIONS[a.dataset.act]) ACTIONS[a.dataset.act]();
@@ -382,23 +462,24 @@ export function mountPanel(): void {
     const target = e.target as HTMLElement | null;
     if (e.key === 'Enter' && target?.id === 'almal-mal-manual') ACTIONS['mal-manual-save']();
   });
-  anchor.insertAdjacentElement('afterend', panelEl);
-  renderPanel();
+  return panelEl;
 }
-const mountSoon = debounce(mountPanel, 250);
+
+export function mountPanel(): void {
+  activeMount?.refresh();
+}
 
 export function initSyncPanel(ctx: FeatureContext<true, 'mal'>): void {
   panelCtx = ctx;
-  const rootId = ctx.getId('panel');
-  const rootSel = `#${rootId}`;
-  ctx.ownUi(rootSel);
-  ctx.addStyle(() => buildPanelCss(rootSel));
+  pendingConfirm = false;
+  setSyncConfirm((opts) => ctx.confirm(opts));
   ctx.onCleanup(
     setMalUiSink({
       onLog: () => {
-        const hint = document.getElementById('almal-hint');
+        const panelEl = activeMount?.el() ?? null;
+        const hint = panelEl?.querySelector<HTMLElement>('#almal-hint');
         if (hint) hint.textContent = lastNotice;
-        const logBox = document.getElementById('almal-log');
+        const logBox = panelEl?.querySelector<HTMLElement>('#almal-log');
         if (logBox) logBox.textContent = logLines.join('\n') || 'No activity yet.';
       },
       onToast: (msg, isError, closeTab) => {
@@ -409,24 +490,29 @@ export function initSyncPanel(ctx: FeatureContext<true, 'mal'>): void {
   ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
   ctx.onCleanup(onStateChange(renderPanel));
 
-  ctx.interval(() => maybeAutoSync(), 60_000);
-  ctx.ready(() => maybeAutoSync());
+  ctx.interval(() => tryAutoSync(ctx.signal), 60_000);
+  ctx.ready(() => tryAutoSync(ctx.signal));
 
-  ctx.onRoute(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i, (rc) => {
+  ctx.onRoute(/^\/user\/([^/]+)\/(?:anime|manga)list\/?$/i, (rc) => {
     routeOwner = decodeOwner(rc.match![1]);
-    retryCancel?.();
-    retryCancel = null;
-    document.getElementById(rootId)?.remove();
-    mountSoon();
+    activeMount = rc.mount<PanelElement>({
+      id: 'panel',
+      anchor: findPanelAnchor,
+      position: 'afterend',
+      match: onListRoute,
+      ownUi: true,
+      style: buildPanelCss,
+      create: createPanelEl,
+      onMount: (el) => {
+        renderPanelTo(el);
+        return () => {
+          el._limitCancel?.();
+          el._limitCancel = null;
+        };
+      }
+    });
 
     rc.onCleanup(ctx.accounts.watch('mal', () => renderPanel()));
-    rc.onCleanup(
-      ctx.onBodyMutation(() => {
-        if (!rc.signal.aborted && !document.getElementById(rootId) && Date.now() - lastMountTry > 1000 && onListRoute()) {
-          mountSoon();
-        }
-      })
-    );
 
     let lastAl: boolean | null = null;
     let lastMal: boolean | null = null;
@@ -439,26 +525,28 @@ export function initSyncPanel(ctx: FeatureContext<true, 'mal'>): void {
         renderPanel();
       }
       refreshTimes();
-      if (onListRoute() && !document.getElementById(rootId)) mountSoon();
-      maybeAutoSync();
+      activeMount?.refresh();
+      tryAutoSync(ctx.signal);
     }, 2000);
 
     return () => {
-      retryCancel?.();
-      retryCancel = null;
+      progressTimer?.();
+      progressTimer = null;
       routeOwner = null;
-      document.getElementById(rootId)?.remove();
+      activeMount = null;
     };
   });
 
   ctx.onCleanup(() => {
-    retryCancel?.();
-    retryCancel = null;
     progressTimer?.();
     progressTimer = null;
     routeOwner = null;
+    activeMount = null;
     selfLookup = false;
-    document.getElementById(rootId)?.remove();
-    if (panelCtx === ctx) panelCtx = null;
+    pendingConfirm = false;
+    if (panelCtx === ctx) {
+      setSyncConfirm(null);
+      panelCtx = null;
+    }
   });
 }

@@ -1,5 +1,5 @@
 import { randomString, sleep } from '../../utils/helpers';
-import type { AniListClient, Logger, StorageScope } from '../../types';
+import type { FeatureContext, Logger, StorageScope } from '../../types';
 import { TYPES, SyncMediaType, SyncProgress, FlaggedError, PendingDelete } from './types';
 
 const fallbackMemory = new Map<string, any>();
@@ -51,8 +51,8 @@ export function setSyncLog(log: Logger<true> | null): void {
   syncLog = log;
 }
 
-export let syncApi: AniListClient | null = null;
-export function setSyncApi(api: AniListClient | null): void {
+export let syncApi: FeatureContext['api'] | null = null;
+export function setSyncApi(api: FeatureContext['api'] | null): void {
   syncApi = api;
 }
 
@@ -138,16 +138,28 @@ export const stores: Record<SyncMediaType, { ids: any; settled: any }> = {
   MANGA: { ids: makeEmptyStore(), settled: makeEmptyStore() }
 };
 
+export let syncStoresInitialized = false;
+
 export function initSyncStores(createPersistent: PersistentFactory): void {
   for (const t of TYPES) {
     stores[t].ids = createPersistent<Record<string, any>>(`idmap_${t}`, pruneIds);
     stores[t].settled = createPersistent<Record<string, any>>(`settled_${t}`, pruneSettled);
   }
+  syncStoresInitialized = true;
 }
 
-export const clearCache = (c: { data: Record<string, any>; save: () => void }): void => {
+export function resetSyncStores(): void {
+  syncStoresInitialized = false;
+  for (const t of TYPES) {
+    stores[t].ids = makeEmptyStore();
+    stores[t].settled = makeEmptyStore();
+  }
+}
+
+export const clearCache = (c: { data: Record<string, any>; save: () => void; cancel?: () => void }, persist = true): void => {
   for (const k of Object.keys(c.data)) delete c.data[k];
-  c.save();
+  if (persist) c.save();
+  else c.cancel?.();
 };
 
 export const PENDING_DELETES_KEY = 'pending_deletes';
@@ -186,19 +198,40 @@ export function resetAccountState(): void {
 }
 
 let heartbeat: ReturnType<typeof setInterval> | null = null;
+export let syncEpoch = 0;
+let lockRunToken = 0;
 
-export async function acquireLock(): Promise<boolean> {
+export function bumpSyncEpoch(): number {
+  return ++syncEpoch;
+}
+
+export async function acquireLock(expectedEpoch = syncEpoch): Promise<boolean> {
+  if (expectedEpoch !== syncEpoch) return false;
   const lock = syncStore.jsonGet<any>(LOCK_KEY, null);
   if (lock && lock.tab !== TAB_ID && Number.isFinite(lock.at) && Date.now() - lock.at < LOCK_STALE_MS) return false;
-  const beat = () => syncStore.jsonSet(LOCK_KEY, { at: Date.now(), tab: TAB_ID });
+  const token = ++lockRunToken;
+  const beat = () => {
+    if (expectedEpoch !== syncEpoch || token !== lockRunToken) {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
+      return;
+    }
+    syncStore.jsonSet(LOCK_KEY, { at: Date.now(), tab: TAB_ID });
+  };
   beat();
   await sleep(250);
+  if (expectedEpoch !== syncEpoch || token !== lockRunToken) return false;
   if (syncStore.jsonGet<any>(LOCK_KEY, null)?.tab !== TAB_ID) return false;
+  if (heartbeat) clearInterval(heartbeat);
   heartbeat = setInterval(beat, LOCK_HEARTBEAT_MS);
   return true;
 }
 
-export function releaseLock(): void {
+export function releaseLock(expectedEpoch?: number): void {
+  if (expectedEpoch !== undefined && expectedEpoch !== syncEpoch) return;
+  lockRunToken++;
   if (heartbeat) clearInterval(heartbeat);
   heartbeat = null;
   if (syncStore.jsonGet<any>(LOCK_KEY, null)?.tab === TAB_ID) syncStore.del(LOCK_KEY);

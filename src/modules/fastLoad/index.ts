@@ -13,6 +13,7 @@ import {
   setFastLoadLogs,
   initUserMap,
   registerGlobalBridges,
+  unregisterGlobalBridges,
   getViewerFromWindow,
   rememberUser,
   incEpoch,
@@ -24,11 +25,19 @@ import {
   idToUserMap,
   inflight,
   navListeners,
-  clearGlobalCache
+  clearGlobalCache,
+  resetRuntimeState
 } from './state';
 import { installLazyMedia, installRowSkipping, installObserverCoalescing } from './domOptimizers';
 import { hookWorker, clearLastAuth } from './worker';
-import { loadRoutes, triggerEarlyStart, scheduleAutoPrefetch, installPointerPrefetch } from './routes';
+import {
+  initRoutes,
+  cleanupRoutes,
+  loadRoutes,
+  triggerEarlyStart,
+  scheduleAutoPrefetch,
+  installPointerPrefetch
+} from './routes';
 import { installGraphQLLayer } from './graphql';
 
 defineModule({
@@ -92,6 +101,7 @@ defineModule({
     setCoreSession(ctx.session);
     setCoreStorage(ctx.storage);
     setFastLoadLogs(ctx.log, ctx.log.channel('rpc'));
+    initRoutes({ timeout: ctx.timeout, debounce: ctx.debounce });
 
     ctx.hooks.registerCacheBridge({
       getGqlStore: () => gqlStore,
@@ -104,11 +114,16 @@ defineModule({
     });
 
     let yieldedToStandalone = false;
+    let uninstallFetch: (() => void) | null = null;
+    let releaseFetchOwner: (() => void) | null = null;
     const yielded = (): boolean => {
       if (yieldedToStandalone) return true;
       if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
         yieldedToStandalone = true;
-        ctx.hooks.markFetchOwner(false);
+        uninstallFetch?.();
+        uninstallFetch = null;
+        releaseFetchOwner?.();
+        releaseFetchOwner = null;
         ctx.setStandalonePaused(true);
         ctx.log.warn(
           'Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.'
@@ -164,17 +179,29 @@ defineModule({
     });
 
     if (CFG.gqlTtl > 0 && typeof win.fetch === 'function') {
-      const uninstallFetch = installGraphQLLayer(yielded);
-      ctx.hooks.markFetchOwner(true);
+      uninstallFetch = installGraphQLLayer(yielded);
+      releaseFetchOwner = ctx.hooks.markFetchOwner(true);
       ctx.onCleanup(() => {
-        ctx.hooks.markFetchOwner(false);
-        uninstallFetch();
+        uninstallFetch?.();
+        uninstallFetch = null;
+        releaseFetchOwner?.();
+        releaseFetchOwner = null;
       });
-      hookWorker(yielded);
+      const unhookWorker = attempt(() => hookWorker(yielded));
+      if (unhookWorker) ctx.onCleanup(unhookWorker);
     }
-    if (CFG.coalesceObservers) attempt(installObserverCoalescing);
-    if (CFG.lazyMedia) attempt(installLazyMedia);
-    if (CFG.rowSkipping) attempt(installRowSkipping);
+    if (CFG.coalesceObservers) {
+      const undoObservers = attempt(installObserverCoalescing);
+      if (undoObservers) ctx.onCleanup(undoObservers);
+    }
+    if (CFG.lazyMedia) {
+      const undoLazyMedia = attempt(installLazyMedia);
+      if (undoLazyMedia) ctx.onCleanup(undoLazyMedia);
+    }
+    if (CFG.rowSkipping) {
+      const undoRowSkipping = attempt(() => installRowSkipping({ addStyle: ctx.addStyle, listen: ctx.listen }));
+      if (undoRowSkipping) ctx.onCleanup(undoRowSkipping);
+    }
 
     if (CFG.earlyStart) {
       loadRoutes();
@@ -187,11 +214,18 @@ defineModule({
     if (CFG.prefetch) {
       navListeners.push(() => scheduleAutoPrefetch(yielded, 500));
       ctx.ready(() => scheduleAutoPrefetch(yielded, 1000));
-      installPointerPrefetch(yielded, ctx.listen);
+      installPointerPrefetch(yielded, ctx.listen, ctx.timeout);
     }
 
     ctx.onCleanup(() => {
+      cleanupRoutes(true);
       navListeners.length = 0;
+      resetRuntimeState();
+      unregisterGlobalBridges();
+      if (win.__ALA_FAST_LOAD__ === '0.4.3') {
+        delete win.__ALA_FAST_LOAD__;
+      }
+      builtInRunning = false;
       setFastLoadLogs(null, null);
       setCoreStorage(null);
       setCoreSession(null);

@@ -1,6 +1,6 @@
-import type { FeatureContext } from '../../types';
+import type { CleanupFn, FeatureContext, RouteContext } from '../../types';
 import type { MediaListEntryItem } from '../../api/anilist';
-import { esc } from '../../utils/helpers';
+import { esc, isAbortError } from '../../utils/helpers';
 import {
   compareEntries,
   getEntryData,
@@ -51,7 +51,10 @@ function parseCompareRoute(pathname = location.pathname): { userName: string; ty
   };
 }
 
-async function resolveCompareUsers(ctx: FeatureContext<true>): Promise<{
+async function resolveCompareUsers(
+  ctx: FeatureContext<true>,
+  rc: RouteContext
+): Promise<{
   viewerId?: number;
   viewerName?: string;
   otherId?: number;
@@ -93,7 +96,7 @@ async function resolveCompareUsers(ctx: FeatureContext<true>): Promise<{
   let viewerName = snap.username || undefined;
 
   if (!viewerId || !viewerName) {
-    const viewer = await ctx.api.viewer();
+    const viewer = await rc.api.viewer(false, { signal: rc.signal });
     if (viewer) {
       viewerId = viewer.id;
       viewerName = viewer.name;
@@ -208,77 +211,88 @@ function mountCompareTable(
   matchedNodes.sort((a, b) => compareEntries(getEntryData(a), getEntryData(b), state.activeSortCol, state.activeSortDir));
 
   state.isMutatingDOM = true;
-  customTable.querySelectorAll('.entry:not(.header)').forEach((el) => el.remove());
+  try {
+    customTable.querySelectorAll('.entry:not(.header)').forEach((el) => el.remove());
 
-  const frag = document.createDocumentFragment();
-  for (const el of matchedNodes) frag.appendChild(el);
-  customTable.appendChild(frag);
+    const frag = document.createDocumentFragment();
+    for (const el of matchedNodes) frag.appendChild(el);
+    customTable.appendChild(frag);
 
-  if (matchedNodes.length === 0) {
-    let empty = customTable.querySelector<HTMLElement>('.no-results');
-    if (!empty) {
-      empty = document.createElement('div');
-      empty.className = 'no-results';
-      empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
-      customTable.appendChild(empty);
+    if (matchedNodes.length === 0) {
+      let empty = customTable.querySelector<HTMLElement>('.no-results');
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'no-results';
+        empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
+        customTable.appendChild(empty);
+      }
+      customHeader.style.display = 'none';
+    } else {
+      customTable.querySelector('.no-results')?.remove();
+      customHeader.style.display = '';
     }
-    customHeader.style.display = 'none';
-  } else {
-    customTable.querySelector('.no-results')?.remove();
-    customHeader.style.display = '';
-  }
 
-  const emptyEl = customTable.querySelector('.ala-compare-empty');
-  if (emptyEl) customTable.appendChild(emptyEl);
-  state.isMutatingDOM = false;
+    const emptyEl = customTable.querySelector('.ala-compare-empty');
+    if (emptyEl) customTable.appendChild(emptyEl);
+  } finally {
+    state.isMutatingDOM = false;
+  }
 
   return customTable;
 }
 
 export async function loadAllEntriesViaMediaList(
   ctx: FeatureContext<true>,
+  rc: RouteContext,
   state: CompareState,
   compareRoot: HTMLElement,
   sidebar: HTMLElement
 ): Promise<void> {
-  if (state.isLoadingAll || state.isCompareLoaded || state.loadFailed) return;
+  if (state.isLoadingAll || state.isCompareLoaded || state.loadFailed || rc.signal.aborted) return;
   state.isLoadingAll = true;
   const abortState = { abort: false };
   state.loadAbortState = abortState;
   state.prefetchRelease?.();
-  state.prefetchRelease = ctx.hooks.setPrefetchPaused(true);
+  const releasePrefetch = ctx.hooks.setPrefetchPaused(true);
+  state.prefetchRelease = releasePrefetch;
+  rc.onCleanup(releasePrefetch);
 
-  state.indicatorTimer = ctx.timeout(() => {
-    if (!abortState.abort && isComparePage()) {
-      setLoadIndicator(state, sidebar, 'Loading full compare list...');
+  let cancelIndicatorTimer: CleanupFn | null = rc.timeout(() => {
+    cancelIndicatorTimer = null;
+    if (!abortState.abort && !rc.signal.aborted && isComparePage()) {
+      setLoadIndicator(sidebar, 'Loading full compare list...');
     }
   }, 250);
 
   try {
-    const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers(ctx);
-    if (abortState.abort || !isComparePage()) return;
+    const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers(ctx, rc);
+    if (abortState.abort || rc.signal.aborted || !isComparePage()) return;
 
     const viewerTarget = viewerId || viewerName;
     const otherTarget = otherId || otherName;
 
     if (!viewerTarget || !otherTarget) {
       ctx.log.debug('Missing viewer or other user for getMediaList, keeping fallback');
-      state.loadFailed = true;
+      if (state.loadAbortState === abortState && !abortState.abort && !rc.signal.aborted) {
+        state.loadFailed = true;
+      }
       return;
     }
 
     const [myListRes, otherListRes] = await Promise.all([
-      ctx.api.getMediaList(viewerTarget, type, {
+      rc.api.getMediaList(viewerTarget, type, {
         userId: viewerId,
-        userName: viewerId ? undefined : viewerName
+        userName: viewerId ? undefined : viewerName,
+        signal: rc.signal
       }),
-      ctx.api.getMediaList(otherTarget, type, {
+      rc.api.getMediaList(otherTarget, type, {
         userId: otherId,
-        userName: otherId ? undefined : otherName
+        userName: otherId ? undefined : otherName,
+        signal: rc.signal
       })
     ]);
 
-    if (abortState.abort || !isComparePage()) return;
+    if (abortState.abort || rc.signal.aborted || !isComparePage()) return;
 
     const myMap = new Map<number, MediaListEntryItem>();
     for (const entry of myListRes.allEntries) {
@@ -316,15 +330,23 @@ export async function loadAllEntriesViaMediaList(
     updateStatusCounts(state, sidebar, matchedNodes);
     applyFilter(state, customTable, matchedNodes);
   } catch (err) {
-    state.loadFailed = true;
-    ctx.log.error('CompareView getMediaList error:', err);
-  } finally {
-    state.isLoadingAll = false;
-    state.loadAbortState = null;
-    if (state.prefetchRelease) {
-      state.prefetchRelease();
-      state.prefetchRelease = null;
+    if (state.loadAbortState === abortState && !abortState.abort && !rc.signal.aborted && !isAbortError(err)) {
+      state.loadFailed = true;
+      ctx.log.error('CompareView getMediaList error:', err);
     }
-    setLoadIndicator(state, sidebar, null);
+  } finally {
+    if (cancelIndicatorTimer) {
+      cancelIndicatorTimer();
+      cancelIndicatorTimer = null;
+    }
+    if (state.loadAbortState === abortState && !abortState.abort) {
+      state.isLoadingAll = false;
+      state.loadAbortState = null;
+      if (state.prefetchRelease) {
+        state.prefetchRelease();
+        state.prefetchRelease = null;
+      }
+      setLoadIndicator(sidebar, null);
+    }
   }
 }

@@ -26,22 +26,43 @@ defineModule({
     const VALUE = String(ctx.get('tagPercentage'));
     const isTarget = (): boolean => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
     const hasSelection = (url: URL): boolean =>
-      [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== '');
+      [...url.searchParams].some(
+        ([k, v]) => k !== PARAM && !/^exclude/i.test(k) && /genre|tag/i.test(k) && v.trim() !== ''
+      );
     let fixing = false;
+    let appliedForFilter = false;
+    let lastPathname = '';
 
     function apply(initial: boolean): void {
-      if (fixing || !isTarget()) return;
+      if (fixing) return;
+      if (!isTarget()) {
+        appliedForFilter = false;
+        lastPathname = '';
+        return;
+      }
+      if (location.pathname !== lastPathname) {
+        appliedForFilter = false;
+        lastPathname = location.pathname;
+      }
       const u = new URL(location.href);
-      if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
+      if (!hasSelection(u)) {
+        appliedForFilter = false;
+        return;
+      }
+      if (appliedForFilter || u.searchParams.has(PARAM)) {
+        appliedForFilter = true;
+        return;
+      }
       u.searchParams.set(PARAM, VALUE);
+      appliedForFilter = true;
       fixing = true;
       try {
-        if (initial) {
-          location.replace(u.toString());
-        } else {
+        ctx.silently(() => {
           history.replaceState(history.state, document.title, u.toString());
-          window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
-        }
+          if (!initial) {
+            window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+          }
+        });
       } finally {
         fixing = false;
       }

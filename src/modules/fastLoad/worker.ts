@@ -1,3 +1,4 @@
+import type { CleanupFn } from '../../types';
 import {
   win,
   coreHooks,
@@ -11,20 +12,27 @@ import {
   userMap,
   idToUserMap,
   rememberUser,
-  clearGlobalCache
+  clearGlobalCache,
+  lastAuth,
+  setLastAuth,
+  clearLastAuth,
+  onRpcClear
 } from './state';
 import { stats, attempt } from './config';
 import {
   isMediaListQuery,
   isTaxonomyQuery,
+  isUnfilteredMediaListQuery,
+  resolveMediaListQuery,
   isUserQuery,
   isViewerQuery,
   isMutation,
   isVolatile,
-  normalizeVariables,
-  normalizeGqlQuery,
-  stableStringify
+  buildQueryCacheKey,
+  isRpcBlocked
 } from './helpers';
+
+export { lastAuth, clearLastAuth };
 
 export const workerPending = new WeakMap<
   object,
@@ -46,13 +54,17 @@ export const watched = new WeakSet<object>();
 export let workerUrl: string | null = null;
 export let workerOpts: any;
 export let WorkerCtor: any = null;
-export let lastAuth = '';
 
-export function clearLastAuth(): void {
-  lastAuth = '';
-}
+let workerDisposed = false;
+let activeYielded: (() => boolean) | null = null;
+const activePrefetchCleanups = new Set<() => void>();
+
+const isWorkerInactive = (yielded?: () => boolean): boolean =>
+  workerDisposed || Boolean(yielded?.()) || Boolean(activeYielded?.());
 
 const RPC_MAX_ENTRIES = 32;
+const PREFETCH_COOLDOWN_MS = 60_000;
+const PREFETCH_KEYS_MAX = 200;
 
 const clone = (v: any) => {
   try {
@@ -75,24 +87,18 @@ export const isRpcFetch = (d: any) =>
 
 export const rpcKey = (params: any[]) => {
   const [endpoint, query, variables, headers] = params;
-  const q = { query, variables };
-  if (isMediaListQuery(q)) {
-    const normVars = normalizeVariables(variables);
-    const { type = 'ANIME', userId, userName, ...rest } = normVars;
-    let resolvedId = userId;
-    if (!resolvedId && userName) {
-      resolvedId = userMap.get(String(userName).toLowerCase());
-    }
-    const who = resolvedId || (userName ? String(userName).toLowerCase() : 'me');
-    return `rpc:MediaListCollection:${String(type).toUpperCase()}:${who}:${stableStringify(rest)}`;
-  }
-  if (isTaxonomyQuery(q)) return 'rpc:Taxonomy';
-  if (isViewerQuery(q)) return 'rpc:Viewer';
-  const normQuery = normalizeGqlQuery(query);
-  const normVars = stableStringify(normalizeVariables(variables));
   const auth = String(headers?.Authorization ?? headers?.authorization ?? '');
-  return `${endpoint}\u0001${auth.slice(-16)}\u0001${normQuery}\u0001${normVars}`;
+  return buildQueryCacheKey('rpc', endpoint, query, variables, auth);
 };
+
+function hasMediaListNextChunk(res: any): boolean {
+  if (!res || typeof res !== 'object') return false;
+  return (
+    res.hasNextChunk === true ||
+    res.MediaListCollection?.hasNextChunk === true ||
+    res.data?.MediaListCollection?.hasNextChunk === true
+  );
+}
 
 export function extractUsersFromRpcResult(res: any) {
   if (!res || typeof res !== 'object') return;
@@ -131,6 +137,7 @@ export function extractUsersFromRpcResult(res: any) {
 }
 
 export const onIn = function (this: any, ev: MessageEvent) {
+  if (isWorkerInactive()) return;
   const d: any = ev.data;
   if (!d || d.type !== 'RPC') return;
   const id = String(d.id);
@@ -154,13 +161,25 @@ export const onIn = function (this: any, ev: MessageEvent) {
         operationName: p.operationName,
         status: d.error == null ? 200 : 500,
         ok: d.error == null,
-        data: d.result?.data ?? d.result
+        data: d.result?.data ?? d.result,
+        errors:
+          d.error != null
+            ? [{ message: String(d.error) }]
+            : Array.isArray(d.result?.errors)
+            ? d.result.errors
+            : undefined
       });
     }
     return clearGlobalCache();
   }
   if (p.key && d.error == null && p.epoch === rpcEpoch) {
     attempt(() => {
+      const hasNextChunk = hasMediaListNextChunk(d.result);
+      const unfilteredMlcMatch = p.key?.match(/^rpc:MediaListCollection:([A-Z]+):([^:]+):\{\}$/i);
+      if (unfilteredMlcMatch && hasNextChunk) {
+        return;
+      }
+
       const cached = { time: Date.now(), msg: clone(d) };
       let moreKeys: string[] = [];
       const mlcUser = d.result?.MediaListCollection?.user || d.result?.data?.MediaListCollection?.user;
@@ -169,16 +188,15 @@ export const onIn = function (this: any, ev: MessageEvent) {
       if (uid && uname) {
         rememberUser(uname, uid);
       }
-      const m = p.key?.match(/^rpc:MediaListCollection:([A-Z]+):([^:]+):/i);
-      if (m) {
-        const type = m[1];
-        const target = m[2];
+      if (unfilteredMlcMatch && !hasNextChunk) {
+        const type = unfilteredMlcMatch[1];
+        const target = unfilteredMlcMatch[2];
         const isNumeric = /^\d+$/.test(target);
         const resolvedUserId = isNumeric ? Number(target) : uid || userMap.get(target.toLowerCase());
         const resolvedUserName = !isNumeric ? target : uname || (resolvedUserId ? idToUserMap.get(resolvedUserId) : undefined);
         moreKeys = getMediaListKeys(type, resolvedUserId, resolvedUserName);
       }
-      const keysToSet = [p.key!, ...(p.extraKeys || []), ...moreKeys];
+      const keysToSet = [...new Set([p.key!, ...(p.extraKeys || []), ...moreKeys])];
       for (const k of keysToSet) {
         rpcCache.delete(k);
         rpcCache.set(k, cached);
@@ -206,8 +224,37 @@ export const getMediaListKeys = (type: string, userId?: number, userName?: strin
 };
 
 const prefetchedWorkerKeys = new Map<string, number>();
+onRpcClear(() => prefetchedWorkerKeys.clear());
 
-export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, userName?: string) {
+function recordPrefetchedWorkerKeys(keys: string[], now: number): void {
+  if (prefetchedWorkerKeys.size >= PREFETCH_KEYS_MAX) {
+    for (const [k, t] of prefetchedWorkerKeys) {
+      if (now - t >= PREFETCH_COOLDOWN_MS) prefetchedWorkerKeys.delete(k);
+    }
+    while (prefetchedWorkerKeys.size >= PREFETCH_KEYS_MAX) {
+      const oldest = prefetchedWorkerKeys.keys().next().value;
+      if (oldest === undefined) break;
+      prefetchedWorkerKeys.delete(oldest);
+    }
+  }
+  for (const k of keys) {
+    prefetchedWorkerKeys.delete(k);
+    prefetchedWorkerKeys.set(k, now);
+  }
+  while (prefetchedWorkerKeys.size > PREFETCH_KEYS_MAX) {
+    const oldest = prefetchedWorkerKeys.keys().next().value;
+    if (oldest === undefined) break;
+    prefetchedWorkerKeys.delete(oldest);
+  }
+}
+
+export function prefetchWorkerList(
+  type: 'ANIME' | 'MANGA',
+  userId: number,
+  userName?: string,
+  yielded?: () => boolean
+) {
+  if (isWorkerInactive(yielded) || coreHooks?.isPrefetchSuppressed()) return;
   const url = findWorkerUrl();
   if (!url || !WorkerCtor) {
     fastLoadRpcLog?.debug('Prefetch skipped: worker script unknown');
@@ -227,7 +274,7 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
       tpl = typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch {}
   }
-  if (!tpl) {
+  if (!tpl || typeof tpl.query !== 'string' || !isUnfilteredMediaListQuery({ query: tpl.query, variables: tpl.vars })) {
     fastLoadRpcLog?.debug('Prefetch skipped: no list template yet');
     return;
   }
@@ -254,14 +301,14 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
   const now = Date.now();
 
   const possibleKeys = getMediaListKeys(type, userId, userName);
+  if (rpcInflight.has(key)) return;
   for (const k of possibleKeys) {
     const hit = rpcCache.get(k);
     if (hit && hit.time >= freshFloor && now - hit.time < 5 * 60_000) return;
     if (rpcInflight.has(k)) return;
   }
-  if (now - (prefetchedWorkerKeys.get(key) || 0) < 60_000) return;
-  prefetchedWorkerKeys.set(key, now);
-  for (const k of possibleKeys) prefetchedWorkerKeys.set(k, now);
+  if (now - (prefetchedWorkerKeys.get(key) || 0) < PREFETCH_COOLDOWN_MS) return;
+  recordPrefetchedWorkerKeys([key, ...possibleKeys], now);
 
   let w: Worker;
   try {
@@ -280,142 +327,164 @@ export function prefetchWorkerList(type: 'ANIME' | 'MANGA', userId: number, user
   });
   flightPromise.catch(() => {});
   const flight = { promise: flightPromise, resolve: resolver, reject: rejecter };
+  const allFlightKeys = [...new Set([key, ...possibleKeys])];
   rpcInflight.set(key, flight);
   for (const k of possibleKeys) {
     if (!rpcInflight.has(k)) rpcInflight.set(k, flight);
   }
 
-  const finish = () => {
-    clearTimeout(timer);
-    for (const k of [key, ...possibleKeys]) {
-      const f = rpcInflight.get(k);
-      if (f) {
-        f.reject(new Error('finished'));
+  const clearOwnInflight = () => {
+    for (const k of allFlightKeys) {
+      if (rpcInflight.get(k) === flight) {
         rpcInflight.delete(k);
       }
     }
+  };
+
+  let finished = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const finish = (reason = 'finished') => {
+    if (finished) return;
+    finished = true;
+    activePrefetchCleanups.delete(finish);
+    if (timer !== undefined) clearTimeout(timer);
+    clearOwnInflight();
+    flight.reject(new Error(reason));
     attempt(() => w.terminate());
   };
-  const timer = setTimeout(() => {
+  timer = setTimeout(() => {
     fastLoadRpcLog?.debug('Prefetch timed out', type);
-    finish();
+    finish('finished');
   }, 30_000);
+  activePrefetchCleanups.add(finish);
 
   const startEpoch = rpcEpoch;
   w.addEventListener('message', (ev: MessageEvent) => {
     const d: any = ev.data;
     if (!d || d.type !== 'RPC' || String(d.id) !== id) return;
-    if (startEpoch !== rpcEpoch) {
-      flight.reject(new Error('stale'));
-      clearTimeout(timer);
-      attempt(() => w.terminate());
+    if (startEpoch !== rpcEpoch || isWorkerInactive(yielded)) {
+      finish('stale');
       return;
     }
+    if (finished) return;
+    finished = true;
+    activePrefetchCleanups.delete(finish);
+    if (timer !== undefined) clearTimeout(timer);
     if (d.error == null) {
-      attempt(() => {
-        extractUsersFromRpcResult(d.result);
-        const mlcUser = d.result?.MediaListCollection?.user || d.result?.data?.MediaListCollection?.user;
-        const extractedUserId = mlcUser?.id ? Number(mlcUser.id) : 0;
-        const resolvedUserId = userId || extractedUserId || (userName ? userMap.get(userName.toLowerCase()) : 0) || 0;
-        if (userName && resolvedUserId) {
-          rememberUser(userName, resolvedUserId);
-        }
-        const resolvedUserName = userName || (resolvedUserId ? idToUserMap.get(resolvedUserId) : undefined);
-        const cached = { time: Date.now(), msg: clone(d) };
-        const allKeys = [
-          ...new Set([
-            key,
-            ...possibleKeys,
-            ...getMediaListKeys(type, resolvedUserId, resolvedUserName)
-          ])
-        ];
-        for (const k of allKeys) {
-          rpcCache.delete(k);
-          rpcCache.set(k, cached);
-        }
-        while (rpcCache.size > RPC_MAX_ENTRIES) rpcCache.delete(rpcCache.keys().next().value as string);
-      });
-      fastLoadRpcLog?.debug('Prefetch cached', type, Object.keys(d));
-      for (const k of [key, ...possibleKeys]) {
-        const f = rpcInflight.get(k);
-        if (f) {
-          f.resolve(d);
-          rpcInflight.delete(k);
-        }
+      if (!hasMediaListNextChunk(d.result)) {
+        attempt(() => {
+          extractUsersFromRpcResult(d.result);
+          const mlcUser = d.result?.MediaListCollection?.user || d.result?.data?.MediaListCollection?.user;
+          const extractedUserId = mlcUser?.id ? Number(mlcUser.id) : 0;
+          const resolvedUserId = userId || extractedUserId || (userName ? userMap.get(userName.toLowerCase()) : 0) || 0;
+          if (userName && resolvedUserId) {
+            rememberUser(userName, resolvedUserId);
+          }
+          const resolvedUserName = userName || (resolvedUserId ? idToUserMap.get(resolvedUserId) : undefined);
+          const cached = { time: Date.now(), msg: clone(d) };
+          const allKeys = [
+            ...new Set([
+              key,
+              ...possibleKeys,
+              ...getMediaListKeys(type, resolvedUserId, resolvedUserName)
+            ])
+          ];
+          for (const k of allKeys) {
+            rpcCache.delete(k);
+            rpcCache.set(k, cached);
+          }
+          while (rpcCache.size > RPC_MAX_ENTRIES) rpcCache.delete(rpcCache.keys().next().value as string);
+        });
+        fastLoadRpcLog?.debug('Prefetch cached', type, Object.keys(d));
       }
+      clearOwnInflight();
+      flight.resolve(d);
     } else {
       fastLoadRpcLog?.debug('Prefetch failed', d.error);
-      for (const k of [key, ...possibleKeys]) {
-        const f = rpcInflight.get(k);
-        if (f) {
-          f.reject(d.error);
-          rpcInflight.delete(k);
-        }
-      }
+      clearOwnInflight();
+      flight.reject(d.error);
     }
-    clearTimeout(timer);
     attempt(() => w.terminate());
   });
 
   w.addEventListener('error', (e: any) => {
     fastLoadRpcLog?.debug('Prefetch worker error', e?.message);
-    attempt(() => {
-      coreStorage?.del('workerUrl');
-    });
-    workerUrl = null;
-    finish();
+    if (!isWorkerInactive(yielded) && startEpoch === rpcEpoch) {
+      attempt(() => {
+        coreStorage?.del('workerUrl');
+      });
+      workerUrl = null;
+    }
+    finish('error');
   });
 
   fastLoadRpcLog?.debug('Prefetch dispatching', type, vars);
-  w.postMessage({ type: 'RPC', id, method: 'fetch', params });
+  try {
+    w.postMessage({ type: 'RPC', id, method: 'fetch', params });
+  } catch {
+    finish('post-error');
+  }
 }
 
-export function hookWorker(yielded: () => boolean) {
+export function hookWorker(yielded: () => boolean): CleanupFn {
+  workerDisposed = false;
+  activeYielded = yielded;
+  let hookDisposed = false;
+  const isInactive = () => hookDisposed || workerDisposed || yielded();
+
+  let pageWin: any = null;
+  let origCtor: any = null;
+  let ProxiedWorker: any = null;
+  let hookedProto: any = null;
+  let origPost: any = null;
+  let wrappedPost: any = null;
+
   attempt(() => {
-    const pageWin = win;
-    const origCtor = pageWin.Worker;
+    pageWin = win;
+    origCtor = pageWin.Worker;
     WorkerCtor = origCtor;
     if (origCtor && !(origCtor as any).__alfl_ctor_hooked) {
       try {
-        const ProxiedWorker = function (this: any, scriptURL: string | URL, options?: WorkerOptions) {
+        ProxiedWorker = function (this: any, scriptURL: string | URL, options?: WorkerOptions) {
           const instance = Reflect.construct(origCtor, [scriptURL, options], new.target || ProxiedWorker);
-          const urlStr = String(scriptURL || '');
-          if (urlStr.includes('worker.js') && !urlStr.includes('cloudflare')) {
-            attempt(() => {
-              workerUrl = new URL(urlStr, win.location.href).href;
-              coreStorage?.set('workerUrl', workerUrl);
-            });
-            workerOpts = options;
-            fastLoadRpcLog?.debug('Page worker created:', urlStr);
-          }
-          if (!watched.has(instance)) {
-            watched.add(instance);
-            instance.addEventListener('message', onIn);
+          if (!isInactive()) {
+            const urlStr = String(scriptURL || '');
+            if (urlStr.includes('worker.js') && !urlStr.includes('cloudflare')) {
+              attempt(() => {
+                workerUrl = new URL(urlStr, win.location.href).href;
+                coreStorage?.set('workerUrl', workerUrl);
+              });
+              workerOpts = options;
+              fastLoadRpcLog?.debug('Page worker created:', urlStr);
+            }
+            if (!watched.has(instance)) {
+              watched.add(instance);
+              instance.addEventListener('message', onIn);
+            }
           }
           return instance;
         } as any;
         ProxiedWorker.prototype = origCtor.prototype;
         ProxiedWorker.__alfl_ctor_hooked = true;
         pageWin.Worker = ProxiedWorker;
-      } catch {}
+      } catch {
+        ProxiedWorker = null;
+      }
     }
 
     const W = pageWin.Worker;
     if (!W?.prototype || (W.prototype as any).__alfl_hooked) return;
-    (W.prototype as any).__alfl_hooked = true;
-    const origPost = W.prototype.postMessage;
-    W.prototype.postMessage = function (this: Worker, data: any, ...rest: any[]) {
+    hookedProto = W.prototype;
+    (hookedProto as any).__alfl_hooked = true;
+    origPost = hookedProto.postMessage;
+    wrappedPost = function (this: Worker, data: any, ...rest: any[]) {
       try {
-        if (!yielded() && isRpcFetch(data)) {
+        if (!isInactive() && isRpcFetch(data)) {
           const id = String(data.id || '');
           if (id.startsWith('alfl_prefetch_')) {
             return origPost.apply(this, [data, ...rest] as any);
           }
-          const blocker = win.__ALFL_RPC_BLOCK__;
-          const isBlocked =
-            coreHooks?.isRpcBlocked(String(data.params[1]), data.params[2]) ||
-            (typeof blocker === 'function' && blocker(String(data.params[1]), data.params[2]));
-          if (isBlocked) {
+          if (isRpcBlocked(String(data.params[1]), data.params[2])) {
             fastLoadRpcLog?.debug('Blocked request:', JSON.stringify(data.params[2]).slice(0, 60));
             const targetId = data.params[2]?.id || data.params[2]?.userId;
             const pageId = data.params[4]?.page?.id || (targetId ? `listComparison-${targetId}` : 'listComparison');
@@ -444,6 +513,7 @@ export function hookWorker(yielded: () => boolean) {
               }
             };
             setTimeout(() => {
+              if (isInactive()) return;
               try {
                 this.dispatchEvent(
                   new MessageEvent('message', {
@@ -466,11 +536,13 @@ export function hookWorker(yielded: () => boolean) {
           const h = data.params[3] || {};
           const a = h.Authorization ?? h.authorization;
           if (a && /^Bearer\s+/i.test(String(a)) && !coreHooks?.isSessionClearing()) {
-            lastAuth = String(a);
+            setLastAuth(String(a));
             coreHooks?.setAuthHeader(lastAuth);
           }
           const q = { query: data.params[1], variables: data.params[2] };
-          if (isMediaListQuery(q)) {
+          const mlcInfo = resolveMediaListQuery(q);
+          const unfilteredMediaList = mlcInfo.canonical;
+          if (unfilteredMediaList && !mlcInfo.hasInlineLiterals) {
             attempt(() => {
               const headers = { ...h };
               delete headers.Authorization;
@@ -514,9 +586,8 @@ export function hookWorker(yielded: () => boolean) {
             let flying: any = null;
             let extraKeys: string[] | undefined;
 
-            if (isMediaListQuery(q)) {
-              const normVars = normalizeVariables(q.variables);
-              let { type = 'ANIME', userId, userName } = normVars;
+            if (unfilteredMediaList) {
+              let { type = 'ANIME', userId, userName } = mlcInfo.vars;
 
               if (!userName && userId) {
                 userName = idToUserMap.get(userId);
@@ -525,7 +596,7 @@ export function hookWorker(yielded: () => boolean) {
                 userId = userMap.get(userName.toLowerCase());
               }
 
-              extraKeys = [key, ...getMediaListKeys(type || 'ANIME', userId, userName)];
+              extraKeys = [...new Set([key, ...getMediaListKeys(type || 'ANIME', userId, userName)])];
               for (const k of extraKeys) {
                 if (!hit) {
                   const h = rpcCache.get(k);
@@ -540,7 +611,11 @@ export function hookWorker(yielded: () => boolean) {
               }
             } else {
               const rpcTtl =
-                isViewerQuery(q) || isTaxonomyQuery(q) ? 5 * 60_000 : isUserQuery(q) ? 60_000 : 15_000;
+                isMediaListQuery(q) || isViewerQuery(q) || isTaxonomyQuery(q)
+                  ? 5 * 60_000
+                  : isUserQuery(q)
+                  ? 60_000
+                  : 15_000;
               const h = rpcCache.get(key);
               if (h && h.time >= freshFloor && Date.now() - h.time < rpcTtl) {
                 hit = h;
@@ -554,7 +629,16 @@ export function hookWorker(yielded: () => boolean) {
               const worker = this;
               const reply = { ...clone(hit.msg), id: data.id };
               const MessageEventCtor = win.MessageEvent || MessageEvent;
-              setTimeout(() => worker.dispatchEvent(new MessageEventCtor('message', { data: reply })), 0);
+              let dispatched = false;
+              setTimeout(() => {
+                if (dispatched) return;
+                dispatched = true;
+                if (isInactive()) {
+                  origPost.apply(worker, [data, ...rest] as any);
+                  return;
+                }
+                worker.dispatchEvent(new MessageEventCtor('message', { data: reply }));
+              }, 0);
               return;
             }
 
@@ -563,15 +647,34 @@ export function hookWorker(yielded: () => boolean) {
               fastLoadRpcLog?.debug('Attached to in-flight prefetch:', label);
               const worker = this;
               const replyId = data.id;
+              let dispatched = false;
+              const forwardOriginal = () => {
+                if (dispatched) return;
+                dispatched = true;
+                origPost.apply(worker, [data, ...rest] as any);
+              };
               flying.promise.then(
                 (msg: any) => {
+                  if (dispatched) return;
+                  if (isInactive()) {
+                    forwardOriginal();
+                    return;
+                  }
                   fastLoadRpcLog?.debug('In-flight prefetch delivered to page:', label);
                   const reply = { ...clone(msg), id: replyId };
                   const MessageEventCtor = win.MessageEvent || MessageEvent;
-                  setTimeout(() => worker.dispatchEvent(new MessageEventCtor('message', { data: reply })), 0);
+                  setTimeout(() => {
+                    if (dispatched) return;
+                    if (isInactive()) {
+                      forwardOriginal();
+                      return;
+                    }
+                    dispatched = true;
+                    worker.dispatchEvent(new MessageEventCtor('message', { data: reply }));
+                  }, 0);
                 },
                 () => {
-                  origPost.apply(worker, [data, ...rest] as any);
+                  forwardOriginal();
                 }
               );
               return;
@@ -591,5 +694,34 @@ export function hookWorker(yielded: () => boolean) {
       }
       return origPost.apply(this, [data, ...rest] as any);
     };
+    hookedProto.postMessage = wrappedPost;
   });
+
+  return () => {
+    hookDisposed = true;
+    workerDisposed = true;
+    for (const cleanup of [...activePrefetchCleanups]) {
+      attempt(cleanup);
+    }
+    activePrefetchCleanups.clear();
+    prefetchedWorkerKeys.clear();
+    if (activeYielded === yielded) activeYielded = null;
+    if (ProxiedWorker) {
+      if (pageWin && pageWin.Worker === ProxiedWorker) {
+        pageWin.Worker = origCtor;
+      }
+      delete ProxiedWorker.__alfl_ctor_hooked;
+    }
+    if (hookedProto) {
+      if (hookedProto.postMessage === wrappedPost) {
+        hookedProto.postMessage = origPost;
+      }
+      if ((hookedProto as any).__alfl_hooked) {
+        delete (hookedProto as any).__alfl_hooked;
+      }
+    }
+    if (WorkerCtor === origCtor) {
+      WorkerCtor = null;
+    }
+  };
 }

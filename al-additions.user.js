@@ -18,7 +18,6 @@
 // @connect      myanimelist.net
 // @connect      api.myanimelist.net
 // @connect      rs.animethemes.moe
-// @connect      api.animethemes.moe
 // @connect      api.mangaupdates.com
 // @connect      www.mangaupdates.com
 // @connect      www.novelupdates.com
@@ -60,7 +59,28 @@
 	];
 	var MEDIA_TYPES = ["ANIME", "MANGA"];
 	location.hostname;
-	var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	var MAX_TIMEOUT_MS = 2147483647;
+	function sleep(ms, signal) {
+		if (signal?.aborted) return Promise.reject(createAbortError(signal));
+		const delay = Number.isFinite(ms) ? Math.min(MAX_TIMEOUT_MS, Math.max(0, ms)) : 0;
+		if (!signal) return new Promise((resolve) => setTimeout(resolve, delay));
+		return new Promise((resolve, reject) => {
+			let done = false;
+			const onAbort = () => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				reject(createAbortError(signal));
+			};
+			const timer = setTimeout(() => {
+				if (done) return;
+				done = true;
+				signal.removeEventListener("abort", onAbort);
+				resolve();
+			}, delay);
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+	}
 	var clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
 	var esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({
 		"&": "&amp;",
@@ -89,46 +109,134 @@
 		e.auth = service;
 		return e;
 	}
+	function composeAbortSignals(a, b) {
+		const noop = () => {};
+		if (!a) return {
+			signal: b,
+			dispose: noop
+		};
+		if (!b || a === b) return {
+			signal: a,
+			dispose: noop
+		};
+		if (a.aborted) return {
+			signal: a,
+			dispose: noop
+		};
+		if (b.aborted) return {
+			signal: b,
+			dispose: noop
+		};
+		const anyFn = AbortSignal.any;
+		if (typeof anyFn === "function") return {
+			signal: anyFn([a, b]),
+			dispose: noop
+		};
+		const ac = new AbortController();
+		const dispose = () => {
+			a.removeEventListener("abort", onAbortA);
+			b.removeEventListener("abort", onAbortB);
+		};
+		const onAbortA = () => {
+			dispose();
+			ac.abort(a.reason);
+		};
+		const onAbortB = () => {
+			dispose();
+			ac.abort(b.reason);
+		};
+		a.addEventListener("abort", onAbortA, { once: true });
+		b.addEventListener("abort", onAbortB, { once: true });
+		return {
+			signal: ac.signal,
+			dispose
+		};
+	}
+	function createAbortError(signal) {
+		const reason = signal?.reason;
+		if ((reason instanceof Error || typeof DOMException !== "undefined" && reason instanceof DOMException) && reason.name === "AbortError") return reason;
+		if (typeof DOMException !== "undefined") return new DOMException("Request aborted", "AbortError");
+		const err = new Error("Request aborted");
+		err.name = "AbortError";
+		return err;
+	}
+	function isAbortError(err) {
+		if (!err || typeof err !== "object") return false;
+		const e = err;
+		return e.name === "AbortError" || e.message === "Request aborted" || e.message === "Download aborted";
+	}
+	function raceWithSignal(promise, signal, createAbort = createAbortError) {
+		if (!signal) return promise;
+		if (signal.aborted) {
+			promise.catch(() => {});
+			return Promise.reject(createAbort(signal));
+		}
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const onAbort = () => {
+				if (settled) return;
+				settled = true;
+				promise.catch(() => {});
+				reject(createAbort(signal));
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			promise.then((val) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				resolve(val);
+			}, (err) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				reject(err);
+			});
+		});
+	}
+	function isGqlMutation(q) {
+		if (typeof q !== "string") return false;
+		const stripped = q.replace(/#[^\n\r]*|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"/g, " ");
+		return /\bmutation\b/i.test(stripped);
+	}
 	function debounce(fn, ms = 0) {
 		let t = 0;
-		return (...a) => {
+		let pendingArgs = null;
+		const cancel = () => {
 			clearTimeout(t);
-			t = setTimeout(() => fn(...a), ms);
+			t = 0;
+			pendingArgs = null;
 		};
-	}
-	var MEMO_MAX_ENTRIES = 1e3;
-	function memo(fn, { keepNull = true, ttl = 0 } = {}) {
-		const m = new Map();
-		return (key, ...args) => {
-			const k = String(key);
-			const hit = m.get(k);
-			if (hit && (!ttl || Date.now() - hit.at < ttl)) return hit.p;
-			const entry = {
-				at: Date.now(),
-				p: Promise.resolve()
-			};
-			entry.p = Promise.resolve().then(() => fn(...args)).then((v) => {
-				if (v == null && !keepNull && m.get(k) === entry) m.delete(k);
-				return v;
-			}, (e) => {
-				if (m.get(k) === entry) m.delete(k);
-				throw e;
-			});
-			if (m.size >= MEMO_MAX_ENTRIES) {
-				const now = Date.now();
-				for (const [key, v] of m) if (ttl && now - v.at >= ttl) m.delete(key);
-				while (m.size >= MEMO_MAX_ENTRIES) m.delete(m.keys().next().value);
-			}
-			m.set(k, entry);
-			return entry.p;
+		const flush = () => {
+			if (!pendingArgs) return;
+			const args = pendingArgs;
+			cancel();
+			fn(...args);
 		};
+		const debounced = ((...a) => {
+			clearTimeout(t);
+			pendingArgs = a;
+			t = setTimeout(() => {
+				t = 0;
+				const args = pendingArgs;
+				pendingArgs = null;
+				if (args) fn(...args);
+			}, ms);
+		});
+		debounced.cancel = cancel;
+		debounced.flush = flush;
+		return debounced;
 	}
 	function openTab(url) {
+		const parent = typeof document !== "undefined" ? document.body || document.documentElement : null;
+		if (!parent) {
+			window.open(url, "_blank", "noopener,noreferrer");
+			return;
+		}
 		const a = document.createElement("a");
 		a.href = url;
 		a.target = "_blank";
 		a.rel = "noopener noreferrer";
-		document.body.appendChild(a);
+		parent.appendChild(a);
 		a.click();
 		a.remove();
 	}
@@ -232,10 +340,12 @@
 			}
 			return () => {
 				if (id === void 0) return;
+				const listenerId = id;
+				id = void 0;
 				const removeFn = resolveGm("GM_removeValueChangeListener", _GM_removeValueChangeListener);
 				if (!removeFn) return;
 				try {
-					removeFn(id);
+					removeFn(listenerId);
 				} catch {}
 			};
 		}
@@ -369,6 +479,7 @@
 			}
 			return cacheData;
 		};
+		const save = debounce(() => safe(() => jsonSet(key, ensure())), 500);
 		return {
 			get data() {
 				return ensure();
@@ -377,7 +488,9 @@
 				loaded = true;
 				cacheData = val;
 			},
-			save: debounce(() => safe(() => jsonSet(key, ensure())), 500)
+			save,
+			cancel: () => save.cancel(),
+			flush: () => save.flush()
 		};
 	}
 	var gm = {
@@ -424,6 +537,48 @@
 		}
 		return out;
 	}
+	function parseAndNormalizeNumber(v, r) {
+		if (typeof v !== "number" && typeof v !== "string") return { ok: false };
+		if (typeof v === "string" && v.trim() === "") return { ok: false };
+		const n = Math.round(Number(v));
+		if (!Number.isFinite(n)) return { ok: false };
+		const min = r?.min ?? 0;
+		const max = r?.max ?? 100;
+		return {
+			ok: true,
+			value: Math.max(min, Math.min(max, n))
+		};
+	}
+	function parseAndValidateJson(v, r) {
+		if (v == null) return { ok: false };
+		let val = v;
+		if (typeof val === "string") try {
+			val = JSON.parse(val);
+		} catch (_) {
+			return { ok: false };
+		}
+		val = cloneJsonValue(val);
+		if (r?.validate) {
+			let check;
+			try {
+				check = r.validate(val);
+			} catch (_) {
+				return { ok: false };
+			}
+			if (check === false) return { ok: false };
+			if (check && typeof check === "object") {
+				if (check.valid === false) return { ok: false };
+				return {
+					ok: true,
+					value: cloneJsonValue(check.value ?? check.tiers ?? check.config ?? check.overrides ?? val)
+				};
+			}
+		}
+		return {
+			ok: true,
+			value: val
+		};
+	}
 	var textIO = {
 		read: (el) => el.value,
 		write: (el, v) => {
@@ -433,7 +588,7 @@
 	var TYPES$1 = {
 		toggle: {
 			normalize: (v) => parseToggle(v),
-			html: (r, v) => `<span class="ala-switch"><input type="checkbox" data-key="${r.key}" ${v ? "checked" : ""}><span class="ala-slider"></span></span>`,
+			html: (r, v) => `<span class="ala-switch"><input type="checkbox" data-key="${esc(r.key)}" ${v ? "checked" : ""}><span class="ala-slider"></span></span>`,
 			read: (el) => el.checked,
 			write: (el, v) => {
 				el.checked = !!v;
@@ -441,20 +596,15 @@
 		},
 		number: {
 			normalize: (v, r) => {
-				if (typeof v !== "number" && typeof v !== "string") return r?.def;
-				if (typeof v === "string" && v.trim() === "") return r?.def;
-				const n = Math.round(Number(v));
-				if (!Number.isFinite(n)) return r?.def;
-				const min = r?.min ?? 0;
-				const max = r?.max ?? 100;
-				return Math.max(min, Math.min(max, n));
+				const res = parseAndNormalizeNumber(v, r);
+				return res.ok ? res.value : r?.def;
 			},
-			html: (r, v) => `<input type="number" data-key="${r.key}" min="${r.min ?? 0}" max="${r.max ?? 100}" step="1" inputmode="numeric" value="${esc(v)}">`,
+			html: (r, v) => `<input type="number" data-key="${esc(r.key)}" min="${esc(r.min ?? 0)}" max="${esc(r.max ?? 100)}" step="1" inputmode="numeric" value="${esc(v)}">`,
 			...textIO
 		},
 		select: {
 			normalize: (v, r) => r?.options?.some((o) => o[0] === v) ? v : r?.def,
-			html: (r, v) => `<select data-key="${r.key}">${(r.options || []).map(([val, label]) => `<option value="${val}" ${v === val ? "selected" : ""}>${label}</option>`).join("")}</select>`,
+			html: (r, v) => `<select data-key="${esc(r.key)}">${(r.options || []).map(([val, label]) => `<option value="${esc(val)}" ${v === val ? "selected" : ""}>${esc(label)}</option>`).join("")}</select>`,
 			...textIO
 		},
 		list: {
@@ -464,7 +614,7 @@
 				else if (Array.isArray(v)) arr = v.filter((x) => typeof x === "string" || typeof x === "number" && Number.isFinite(x)).map((x) => String(x).trim()).filter(Boolean);
 				return arr.length ? arr : Array.isArray(r?.def) ? r.def.slice() : [];
 			},
-			html: (r, v) => `<input type="text" data-key="${r.key}" value="${esc((v || []).join(", "))}" autocomplete="off" autocapitalize="off" spellcheck="false">`,
+			html: (r, v) => `<input type="text" data-key="${esc(r.key)}" value="${esc((v || []).join(", "))}" autocomplete="off" autocapitalize="off" spellcheck="false">`,
 			read: (el) => el.value,
 			write: (el, v) => {
 				el.value = v.join(", ");
@@ -472,31 +622,10 @@
 		},
 		json: {
 			normalize: (v, r) => {
-				if (v == null) return cloneJsonValue(r?.def);
-				let val = v;
-				if (typeof v === "string") try {
-					val = JSON.parse(v);
-				} catch (_) {
-					return cloneJsonValue(r?.def);
-				}
-				if (val === r?.def) val = cloneJsonValue(val);
-				if (r?.validate) {
-					let check;
-					try {
-						check = r.validate(val);
-					} catch (_) {
-						return cloneJsonValue(r?.def);
-					}
-					if (check === false) return cloneJsonValue(r?.def);
-					if (check && typeof check === "object") {
-						if (check.valid === false) return cloneJsonValue(r?.def);
-						const resolved = check.value ?? check.tiers ?? check.config ?? check.overrides ?? val;
-						return resolved === r.def ? cloneJsonValue(r.def) : resolved;
-					}
-				}
-				return val;
+				const res = parseAndValidateJson(v, r);
+				return res.ok ? res.value : cloneJsonValue(r?.def);
 			},
-			html: (r, v) => `<input type="hidden" data-key="${r.key}" value="${esc(JSON.stringify(v))}"><button type="button" class="ala-btn ala-btn--secondary ala-btn--edit-json" id="ala-btn-edit-${r.key}">Customize</button>`,
+			html: (r, v) => `<input type="hidden" data-key="${esc(r.key)}" value="${esc(JSON.stringify(v))}"><button type="button" class="ala-btn ala-btn--secondary ala-btn--edit-json" id="ala-btn-edit-${esc(r.key)}">Customize</button>`,
 			read: (el) => {
 				try {
 					return JSON.parse(el.value);
@@ -586,28 +715,50 @@
 		const normalized = TYPES$1[r.type].normalize(raw, r);
 		store$1.set(PREFIX + key, normalized);
 	}
+	function readLegacyLocalStorage(name) {
+		try {
+			return localStorage.getItem("ALAdditions:" + name);
+		} catch (_) {
+			return null;
+		}
+	}
+	function normalizeMigratedValue(r, v) {
+		if (r.type === "number") return parseAndNormalizeNumber(v, r);
+		if (r.type === "json") {
+			const res = parseAndValidateJson(v, r);
+			if (!res.ok || res.value == null) return { ok: false };
+			return res;
+		}
+		return {
+			ok: true,
+			value: TYPES$1[r.type].normalize(v, r)
+		};
+	}
 	function migrate() {
 		safe(() => {
 			store$1.del("al_token");
-			for (const r of Object.values(ROWS)) {
-				if (store$1.get(PREFIX + r.key, void 0) !== void 0) continue;
-				for (const name of r.legacy) {
-					let v = store$1.get(PREFIX + name, void 0);
-					if (v === void 0) {
-						const raw = localStorage.getItem("ALAdditions:" + name);
-						if (raw != null) try {
-							v = JSON.parse(raw);
-						} catch (_) {
-							v = raw;
-						}
-					}
-					if (v !== void 0) {
-						store$1.set(PREFIX + r.key, v);
-						break;
+		}, "settings migration: al_token");
+		for (const r of Object.values(ROWS)) safe(() => {
+			if (store$1.get(PREFIX + r.key, void 0) !== void 0) return;
+			for (const name of r.legacy) {
+				let v = store$1.get(PREFIX + name, void 0);
+				if (v === void 0) {
+					const raw = readLegacyLocalStorage(name);
+					if (raw != null) try {
+						v = JSON.parse(raw);
+					} catch (_) {
+						if (r.type === "json") continue;
+						v = raw;
 					}
 				}
+				if (v !== void 0) {
+					const normalized = normalizeMigratedValue(r, v);
+					if (!normalized.ok) continue;
+					store$1.set(PREFIX + r.key, normalized.value);
+					break;
+				}
 			}
-		}, "settings migration");
+		}, `settings migration: ${r.key}`);
 	}
 	var Settings = {
 		has,
@@ -920,11 +1071,17 @@
 	function normalizeGqlVariables(variables) {
 		return variables && typeof variables === "object" && !Array.isArray(variables) ? variables : {};
 	}
+	function normalizeBearerHeader(header) {
+		if (typeof header !== "string") return null;
+		const trimmed = header.trim();
+		return /^Bearer\s+\S/i.test(trimmed) ? trimmed : null;
+	}
 	var CoreHooks = (() => {
 		let clearingDepth = 0;
 		let cacheBridge = null;
 		let cacheBridgeOwner = null;
-		let fetchOwnerActive = false;
+		const fetchOwners = new Set();
+		const isFetchOwned = () => fetchOwners.size > 0;
 		const gqlListeners = new Set();
 		const rpcBlockers = new Set();
 		const prefetchTokens = new Set();
@@ -938,7 +1095,7 @@
 				const win = resolvePageWindow();
 				const snapshot = {
 					sessionClearing: clearingDepth > 0,
-					fetchOwner: fetchOwnerActive,
+					fetchOwner: isFetchOwned(),
 					hasCacheBridge: !!cacheBridge,
 					rpcBlockers: rpcBlockers.size,
 					prefetchSuppressed: prefetchTokens.size > 0,
@@ -957,7 +1114,7 @@
 		function installFallbackFetch() {
 			const win = resolvePageWindow();
 			const host = win?.location?.hostname || location.hostname;
-			if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
+			if (fallbackInstalled || isFetchOwned() || gqlListeners.size === 0) return;
 			if (host !== "anilist.co") return;
 			const currentFetch = typeof win.fetch === "function" ? win.fetch : typeof fetch === "function" ? fetch : null;
 			if (!currentFetch) return;
@@ -965,7 +1122,7 @@
 			let instanceActive = true;
 			const canIntercept = () => {
 				const curHost = win?.location?.hostname || location.hostname;
-				return instanceActive && !fetchOwnerActive && gqlListeners.size > 0 && curHost === "anilist.co";
+				return instanceActive && !isFetchOwned() && gqlListeners.size > 0 && curHost === "anilist.co";
 			};
 			origFetch = localOrig;
 			fallbackTargetWin = win;
@@ -999,8 +1156,11 @@
 				const res = await localOrig.apply(this ?? win, args);
 				if (query && canIntercept()) {
 					let data = void 0;
+					let errors = void 0;
 					if (res && !res.bodyUsed && typeof res.clone === "function") try {
-						data = (await res.clone().json())?.data;
+						const json = await res.clone().json();
+						data = json?.data;
+						errors = Array.isArray(json?.errors) ? json.errors : void 0;
 					} catch {}
 					if (canIntercept()) emitGqlFetch({
 						phase: "response",
@@ -1010,7 +1170,8 @@
 						operationName,
 						status: res.status,
 						ok: res.ok,
-						data
+						data,
+						errors
 					});
 				}
 				return res;
@@ -1065,10 +1226,7 @@
 				return clearingDepth > 0;
 			},
 			getAuthHeader() {
-				const val = store$1.get("al_token_auth", null);
-				if (typeof val !== "string") return null;
-				const trimmed = val.trim();
-				return trimmed.replace(/^Bearer(?:\s+|$)/i, "").trim() ? trimmed : null;
+				return normalizeBearerHeader(store$1.get("al_token_auth", null));
 			},
 			setAuthHeader(header) {
 				if (clearingDepth > 0) return;
@@ -1076,10 +1234,9 @@
 					store$1.del("al_token_auth");
 					return;
 				}
-				if (typeof header !== "string") return;
-				const trimmed = header.trim();
-				if (!trimmed.replace(/^Bearer(?:\s+|$)/i, "").trim()) return;
-				store$1.set("al_token_auth", trimmed);
+				const valid = normalizeBearerHeader(header);
+				if (!valid) return;
+				store$1.set("al_token_auth", valid);
 			},
 			clearAuth() {
 				try {
@@ -1113,10 +1270,23 @@
 				return cacheBridge;
 			},
 			markFetchOwner(active) {
-				fetchOwnerActive = !!active;
-				if (fetchOwnerActive) uninstallFallbackFetch();
-				else if (gqlListeners.size > 0) installFallbackFetch();
+				if (!active) {
+					if (!isFetchOwned() && gqlListeners.size > 0) installFallbackFetch();
+					syncMirror();
+					return () => {};
+				}
+				let released = false;
+				const token = Symbol("fetch-owner");
+				fetchOwners.add(token);
+				uninstallFallbackFetch();
 				syncMirror();
+				return () => {
+					if (released) return;
+					released = true;
+					fetchOwners.delete(token);
+					if (!isFetchOwned() && gqlListeners.size > 0) installFallbackFetch();
+					syncMirror();
+				};
 			},
 			hasGqlFetchSubscribers() {
 				return gqlListeners.size > 0;
@@ -1184,40 +1354,6 @@
 		};
 	})();
 	var coreLog$2 = createCoreLogger("core");
-	var entries = new Map();
-	function resolveRegisterMenuCommand() {
-		const g = globalThis;
-		if (Object.prototype.hasOwnProperty.call(g, "GM_registerMenuCommand")) return typeof g.GM_registerMenuCommand === "function" ? g.GM_registerMenuCommand : null;
-		return typeof _GM_registerMenuCommand === "function" ? _GM_registerMenuCommand : null;
-	}
-	function registerMenuCommand(label, onClick) {
-		let entry = entries.get(label);
-		if (!entry) {
-			entry = {
-				handler: null,
-				registered: false
-			};
-			entries.set(label, entry);
-		}
-		entry.handler = onClick;
-		if (!entry.registered) {
-			const regFn = resolveRegisterMenuCommand();
-			if (regFn) {
-				entry.registered = true;
-				regFn(label, () => {
-					try {
-						entry?.handler?.();
-					} catch (e) {
-						coreLog$2.error(`Menu command "${label}" failed:`, e);
-					}
-				});
-			}
-		}
-		return () => {
-			if (entry && entry.handler === onClick) entry.handler = null;
-		};
-	}
-	var coreLog$1 = createCoreLogger("core");
 	var Core = (() => {
 		const navCbs = new Set();
 		const bodyCbs = new Set();
@@ -1233,8 +1369,13 @@
 		let observer = null;
 		let readyCancel = null;
 		let lastHref = location.href;
-		let muted = false;
+		let muteDepth = 0;
 		const pageWin = typeof _unsafeWindow !== "undefined" ? _unsafeWindow : window;
+		const patchedHistories = new WeakSet();
+		const PATCHED_HISTORY_SYM = Symbol.for("ala.historyPatch");
+		const NAV_WATCHER_SYM = Symbol.for("ala.navWatcher");
+		let navInterval = 0;
+		let navListening = false;
 		let queued = [];
 		let flushTimer = 0;
 		const fire = (set, ...args) => {
@@ -1244,24 +1385,81 @@
 			}
 		};
 		function notifyNav() {
-			if (muted || location.href === lastHref) return;
+			if (muteDepth > 0 || location.href === lastHref) return;
 			lastHref = location.href;
-			coreLog$1.debug("Navigation detected:", location.pathname + location.search);
+			coreLog$2.debug("Navigation detected:", location.pathname + location.search);
 			fire(navCbs);
 		}
-		for (const name of ["pushState", "replaceState"]) {
-			const orig = pageWin.history[name];
+		function clearGlobalNavWatcher() {
+			const prev = globalThis[NAV_WATCHER_SYM];
+			if (prev && typeof prev.stop === "function") try {
+				prev.stop();
+			} catch (_) {}
 			try {
-				pageWin.history[name] = function(...args) {
-					const r = orig.apply(this, args);
-					notifyNav();
-					return r;
-				};
+				delete globalThis[NAV_WATCHER_SYM];
 			} catch (_) {}
 		}
-		window.addEventListener("popstate", notifyNav);
-		window.addEventListener("hashchange", notifyNav);
-		setInterval(notifyNav, 400);
+		clearGlobalNavWatcher();
+		function stopNavWatcher() {
+			if (navListening && typeof window !== "undefined") {
+				window.removeEventListener("popstate", notifyNav);
+				window.removeEventListener("hashchange", notifyNav);
+				navListening = false;
+			}
+			if (navInterval) {
+				clearInterval(navInterval);
+				navInterval = 0;
+			}
+			if (globalThis[NAV_WATCHER_SYM]?.stop === stopNavWatcher) try {
+				delete globalThis[NAV_WATCHER_SYM];
+			} catch (_) {}
+		}
+		function startNavWatcher() {
+			if (navListening || navInterval) return;
+			clearGlobalNavWatcher();
+			lastHref = location.href;
+			if (typeof window !== "undefined") {
+				window.addEventListener("popstate", notifyNav);
+				window.addEventListener("hashchange", notifyNav);
+				navListening = true;
+			}
+			navInterval = setInterval(notifyNav, 400);
+			try {
+				globalThis[NAV_WATCHER_SYM] = { stop: stopNavWatcher };
+			} catch (_) {}
+		}
+		function patchHistory(hist) {
+			if (!hist || patchedHistories.has(hist)) return;
+			patchedHistories.add(hist);
+			let state;
+			try {
+				state = hist[PATCHED_HISTORY_SYM];
+				if (!state) {
+					state = { notify: notifyNav };
+					hist[PATCHED_HISTORY_SYM] = state;
+				} else state.notify = notifyNav;
+			} catch (_) {
+				state = void 0;
+			}
+			const activeState = state;
+			for (const name of ["pushState", "replaceState"]) {
+				const orig = hist[name];
+				if (typeof orig !== "function") continue;
+				if (orig[PATCHED_HISTORY_SYM] && activeState) continue;
+				try {
+					const wrapped = function(...args) {
+						const r = orig.apply(this, args);
+						if (activeState) activeState.notify();
+						else notifyNav();
+						return r;
+					};
+					wrapped[PATCHED_HISTORY_SYM] = true;
+					hist[name] = wrapped;
+				} catch (_) {}
+			}
+		}
+		patchHistory(pageWin?.history);
+		if (typeof window !== "undefined" && window.history !== pageWin?.history) patchHistory(window.history);
 		function ready(cb) {
 			if (document.body) {
 				safe(cb, "ready");
@@ -1326,7 +1524,7 @@
 					flushTimer = 0;
 					const batch = queued;
 					queued = [];
-					coreLog$1.debug(`Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
+					coreLog$2.debug(`Flushing mutation batch: ${batch.length} record(s) to ${bodyCbs.size} listener(s)`);
 					fire(bodyCbs, batch);
 				}, 50);
 			});
@@ -1353,11 +1551,14 @@
 				cb,
 				active: true
 			};
+			const wasEmpty = navCbs.size === 0;
 			navCbs.add(entry);
+			if (wasEmpty) startNavWatcher();
 			return () => {
 				if (!entry.active) return;
 				entry.active = false;
 				navCbs.delete(entry);
+				if (navCbs.size === 0) stopNavWatcher();
 			};
 		}
 		function onBodyMutation(cb) {
@@ -1374,40 +1575,68 @@
 				if (bodyCbs.size === 0) disconnectObserver();
 			};
 		}
+		const INVALID_SELECTOR = Symbol("invalidSelector");
+		function safeQuerySelector(selector) {
+			try {
+				return document.querySelector(selector);
+			} catch {
+				return INVALID_SELECTOR;
+			}
+		}
 		function waitForSelector(selector, timeoutMs = 8e3, signal) {
 			if (signal?.aborted) return Promise.resolve(null);
+			const existing = safeQuerySelector(selector);
+			if (existing === INVALID_SELECTOR) return Promise.resolve(null);
+			if (existing) return Promise.resolve(existing);
+			if (!(timeoutMs > 0)) return Promise.resolve(null);
 			return new Promise((resolve) => {
-				const existing = document.querySelector(selector);
-				if (existing) return resolve(existing);
 				let done = false;
 				let unsub = null;
+				let readyUnsub = null;
 				let onAbort = null;
+				let timer = null;
 				const finish = (v) => {
 					if (done) return;
 					done = true;
-					clearTimeout(timer);
+					if (timer !== null) {
+						clearTimeout(timer);
+						timer = null;
+					}
 					if (onAbort && signal) signal.removeEventListener("abort", onAbort);
-					if (unsub) unsub();
+					if (readyUnsub) {
+						readyUnsub();
+						readyUnsub = null;
+					}
+					if (unsub) {
+						unsub();
+						unsub = null;
+					}
 					resolve(v);
+				};
+				const checkSelector = () => {
+					const el = safeQuerySelector(selector);
+					if (el === INVALID_SELECTOR) finish(null);
+					else if (el) finish(el);
 				};
 				if (signal) {
 					onAbort = () => finish(null);
 					signal.addEventListener("abort", onAbort, { once: true });
 				}
-				const timer = setTimeout(() => finish(null), timeoutMs);
-				unsub = onBodyMutation(() => {
-					const el = document.querySelector(selector);
-					if (el) finish(el);
+				if (Number.isFinite(timeoutMs)) timer = setTimeout(() => finish(null), Math.min(timeoutMs, 2147483647));
+				unsub = onBodyMutation(checkSelector);
+				if (!done && !document.body) readyUnsub = ready(() => {
+					readyUnsub = null;
+					checkSelector();
 				});
 			});
 		}
 		function silently(fn) {
-			muted = true;
+			muteDepth++;
 			try {
 				fn();
 			} finally {
-				muted = false;
-				lastHref = location.href;
+				muteDepth = Math.max(0, muteDepth - 1);
+				if (muteDepth === 0) lastHref = location.href;
 			}
 		}
 		return {
@@ -1420,6 +1649,7 @@
 		};
 	})();
 	var styleRefCounts = new Map();
+	var styleGenerations = new Map();
 	function prefixAlaId(id) {
 		const trimmed = id.trim();
 		if (!trimmed) return "";
@@ -1430,8 +1660,10 @@
 		let disposed = false;
 		let cancelReady = null;
 		styleRefCounts.set(styleId, (styleRefCounts.get(styleId) || 0) + 1);
+		const myGen = (styleGenerations.get(styleId) || 0) + 1;
+		styleGenerations.set(styleId, myGen);
 		const mount = () => {
-			if (disposed) return;
+			if (disposed || styleGenerations.get(styleId) !== myGen) return;
 			const parent = document.head || document.documentElement;
 			if (!parent) return;
 			const text = typeof css === "function" ? css() : css;
@@ -1455,11 +1687,171 @@
 			const nextCount = (styleRefCounts.get(styleId) || 1) - 1;
 			if (nextCount <= 0) {
 				styleRefCounts.delete(styleId);
+				styleGenerations.delete(styleId);
 				document.getElementById(styleId)?.remove();
 			} else styleRefCounts.set(styleId, nextCount);
 		};
 	}
+	var scopeLog = createCoreLogger("core");
+	var MAX_CLEANUP_ITERATIONS = 1e4;
+	var noop$2 = () => {};
+	function drainCleanupsReverse(label, cleanups, onError) {
+		let iterations = 0;
+		while (cleanups.size > 0) {
+			const batch = [...cleanups];
+			for (let i = batch.length - 1; i >= 0; i--) {
+				if (++iterations > MAX_CLEANUP_ITERATIONS) {
+					const msg = `Scope "${label}" exceeded max cleanup iterations (${MAX_CLEANUP_ITERATIONS}); aborting teardown.`;
+					if (onError) onError(new Error(msg));
+					else scopeLog.error(msg);
+					cleanups.clear();
+					return;
+				}
+				const fn = batch[i];
+				if (!cleanups.has(fn)) continue;
+				cleanups.delete(fn);
+				try {
+					fn();
+				} catch (err) {
+					if (onError) onError(err);
+					else scopeLog.error(`Scope "${label}" failed during cleanup:`, err);
+				}
+			}
+		}
+	}
+	function createCleanupTracker(opts) {
+		const { prefix, signal, isClosed: externalClosed, cleanups = new Set(), onError } = opts;
+		const checkClosed = () => signal.aborted || Boolean(externalClosed?.());
+		const reportError = (err) => {
+			if (onError) onError(err);
+			else scopeLog.error(`Scope "${prefix}" failed during cleanup:`, err);
+		};
+		const track = (fn) => {
+			if (checkClosed()) {
+				try {
+					fn();
+				} catch (err) {
+					reportError(err);
+				}
+				return fn;
+			}
+			let ran = false;
+			const wrapped = (() => {
+				if (ran) return;
+				ran = true;
+				cleanups.delete(wrapped);
+				fn();
+			});
+			cleanups.add(wrapped);
+			return wrapped;
+		};
+		const listen = (target, type, listener, options) => {
+			if (checkClosed()) return noop$2;
+			const isOnce = typeof options === "object" && options !== null && Boolean(options.once);
+			let trackedRemove = noop$2;
+			const wrappedListener = (ev) => {
+				if (isOnce && trackedRemove !== noop$2) cleanups.delete(trackedRemove);
+				if (checkClosed()) return;
+				if (typeof listener === "function") listener.call(target, ev);
+				else listener.handleEvent(ev);
+			};
+			target.addEventListener(type, wrappedListener, options);
+			trackedRemove = track(() => target.removeEventListener(type, wrappedListener, options));
+			return trackedRemove;
+		};
+		const timeout = (fn, ms) => {
+			if (checkClosed()) return noop$2;
+			let fired = false;
+			let cancelTracked = noop$2;
+			const id = setTimeout(() => {
+				fired = true;
+				if (cancelTracked !== noop$2) cleanups.delete(cancelTracked);
+				if (!checkClosed()) fn();
+			}, ms);
+			if (fired) return noop$2;
+			cancelTracked = track(() => clearTimeout(id));
+			return cancelTracked;
+		};
+		const dispose = () => {
+			drainCleanupsReverse(prefix, cleanups, onError);
+		};
+		return {
+			cleanups,
+			isClosed: checkClosed,
+			track,
+			listen,
+			timeout,
+			dispose
+		};
+	}
+	var modalLog = createCoreLogger("core");
+	var noop$1 = () => {};
 	var fallbackSeq = 0;
+	var activeModals = new Map();
+	var modalStack = [];
+	var scrollLockCount = 0;
+	var savedOverflow = null;
+	function hasActiveModal() {
+		return modalStack.length > 0;
+	}
+	function acquireScrollLock() {
+		if (scrollLockCount === 0 && typeof document !== "undefined" && document.documentElement) {
+			savedOverflow = document.documentElement.style.overflow;
+			document.documentElement.style.overflow = "hidden";
+		}
+		scrollLockCount++;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			if (scrollLockCount > 0) {
+				scrollLockCount--;
+				if (scrollLockCount === 0) {
+					if (savedOverflow !== null && typeof document !== "undefined" && document.documentElement) document.documentElement.style.overflow = savedOverflow;
+					savedOverflow = null;
+				}
+			}
+		};
+	}
+	function registerModalOverlay(onEscape) {
+		const entry = { close: onEscape };
+		modalStack.push(entry);
+		let disposed = false;
+		return {
+			isTop: () => !disposed && modalStack[modalStack.length - 1] === entry,
+			dispose: () => {
+				if (disposed) return;
+				disposed = true;
+				const idx = modalStack.indexOf(entry);
+				if (idx !== -1) modalStack.splice(idx, 1);
+			}
+		};
+	}
+	function createDeadModalHandle(id, onError) {
+		const dead = document.createElement("div");
+		const ac = new AbortController();
+		ac.abort();
+		return {
+			id,
+			selector: `#${id}`,
+			signal: ac.signal,
+			backdrop: dead,
+			sheet: dead,
+			body: dead,
+			footer: dead,
+			close: noop$1,
+			listen: () => noop$1,
+			timeout: () => noop$1,
+			onCleanup: (fn) => {
+				try {
+					fn();
+				} catch (err) {
+					if (onError) onError(err);
+					else modalLog.error(`Modal "${id}" cleanup failed:`, err);
+				}
+			}
+		};
+	}
 	var MODAL_STYLE_ID = "ala-core-modal-style";
 	var MODAL_CSS$1 = `
   .ala-core-backdrop{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:rgba(5,12,20,.72);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
@@ -1467,7 +1859,9 @@
   .ala-core-sheet *{box-sizing:border-box}
   .ala-core-sheet :focus-visible{outline:2px solid rgb(var(--color-blue));outline-offset:2px}
   .ala-core-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(var(--color-text-lighter),.14)}
+  .ala-core-head-text{min-width:0}
   .ala-core-head h2{margin:0;font-size:18px;font-weight:600}
+  .ala-core-subtitle{margin-top:2px;font-size:12px;color:rgb(var(--color-text-lighter));line-height:1.4}
   .ala-core-body{flex:1 1 auto;min-height:0;padding:16px 20px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-gutter:stable}
   .ala-core-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:12px 20px;border-top:1px solid rgba(var(--color-text-lighter),.14)}
   .ala-core-sheet .ala-btn{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 18px;border:1px solid rgba(var(--color-text-lighter),.25);border-radius:4px;background:transparent;color:rgb(var(--color-text));font:inherit;font-size:13px;cursor:pointer}
@@ -1480,54 +1874,533 @@
   .ala-core-sheet .ala-icon-btn:hover{background:rgba(var(--color-text-lighter),.14);color:rgb(var(--color-text))}
 `;
 	function createModal(opts) {
-		const modalId = opts.id ? prefixAlaId(opts.id) || `ala-modal-${++fallbackSeq}` : `ala-modal-${++fallbackSeq}`;
-		const disposeStyle = addStyle(MODAL_STYLE_ID, MODAL_CSS$1);
-		const disposeOwn = Core.registerOwnUi(`#${modalId}`);
-		document.getElementById(modalId)?.remove();
-		const backdrop = document.createElement("div");
-		backdrop.id = modalId;
-		backdrop.className = "ala-core-backdrop";
-		const titleId = `${modalId}-title`;
-		backdrop.innerHTML = `
+		const modalId = prefixAlaId(opts.id?.trim() || `modal-${++fallbackSeq}`);
+		const selector = `#${modalId}`;
+		const existingClose = activeModals.get(modalId);
+		if (existingClose) existingClose();
+		if (!document.body) return createDeadModalHandle(modalId);
+		const modalAc = new AbortController();
+		let closed = false;
+		const lifecycle = createCleanupTracker({
+			prefix: modalId,
+			signal: modalAc.signal,
+			isClosed: () => closed,
+			onError: (err) => modalLog.error(`Modal "${modalId}" cleanup failed:`, err)
+		});
+		const trackModal = lifecycle.track;
+		let backdrop = null;
+		let onKeyRef = null;
+		let overlayHandle = null;
+		let releaseScrollLock = null;
+		let closeRef = null;
+		const cleanupResources = () => {
+			if (onKeyRef) {
+				document.removeEventListener("keydown", onKeyRef, true);
+				onKeyRef = null;
+			}
+			if (closeRef && activeModals.get(modalId) === closeRef) activeModals.delete(modalId);
+			if (overlayHandle) {
+				const handle = overlayHandle;
+				overlayHandle = null;
+				handle.dispose();
+			}
+			if (releaseScrollLock) {
+				const release = releaseScrollLock;
+				releaseScrollLock = null;
+				release();
+			}
+			backdrop?.remove();
+			lifecycle.dispose();
+		};
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			modalAc.abort();
+			cleanupResources();
+			opts.onClose?.();
+		};
+		closeRef = close;
+		try {
+			trackModal(addStyle(MODAL_STYLE_ID, MODAL_CSS$1));
+			if (opts.style !== void 0) {
+				const styleSource = opts.style;
+				trackModal(addStyle(`${modalId}-style`, typeof styleSource === "function" ? () => styleSource(selector) : styleSource));
+			}
+			trackModal(Core.registerOwnUi(selector));
+			document.getElementById(modalId)?.remove();
+			backdrop = document.createElement("div");
+			backdrop.id = modalId;
+			backdrop.className = "ala-core-backdrop";
+			const titleId = `${modalId}-title`;
+			const titleHtml = opts.subtitle ? `<div class="ala-core-head-text"><h2 id="${esc(titleId)}">${esc(opts.title)}</h2><div class="ala-core-subtitle">${esc(opts.subtitle)}</div></div>` : `<h2 id="${esc(titleId)}">${esc(opts.title)}</h2>`;
+			backdrop.innerHTML = `
     <div class="ala-core-sheet" style="max-width:${esc(opts.maxWidth || "640px")}" role="dialog" aria-modal="true" aria-labelledby="${esc(titleId)}">
       <header class="ala-core-head">
-        <h2 id="${esc(titleId)}">${esc(opts.title)}</h2>
+        ${titleHtml}
         <button class="ala-icon-btn ala-core-close" type="button" aria-label="Close">✕</button>
       </header>
       <div class="ala-core-body">${opts.bodyHtml || ""}</div>
       <footer class="ala-core-foot">${opts.footerHtml || ""}</footer>
     </div>
   `;
-		let closed = false;
-		const cleanups = [disposeStyle, disposeOwn];
-		const close = () => {
-			if (closed) return;
-			closed = true;
-			document.removeEventListener("keydown", onKey, true);
-			backdrop.remove();
-			for (const fn of cleanups) try {
-				fn();
-			} catch {}
-			opts.onClose?.();
-		};
-		const onKey = (e) => {
-			if (e.key === "Escape") {
-				e.stopPropagation();
+			const onKey = (e) => {
+				if (e.key !== "Escape") return;
+				if (!overlayHandle?.isTop()) return;
+				e.preventDefault();
+				e.stopImmediatePropagation();
 				close();
-			}
+			};
+			onKeyRef = onKey;
+			activeModals.set(modalId, close);
+			overlayHandle = registerModalOverlay(close);
+			releaseScrollLock = acquireScrollLock();
+			document.addEventListener("keydown", onKey, true);
+			backdrop.querySelector(".ala-core-close")?.addEventListener("click", close);
+			backdrop.addEventListener("click", (e) => {
+				if (e.target === backdrop) {
+					close();
+					return;
+				}
+				if (e.defaultPrevented) return;
+				const closeTrigger = (e.target instanceof Element ? e.target : null)?.closest("[data-ala-close]");
+				if (closeTrigger && backdrop.contains(closeTrigger) && !closeTrigger.disabled) close();
+			});
+			document.body.appendChild(backdrop);
+		} catch (err) {
+			closed = true;
+			modalAc.abort();
+			cleanupResources();
+			throw err;
+		}
+		const onCleanup = (fn) => {
+			trackModal(fn);
 		};
-		document.addEventListener("keydown", onKey, true);
-		backdrop.querySelector(".ala-core-close")?.addEventListener("click", close);
-		backdrop.addEventListener("click", (e) => {
-			if (e.target === backdrop) close();
-		});
-		document.body.appendChild(backdrop);
 		return {
+			id: modalId,
+			selector,
+			signal: modalAc.signal,
 			backdrop,
 			sheet: backdrop.querySelector(".ala-core-sheet"),
 			body: backdrop.querySelector(".ala-core-body"),
 			footer: backdrop.querySelector(".ala-core-foot"),
-			close
+			close,
+			listen: lifecycle.listen,
+			timeout: lifecycle.timeout,
+			onCleanup
+		};
+	}
+	function bindModalAbortSignal(handle, signal, onSettled) {
+		if (!signal) return false;
+		const onAbort = () => {
+			try {
+				handle.close();
+			} finally {
+				onSettled();
+			}
+		};
+		if (signal.aborted) {
+			onAbort();
+			return true;
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		handle.onCleanup(() => signal.removeEventListener("abort", onAbort));
+		return false;
+	}
+	function openConfirmModal(opts, modalFactory = createModal) {
+		const normalized = typeof opts === "string" ? { message: opts } : opts;
+		const signal = normalized.signal;
+		if (signal?.aborted) return Promise.resolve(false);
+		const title = normalized.title?.trim() || "Confirm";
+		const confirmText = normalized.confirmText?.trim() || "Confirm";
+		const cancelText = normalized.cancelText?.trim() || "Cancel";
+		const maxWidth = normalized.maxWidth || "420px";
+		return new Promise((resolve) => {
+			let settled = false;
+			let confirmed = false;
+			const finish = (value) => {
+				if (settled) return;
+				settled = true;
+				resolve(value);
+			};
+			let handle;
+			try {
+				handle = modalFactory({
+					id: normalized.id,
+					title,
+					subtitle: normalized.subtitle,
+					maxWidth,
+					bodyHtml: `<p class="ala-core-dialog-msg" style="margin:0;white-space:pre-line;line-height:1.5">${esc(normalized.message)}</p>`,
+					footerHtml: `<button type="button" class="ala-btn ala-core-confirm-cancel" data-ala-close>${esc(cancelText)}</button><button type="button" class="ala-btn ${normalized.danger ? "ala-btn--danger" : "ala-btn--primary"} ala-core-confirm-ok">${esc(confirmText)}</button>`,
+					onClose: () => finish(confirmed)
+				});
+			} catch {
+				finish(false);
+				return;
+			}
+			if (!handle.backdrop.isConnected || handle.signal.aborted) {
+				finish(false);
+				return;
+			}
+			if (bindModalAbortSignal(handle, signal, () => finish(false))) return;
+			const okBtn = handle.footer.querySelector(".ala-core-confirm-ok");
+			const cancelBtn = handle.footer.querySelector(".ala-core-confirm-cancel");
+			if (okBtn) handle.listen(okBtn, "click", () => {
+				confirmed = true;
+				try {
+					handle.close();
+				} finally {
+					finish(true);
+				}
+			});
+			(normalized.danger ? cancelBtn : okBtn)?.focus?.();
+		});
+	}
+	function openAlertModal(opts, modalFactory = createModal) {
+		const normalized = typeof opts === "string" ? { message: opts } : opts;
+		const signal = normalized.signal;
+		if (signal?.aborted) return Promise.resolve(void 0);
+		const title = normalized.title?.trim() || "Notice";
+		const okText = normalized.okText?.trim() || "OK";
+		const maxWidth = normalized.maxWidth || "420px";
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				resolve(void 0);
+			};
+			let handle;
+			try {
+				handle = modalFactory({
+					id: normalized.id,
+					title,
+					subtitle: normalized.subtitle,
+					maxWidth,
+					bodyHtml: `<p class="ala-core-dialog-msg" style="margin:0;white-space:pre-line;line-height:1.5">${esc(normalized.message)}</p>`,
+					footerHtml: `<button type="button" class="ala-btn ala-btn--primary ala-core-alert-ok" data-ala-close>${esc(okText)}</button>`,
+					onClose: finish
+				});
+			} catch {
+				finish();
+				return;
+			}
+			if (!handle.backdrop.isConnected || handle.signal.aborted) {
+				finish();
+				return;
+			}
+			if (bindModalAbortSignal(handle, signal, finish)) return;
+			handle.footer.querySelector(".ala-core-alert-ok")?.focus?.();
+		});
+	}
+	var noop = () => {};
+	function createContextScope(opts) {
+		const { prefix, signal, isClosed: externalClosed, cleanups: initialCleanups, styleKind = "style", counters = {
+			idSeq: 0,
+			styleSeq: 0,
+			modalSeq: 0
+		}, onError, onModalStart, onModalAbort, onModalClose } = opts;
+		const lifecycle = createCleanupTracker({
+			prefix,
+			signal,
+			isClosed: externalClosed,
+			cleanups: initialCleanups,
+			onError
+		});
+		const cleanups = lifecycle.cleanups;
+		const checkClosed = lifecycle.isClosed;
+		const track = lifecycle.track;
+		const whenAlive = (fn) => {
+			if (checkClosed()) return noop;
+			return track(fn());
+		};
+		const onCleanup = (fn) => {
+			track(fn);
+		};
+		const getId = (name) => {
+			const trimmed = name?.trim();
+			if (!trimmed) return `ala-${prefix}-${++counters.idSeq}`;
+			return trimmed.startsWith("ala-") ? trimmed : `ala-${prefix}-${trimmed}`;
+		};
+		const scopedAddStyle = (idOrCss, maybeCss) => {
+			if (checkClosed()) return noop;
+			const isOneArg = maybeCss === void 0;
+			const css = isOneArg ? idOrCss : maybeCss;
+			let styleId;
+			if (isOneArg) styleId = `ala-${prefix}-${styleKind}-${++counters.styleSeq}`;
+			else {
+				const raw = String(idOrCss || "").trim();
+				if (!raw) styleId = `ala-${prefix}-${styleKind}-${++counters.styleSeq}`;
+				else if (raw.startsWith("ala-")) styleId = raw;
+				else styleId = `ala-${prefix}-${raw}${raw.endsWith("-style") ? "" : "-style"}`;
+			}
+			return track(addStyle(styleId, css));
+		};
+		const debounce = (fn, ms = 0) => {
+			let timerId = 0;
+			let pendingArgs = null;
+			let trackedCancel = null;
+			const cancel = () => {
+				if (timerId) {
+					clearTimeout(timerId);
+					timerId = 0;
+				}
+				pendingArgs = null;
+				if (trackedCancel) {
+					cleanups.delete(trackedCancel);
+					trackedCancel = null;
+				}
+			};
+			const flush = () => {
+				if (!pendingArgs || checkClosed()) {
+					cancel();
+					return;
+				}
+				const args = pendingArgs;
+				cancel();
+				fn(...args);
+			};
+			const debounced = ((...args) => {
+				if (checkClosed()) {
+					cancel();
+					return;
+				}
+				if (timerId) {
+					clearTimeout(timerId);
+					timerId = 0;
+				}
+				pendingArgs = args;
+				if (!trackedCancel) {
+					trackedCancel = () => cancel();
+					cleanups.add(trackedCancel);
+				}
+				timerId = setTimeout(() => {
+					timerId = 0;
+					const argsToRun = pendingArgs;
+					pendingArgs = null;
+					if (trackedCancel) {
+						cleanups.delete(trackedCancel);
+						trackedCancel = null;
+					}
+					if (argsToRun && !checkClosed()) fn(...argsToRun);
+				}, ms);
+			});
+			debounced.cancel = cancel;
+			debounced.flush = flush;
+			return debounced;
+		};
+		const raf = (fn) => {
+			if (checkClosed()) return noop;
+			const hasRaf = typeof requestAnimationFrame === "function";
+			const hasCancelRaf = typeof cancelAnimationFrame === "function";
+			if (!hasRaf) {
+				let fired = false;
+				let cancelTracked = noop;
+				const timerId = setTimeout(() => {
+					fired = true;
+					if (cancelTracked !== noop) cleanups.delete(cancelTracked);
+					if (!checkClosed()) fn(typeof performance !== "undefined" ? performance.now() : Date.now());
+				}, 16);
+				if (fired) return noop;
+				cancelTracked = track(() => clearTimeout(timerId));
+				return cancelTracked;
+			}
+			let fired = false;
+			let cancelTracked = noop;
+			const frameId = requestAnimationFrame((ts) => {
+				fired = true;
+				if (cancelTracked !== noop) cleanups.delete(cancelTracked);
+				if (!checkClosed()) fn(ts);
+			});
+			if (fired) return noop;
+			cancelTracked = track(() => {
+				if (hasCancelRaf) cancelAnimationFrame(frameId);
+			});
+			return cancelTracked;
+		};
+		const interval = (fn, ms) => {
+			if (checkClosed()) return noop;
+			const id = setInterval(() => {
+				if (!checkClosed()) fn();
+			}, ms);
+			return track(() => clearInterval(id));
+		};
+		const observe = (target, options, cb) => {
+			if (checkClosed() || !target || typeof MutationObserver !== "function") return noop;
+			const observer = new MutationObserver((mutations, obs) => {
+				if (checkClosed()) return;
+				cb(mutations, obs);
+			});
+			observer.observe(target, options);
+			return track(() => observer.disconnect());
+		};
+		const modal = (modalOpts) => {
+			const modalId = getId(modalOpts.id?.trim() || `modal-${++counters.modalSeq}`);
+			if (checkClosed()) return createDeadModalHandle(modalId, onError);
+			let onCloseFired = false;
+			let untracked = false;
+			let removeTracked = noop;
+			onModalStart?.();
+			let handle;
+			try {
+				handle = createModal({
+					...modalOpts,
+					id: modalId,
+					onClose: () => {
+						onCloseFired = true;
+						if (!untracked) {
+							untracked = true;
+							removeTracked();
+						}
+						try {
+							modalOpts.onClose?.();
+						} finally {
+							onModalClose?.();
+						}
+					}
+				});
+			} catch (err) {
+				if (!onCloseFired) onModalAbort?.();
+				throw err;
+			}
+			if (!onCloseFired && !handle.backdrop.isConnected) {
+				onModalAbort?.();
+				return handle;
+			}
+			if (!untracked && handle.backdrop.isConnected) {
+				const trackedClose = track(handle.close);
+				removeTracked = () => cleanups.delete(trackedClose);
+				return {
+					...handle,
+					close: trackedClose
+				};
+			}
+			return handle;
+		};
+		const confirm = (confirmOpts) => {
+			if (checkClosed()) return Promise.resolve(false);
+			return openConfirmModal(confirmOpts, modal);
+		};
+		const alert = (alertOpts) => {
+			if (checkClosed()) return Promise.resolve(void 0);
+			return openAlertModal(alertOpts, modal);
+		};
+		const waitForSelector = (selector, timeoutMs = 8e3) => {
+			if (checkClosed()) return Promise.resolve(null);
+			return Core.waitForSelector(selector, timeoutMs, signal);
+		};
+		return {
+			signal,
+			cleanups,
+			isClosed: checkClosed,
+			track,
+			whenAlive,
+			onCleanup,
+			dispose: lifecycle.dispose,
+			getId,
+			addStyle: scopedAddStyle,
+			listen: lifecycle.listen,
+			interval,
+			timeout: lifecycle.timeout,
+			debounce,
+			raf,
+			observe,
+			modal,
+			confirm,
+			alert,
+			waitForSelector
+		};
+	}
+	function scopeAniListClient(getClient, scopeSignal, isClosed) {
+		const withScopeSignal = (callerSignal, run) => {
+			if (!callerSignal || callerSignal === scopeSignal) return run(scopeSignal);
+			const composed = composeAbortSignals(scopeSignal, callerSignal);
+			let promise;
+			try {
+				promise = run(composed.signal);
+			} catch (err) {
+				composed.dispose();
+				return Promise.reject(err);
+			}
+			return composed.dispose === noop ? promise : promise.finally(composed.dispose);
+		};
+		return {
+			query: (q, variables, optionsOrRetries) => {
+				if (isClosed() && isGqlMutation(q)) return Promise.reject(new Error("Context disposed"));
+				const baseOpts = typeof optionsOrRetries === "number" ? { retries: optionsOrRetries } : optionsOrRetries || {};
+				return withScopeSignal(baseOpts.signal, (signal) => getClient().query(q, variables, {
+					...baseOpts,
+					signal
+				}));
+			},
+			getMediaList: (target, type, options) => withScopeSignal(options?.signal, (signal) => getClient().getMediaList(target, type, {
+				...options,
+				signal
+			})),
+			viewer: (forceFresh, opts) => withScopeSignal(opts?.signal, (signal) => getClient().viewer(forceFresh, {
+				...opts,
+				signal
+			})),
+			clearViewer: () => {
+				if (!isClosed()) getClient().clearViewer();
+			},
+			invalidate: (...args) => {
+				if (!isClosed()) getClient().invalidate(...args);
+			},
+			invalidateMediaList: (...args) => {
+				if (!isClosed()) getClient().invalidateMediaList(...args);
+			},
+			hasAuth: (opts) => getClient().hasAuth(isClosed() ? {
+				...opts,
+				reconcile: false
+			} : opts),
+			resumeAt: () => getClient().resumeAt(),
+			media: {
+				get: (id, type, opts) => withScopeSignal(opts?.signal, (signal) => getClient().media.get(id, type, {
+					...opts,
+					signal
+				})),
+				save: (id, type, patch, opts) => {
+					if (isClosed()) return Promise.reject(new Error("Context disposed"));
+					return withScopeSignal(opts?.signal, (signal) => getClient().media.save(id, type, patch, {
+						...opts,
+						signal
+					}));
+				}
+			}
+		};
+	}
+	var coreLog$1 = createCoreLogger("core");
+	var entries = new Map();
+	function resolveRegisterMenuCommand() {
+		const g = globalThis;
+		if (Object.prototype.hasOwnProperty.call(g, "GM_registerMenuCommand")) return typeof g.GM_registerMenuCommand === "function" ? g.GM_registerMenuCommand : null;
+		return typeof _GM_registerMenuCommand === "function" ? _GM_registerMenuCommand : null;
+	}
+	function registerMenuCommand(label, onClick) {
+		let entry = entries.get(label);
+		if (!entry) {
+			entry = {
+				handler: null,
+				registered: false
+			};
+			entries.set(label, entry);
+		}
+		entry.handler = onClick;
+		if (!entry.registered) {
+			const regFn = resolveRegisterMenuCommand();
+			if (regFn) {
+				entry.registered = true;
+				regFn(label, () => {
+					try {
+						entry?.handler?.();
+					} catch (e) {
+						coreLog$1.error(`Menu command "${label}" failed:`, e);
+					}
+				});
+			}
+		}
+		return () => {
+			if (entry && entry.handler === onClick) entry.handler = null;
 		};
 	}
 	var TOAST_ID = "ala-toast";
@@ -1576,6 +2449,8 @@
 		shell: 4
 	};
 	var ID_RE = /^[a-z][A-Za-z0-9]*$/;
+	var RESERVED_MODULE_IDS = new Set(["core", "devMode"]);
+	var teardownStarters = new WeakMap();
 	var configuredServices = null;
 	function configureCoreServices(services) {
 		configuredServices = services;
@@ -1593,6 +2468,7 @@
 	var invalidIds = new Map();
 	var liveStatuses = new Map();
 	var statusListeners = new Set();
+	var deferredStarted = false;
 	function currentHost() {
 		return location.hostname;
 	}
@@ -1792,9 +2668,18 @@
 		};
 	}
 	function syncAllLiveStatuses(statuses) {
-		for (const [id, st] of Object.entries(statuses)) emitStatusChange(id, st);
+		for (const [id, st] of Object.entries(statuses)) {
+			if (st.active) {
+				const rec = recordsById.get(id);
+				if (!rec || !rec.booted || rec.standalonePaused || rec.runtimeError) {
+					emitStatusChange(id, { active: false });
+					continue;
+				}
+			}
+			emitStatusChange(id, st);
+		}
 	}
-	function createScopedStorage(storagePrefix, isDisposed, wrapWatch = (fn) => fn(), guardClear = false) {
+	function createScopedStorage(storagePrefix, isDisposed, wrapWatch = (fn) => fn(), guardClear = false, onClear) {
 		return {
 			get: (k, d) => store$1.get(`${storagePrefix}${k}`, d),
 			set: (k, v) => {
@@ -1812,37 +2697,50 @@
 			},
 			clear: () => {
 				if (guardClear && isDisposed()) return;
+				onClear?.();
 				for (const k of store$1.list()) if (k.startsWith(storagePrefix)) store$1.del(k);
 			}
 		};
 	}
 	function runCleanupsReverse(id, cleanups) {
-		for (let i = cleanups.length - 1; i >= 0; i--) try {
-			cleanups[i]();
-		} catch (e) {
-			coreLog.error(`Module "${id}" failed during cleanup:`, e);
-		}
-		cleanups.length = 0;
+		teardownStarters.get(cleanups)?.();
+		drainCleanupsReverse(id, cleanups, (err) => {
+			coreLog.error(`Module "${id}" failed during cleanup:`, err);
+		});
 	}
 	function createContextForRecord(rec, cleanups, ac) {
 		let disposed = false;
+		let tearingDown = false;
+		const isClosed = () => disposed || tearingDown;
 		let localClearingDepth = 0;
 		const noop = () => {};
 		const activeRequests = new Set();
-		const track = (fn) => {
-			if (disposed) {
-				try {
-					fn();
-				} catch {}
-				return fn;
+		const persistentHandles = new Set();
+		let pagehideRegistered = false;
+		const counters = {
+			idSeq: 0,
+			styleSeq: 0,
+			modalSeq: 0
+		};
+		teardownStarters.set(cleanups, () => {
+			tearingDown = true;
+			try {
+				ac.abort();
+			} catch (e) {
+				coreLog.error(`Module "${rec.id}" failed during abort:`, e);
 			}
-			cleanups.push(fn);
-			return fn;
-		};
-		const whenAlive = (fn) => {
-			if (disposed) return noop;
-			return track(fn());
-		};
+		});
+		const rootScope = createContextScope({
+			prefix: rec.id,
+			signal: ac.signal,
+			isClosed,
+			cleanups,
+			styleKind: "style",
+			counters,
+			onError: (e) => coreLog.error(`Module "${rec.id}" failed during cleanup:`, e)
+		});
+		const track = rootScope.track;
+		const whenAlive = rootScope.whenAlive;
 		track(() => {
 			disposed = true;
 			while (localClearingDepth > 0) {
@@ -1853,6 +2751,9 @@
 			}
 			ac.abort();
 			for (const req of [...activeRequests]) {
+				try {
+					req.cleanupAbort?.();
+				} catch {}
 				try {
 					req.abort?.();
 				} catch {}
@@ -1867,82 +2768,105 @@
 		const assertAccountAllowed = (id) => {
 			if (!allowedAccounts.has(id)) throw new Error(`Module "${rec.id}" cannot access account provider "${id}" without declaring it in accounts`);
 		};
-		let idSeq = 0;
-		let styleSeq = 0;
 		let mountSeq = 0;
-		let modalSeq = 0;
-		const getId = (name) => {
-			const trimmed = name?.trim();
-			if (!trimmed) return `ala-${rec.id}-${++idSeq}`;
-			return trimmed.startsWith("ala-") ? trimmed : `ala-${rec.id}-${trimmed}`;
-		};
-		const makeAddStyle = (push, signal, autoPrefix) => (idOrCss, maybeCss) => {
-			if (disposed || signal.aborted) return noop;
-			const isOneArg = maybeCss === void 0;
-			const css = isOneArg ? idOrCss : maybeCss;
-			let styleId;
-			if (isOneArg) styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
-			else {
-				const raw = String(idOrCss || "").trim();
-				if (!raw) styleId = `ala-${rec.id}-${autoPrefix}-${++styleSeq}`;
-				else if (raw.startsWith("ala-")) styleId = raw;
-				else styleId = `ala-${rec.id}-${raw}${raw.endsWith("-style") ? "" : "-style"}`;
-			}
-			const clean = addStyle(styleId, css);
-			push(clean);
-			return clean;
-		};
-		const addMount = (spec, pushCleanup, signal) => {
-			const resolvedId = spec.id ? getId(spec.id) : `ala-${rec.id}-mount-${++mountSeq}`;
+		const addMount = (spec, trackFn, signal) => {
+			const resolvedId = spec.id ? rootScope.getId(spec.id) : `ala-${rec.id}-mount-${++mountSeq}`;
 			const selector = `#${resolvedId}`;
-			if (disposed || signal?.aborted) return {
+			if (isClosed() || signal?.aborted) return {
 				id: resolvedId,
 				selector,
 				el: () => null,
-				unmount: noop
+				unmount: noop,
+				refresh: noop
 			};
 			let mountedEl = null;
+			let elCleanup = null;
 			let mountDisposed = false;
 			let ownDisposer = null;
 			let mountStyleDisposer = null;
+			const runElCleanup = () => {
+				const fn = elCleanup;
+				elCleanup = null;
+				if (fn) try {
+					fn();
+				} catch (e) {
+					coreLog.error(`Module "${rec.id}" mount onMount cleanup failed:`, e);
+				}
+			};
+			const invokeOnMount = (el) => {
+				runElCleanup();
+				if (!spec.onMount) return;
+				try {
+					const res = spec.onMount(el);
+					if (typeof res === "function") {
+						if (mountDisposed || isClosed() || signal?.aborted) try {
+							res();
+						} catch (e) {
+							coreLog.error(`Module "${rec.id}" mount onMount cleanup failed:`, e);
+						}
+						else elCleanup = res;
+					}
+				} catch (e) {
+					coreLog.error(`Module "${rec.id}" mount onMount failed:`, e);
+				}
+			};
+			const ensureStyle = () => {
+				if (spec.style !== void 0 && !mountStyleDisposer) {
+					const styleCss = spec.style;
+					mountStyleDisposer = addStyle(`${resolvedId}-style`, typeof styleCss === "function" ? () => styleCss(selector) : styleCss);
+				}
+			};
+			const ensureOwnUi = () => {
+				if (spec.ownUi && !ownDisposer) ownDisposer = Core.registerOwnUi(selector);
+			};
 			const tryMount = () => {
-				if (mountDisposed || disposed || signal?.aborted) return;
+				if (mountDisposed || isClosed() || signal?.aborted) return;
 				if (spec.match && !spec.match()) {
 					if (mountedEl) {
+						runElCleanup();
 						mountedEl.remove();
 						mountedEl = null;
 					}
 					return;
 				}
 				if (mountedEl?.isConnected) return;
+				if (mountedEl) {
+					runElCleanup();
+					mountedEl = null;
+				}
 				const existing = document.getElementById(resolvedId);
 				if (existing?.isConnected) {
+					ensureStyle();
+					ensureOwnUi();
 					mountedEl = existing;
+					invokeOnMount(existing);
 					return;
 				}
 				const anchor = typeof spec.anchor === "string" ? document.querySelector(spec.anchor) : spec.anchor();
 				if (!anchor) return;
+				const pos = spec.position ?? "afterend";
+				if ((pos === "beforebegin" || pos === "afterend") && !anchor.parentElement) return;
 				const el = spec.create();
 				if (!el) return;
 				el.id = resolvedId;
-				if (spec.style !== void 0 && !mountStyleDisposer) {
-					const styleCss = spec.style;
-					mountStyleDisposer = addStyle(`${resolvedId}-style`, typeof styleCss === "function" ? () => styleCss(selector) : styleCss);
-				}
-				anchor.insertAdjacentElement(spec.position ?? "afterend", el);
+				ensureStyle();
+				anchor.insertAdjacentElement(pos, el);
 				mountedEl = el;
-				if (spec.ownUi && !ownDisposer) ownDisposer = Core.registerOwnUi(selector);
+				ensureOwnUi();
+				invokeOnMount(el);
 			};
 			let unsubReady = noop;
 			let unsubNav = noop;
 			let unsubBody = noop;
+			let disposeTracked = noop;
 			const disposeMount = () => {
 				if (mountDisposed) return;
 				mountDisposed = true;
-				signal?.removeEventListener("abort", disposeMount);
+				signal?.removeEventListener("abort", disposeTracked);
 				unsubReady();
 				unsubNav();
 				unsubBody();
+				runElCleanup();
 				ownDisposer?.();
 				ownDisposer = null;
 				mountStyleDisposer?.();
@@ -1953,58 +2877,175 @@
 			unsubReady = Core.ready(tryMount);
 			unsubNav = Core.onNavigate(tryMount);
 			unsubBody = Core.onBodyMutation(tryMount);
-			if (disposed || signal?.aborted) {
+			if (isClosed() || signal?.aborted) {
 				disposeMount();
 				return {
 					id: resolvedId,
 					selector,
 					el: () => null,
-					unmount: noop
+					unmount: noop,
+					refresh: noop
 				};
 			}
-			signal?.addEventListener("abort", disposeMount, { once: true });
-			pushCleanup(disposeMount);
+			disposeTracked = trackFn(disposeMount);
+			signal?.addEventListener("abort", disposeTracked, { once: true });
 			return {
 				id: resolvedId,
 				selector,
-				el: () => document.getElementById(resolvedId),
-				unmount: disposeMount
+				el: () => mountDisposed || isClosed() || signal?.aborted ? null : document.getElementById(resolvedId),
+				unmount: disposeTracked,
+				refresh: tryMount
 			};
 		};
-		const makeScopedHelpers = (push, signal, stylePrefix) => ({
-			listen: (target, type, listener, options) => {
-				if (disposed || signal.aborted) return noop;
-				target.addEventListener(type, listener, options);
-				const cleanup = () => target.removeEventListener(type, listener, options);
-				push(cleanup);
-				return cleanup;
-			},
-			interval: (fn, ms) => {
-				if (disposed || signal.aborted) return noop;
-				const id = setInterval(fn, ms);
-				const cleanup = () => clearInterval(id);
-				push(cleanup);
-				return cleanup;
-			},
-			timeout: (fn, ms) => {
-				if (disposed || signal.aborted) return noop;
-				const id = setTimeout(fn, ms);
-				const cleanup = () => clearTimeout(id);
-				push(cleanup);
-				return cleanup;
-			},
-			mount: (spec) => addMount(spec, push, signal),
-			addStyle: makeAddStyle(push, signal, stylePrefix),
-			waitForSelector: (selector, timeoutMs = 8e3) => {
-				if (disposed || signal.aborted) return Promise.resolve(null);
-				return Core.waitForSelector(selector, timeoutMs, signal);
-			}
-		});
-		const rootScoped = makeScopedHelpers(track, ac.signal, "style");
+		const makeHttpClient = (scopeSignal) => {
+			const request = (url, opts = {}) => {
+				const { signal: callerSignal, ...xhrOpts } = opts || {};
+				if (isClosed() || ac.signal.aborted || scopeSignal?.aborted || callerSignal?.aborted) return Promise.reject(new Error("Request aborted"));
+				const composed = scopeSignal ? composeAbortSignals(scopeSignal, callerSignal) : {
+					signal: callerSignal,
+					dispose: noop
+				};
+				const effectiveSignal = composed.signal;
+				if (effectiveSignal?.aborted) {
+					composed.dispose();
+					return Promise.reject(new Error("Request aborted"));
+				}
+				return new Promise((resolve, reject) => {
+					let handle;
+					const entry = { reject };
+					activeRequests.add(entry);
+					const onAbort = () => {
+						try {
+							handle?.abort?.();
+						} catch {}
+						settle(() => reject(new Error("Request aborted")));
+					};
+					const settle = (fn) => {
+						if (!activeRequests.has(entry)) return;
+						activeRequests.delete(entry);
+						effectiveSignal?.removeEventListener("abort", onAbort);
+						composed.dispose();
+						fn();
+					};
+					entry.cleanupAbort = () => {
+						effectiveSignal?.removeEventListener("abort", onAbort);
+						composed.dispose();
+					};
+					effectiveSignal?.addEventListener("abort", onAbort, { once: true });
+					const g = globalThis;
+					const xhr = Object.prototype.hasOwnProperty.call(g, "GM_xmlhttpRequest") && typeof g.GM_xmlhttpRequest === "function" ? g.GM_xmlhttpRequest : _GM_xmlhttpRequest;
+					try {
+						handle = xhr({
+							method: "GET",
+							timeout: 15e3,
+							...xhrOpts,
+							url,
+							onload: (res) => settle(() => resolve(res)),
+							onerror: () => settle(() => reject(new Error("Network error"))),
+							ontimeout: () => settle(() => reject(new Error("Timeout"))),
+							onabort: () => settle(() => reject(new Error("Request aborted")))
+						});
+					} catch (err) {
+						settle(() => reject(err));
+						return;
+					}
+					if (effectiveSignal?.aborted) {
+						onAbort();
+						return;
+					}
+					entry.abort = () => {
+						try {
+							handle?.abort?.();
+						} catch {}
+					};
+				});
+			};
+			const text = async (url, opts) => {
+				const r = await request(url, opts);
+				if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+				return r.responseText || "";
+			};
+			const json = async (url, opts) => {
+				const r = await request(url, opts);
+				if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+				if (opts?.responseType === "json" && r.response !== void 0) return r.response;
+				return JSON.parse(r.responseText || "");
+			};
+			const download = (url, name, opts = {}) => {
+				const { signal: callerSignal, ...dlOpts } = opts || {};
+				if (isClosed() || ac.signal.aborted || scopeSignal?.aborted || callerSignal?.aborted) return Promise.reject(new Error("Download aborted"));
+				const composed = scopeSignal ? composeAbortSignals(scopeSignal, callerSignal) : {
+					signal: callerSignal,
+					dispose: noop
+				};
+				const effectiveSignal = composed.signal;
+				if (effectiveSignal?.aborted) {
+					composed.dispose();
+					return Promise.reject(new Error("Download aborted"));
+				}
+				return new Promise((resolve, reject) => {
+					const entry = { reject };
+					activeRequests.add(entry);
+					let settled = false;
+					let handle = null;
+					const onAbort = () => {
+						settled = true;
+						try {
+							handle?.abort?.();
+						} catch {}
+						settle(() => reject(new Error("Download aborted")));
+					};
+					const settle = (fn) => {
+						if (!activeRequests.has(entry)) return;
+						activeRequests.delete(entry);
+						effectiveSignal?.removeEventListener("abort", onAbort);
+						composed.dispose();
+						fn();
+					};
+					entry.cleanupAbort = () => {
+						effectiveSignal?.removeEventListener("abort", onAbort);
+						composed.dispose();
+					};
+					effectiveSignal?.addEventListener("abort", onAbort, { once: true });
+					handle = downloadFile(url, name, {
+						saveAs: dlOpts.saveAs,
+						openTabOnError: () => !isClosed() && !ac.signal.aborted && !effectiveSignal?.aborted && dlOpts.openTabOnError !== false,
+						onComplete: (outcome) => {
+							settled = true;
+							settle(() => resolve(outcome));
+						},
+						onAbort: () => {
+							settled = true;
+							settle(() => reject(new Error("Download aborted")));
+						},
+						onError: (err) => {
+							settled = true;
+							settle(() => reject(err instanceof Error ? err : new Error(String(err || "Download failed"))));
+						}
+					});
+					if (!settled && effectiveSignal?.aborted) {
+						onAbort();
+						return;
+					}
+					if (!settled) entry.abort = () => {
+						try {
+							handle?.abort?.();
+						} catch {}
+					};
+				});
+			};
+			return {
+				request,
+				text,
+				json,
+				download
+			};
+		};
+		const rootHttp = makeHttpClient(ac.signal);
 		const onRoute = (matchOrHandler, maybeHandler) => whenAlive(() => {
 			const matcher = typeof maybeHandler === "function" ? matchOrHandler : null;
 			const handler = maybeHandler ?? matchOrHandler;
-			let routeCleanups = [];
+			let routeCleanups = new Set();
 			let routeAc = null;
 			let routeSubDisposed = false;
 			const teardownRoute = () => {
@@ -2013,7 +3054,7 @@
 				runCleanupsReverse(rec.id, routeCleanups);
 			};
 			const evaluate = () => {
-				if (routeSubDisposed || disposed) return;
+				if (routeSubDisposed || isClosed()) return;
 				teardownRoute();
 				let url;
 				try {
@@ -2031,35 +3072,66 @@
 					}
 					const localAc = new AbortController();
 					routeAc = localAc;
-					const localCleanups = [];
+					const localCleanups = new Set();
 					routeCleanups = localCleanups;
-					const localScoped = makeScopedHelpers((fn) => localCleanups.push(fn), localAc.signal, "route-style");
+					const routeScope = createContextScope({
+						prefix: rec.id,
+						signal: localAc.signal,
+						isClosed: () => isClosed() || localAc.signal.aborted,
+						cleanups: localCleanups,
+						styleKind: "route-style",
+						counters,
+						onError: (e) => coreLog.error(`Module "${rec.id}" failed during cleanup:`, e)
+					});
+					let routeApiWrapper = null;
 					const rc = {
 						url,
 						pathname: url.pathname,
 						match: matchArr,
 						signal: localAc.signal,
-						onCleanup: (fn) => {
-							if (localAc.signal.aborted) try {
-								fn();
-							} catch {}
-							else localCleanups.push(fn);
-						},
-						...localScoped
+						getId: routeScope.getId,
+						onCleanup: routeScope.onCleanup,
+						ready: (cb) => routeScope.whenAlive(() => Core.ready(() => {
+							if (!isClosed() && !localAc.signal.aborted) cb();
+						})),
+						onBodyMutation: (cb) => routeScope.whenAlive(() => Core.onBodyMutation((mutations) => {
+							if (!isClosed() && !localAc.signal.aborted) cb(mutations);
+						})),
+						observe: routeScope.observe,
+						listen: routeScope.listen,
+						interval: routeScope.interval,
+						timeout: routeScope.timeout,
+						debounce: routeScope.debounce,
+						raf: routeScope.raf,
+						mount: (spec) => addMount(spec, routeScope.track, localAc.signal),
+						addStyle: routeScope.addStyle,
+						modal: routeScope.modal,
+						confirm: routeScope.confirm,
+						alert: routeScope.alert,
+						waitForSelector: routeScope.waitForSelector,
+						http: makeHttpClient(localAc.signal),
+						get api() {
+							if (!routeApiWrapper) routeApiWrapper = scopeAniListClient(getCoreApi, localAc.signal, () => isClosed() || localAc.signal.aborted);
+							return routeApiWrapper;
+						}
 					};
 					const res = handler(rc);
 					if (typeof res === "function") rc.onCleanup(res);
 					else if (res && typeof res.then === "function") Promise.resolve(res).then((maybeCleanup) => {
 						if (typeof maybeCleanup === "function") rc.onCleanup(maybeCleanup);
 					}, (err) => {
-						if (!localAc.signal.aborted) coreLog.error(`Module "${rec.id}" route handler failed:`, err);
+						if (!localAc.signal.aborted) {
+							coreLog.error(`Module "${rec.id}" route handler failed:`, err);
+							if (routeAc === localAc) teardownRoute();
+						}
 					});
 				} catch (err) {
 					coreLog.error(`Module "${rec.id}" route handler failed:`, err);
+					teardownRoute();
 				}
 			};
 			evaluate();
-			const unsubNav = routeSubDisposed || disposed ? noop : Core.onNavigate(evaluate);
+			const unsubNav = routeSubDisposed || isClosed() ? noop : Core.onNavigate(evaluate);
 			const disposeRouteWatcher = () => {
 				if (routeSubDisposed) return;
 				routeSubDisposed = true;
@@ -2068,78 +3140,11 @@
 			};
 			return disposeRouteWatcher;
 		});
-		const httpRequest = (url, opts = {}) => {
-			if (disposed || ac.signal.aborted) return Promise.reject(new Error("Request aborted"));
-			return new Promise((resolve, reject) => {
-				const entry = { reject };
-				activeRequests.add(entry);
-				const settle = (fn) => {
-					if (!activeRequests.has(entry)) return;
-					activeRequests.delete(entry);
-					fn();
-				};
-				const g = globalThis;
-				const xhr = Object.prototype.hasOwnProperty.call(g, "GM_xmlhttpRequest") && typeof g.GM_xmlhttpRequest === "function" ? g.GM_xmlhttpRequest : _GM_xmlhttpRequest;
-				let handle;
-				try {
-					handle = xhr({
-						method: "GET",
-						timeout: 15e3,
-						...opts,
-						url,
-						onload: (res) => settle(() => resolve(res)),
-						onerror: () => settle(() => reject(new Error("Network error"))),
-						ontimeout: () => settle(() => reject(new Error("Timeout"))),
-						onabort: () => settle(() => reject(new Error("Request aborted")))
-					});
-				} catch (err) {
-					settle(() => reject(err));
-					return;
-				}
-				entry.abort = () => {
-					try {
-						handle?.abort?.();
-					} catch {}
-				};
-			});
-		};
-		const httpDownload = (url, name, opts = {}) => {
-			if (disposed || ac.signal.aborted) return Promise.reject(new Error("Download aborted"));
-			return new Promise((resolve, reject) => {
-				const entry = { reject };
-				activeRequests.add(entry);
-				const settle = (fn) => {
-					if (!activeRequests.has(entry)) return;
-					activeRequests.delete(entry);
-					fn();
-				};
-				let settled = false;
-				const handle = downloadFile(url, name, {
-					saveAs: opts.saveAs,
-					openTabOnError: () => !disposed && !ac.signal.aborted && opts.openTabOnError !== false,
-					onComplete: (outcome) => {
-						settled = true;
-						settle(() => resolve(outcome));
-					},
-					onAbort: () => {
-						settled = true;
-						settle(() => reject(new Error("Download aborted")));
-					},
-					onError: (err) => {
-						settled = true;
-						settle(() => reject(err instanceof Error ? err : new Error(String(err || "Download failed"))));
-					}
-				});
-				if (!settled) entry.abort = () => {
-					try {
-						handle?.abort?.();
-					} catch {}
-				};
-			});
-		};
+		const contextFetchLeases = new Set();
 		const trackedHooks = {
 			setSessionClearing: (active) => {
 				if (disposed) return;
+				if (tearingDown && active) return;
 				if (active) {
 					localClearingDepth++;
 					CoreHooks.setSessionClearing(true);
@@ -2151,19 +3156,34 @@
 			isSessionClearing: () => CoreHooks.isSessionClearing(),
 			getAuthHeader: () => CoreHooks.getAuthHeader(),
 			setAuthHeader: (header) => {
-				if (!disposed) CoreHooks.setAuthHeader(header);
+				if (!isClosed()) CoreHooks.setAuthHeader(header);
 			},
 			clearAuth: () => {
-				if (!disposed) CoreHooks.clearAuth();
+				if (!isClosed()) CoreHooks.clearAuth();
 			},
 			registerCacheBridge: (bridge) => whenAlive(() => CoreHooks.registerCacheBridge(bridge)),
 			getCacheBridge: () => CoreHooks.getCacheBridge(),
 			markFetchOwner: (active) => {
-				if (!disposed) CoreHooks.markFetchOwner(active);
+				if (!active) {
+					if (!disposed) {
+						for (const release of [...contextFetchLeases]) release();
+						contextFetchLeases.clear();
+					}
+					return noop;
+				}
+				if (isClosed()) return noop;
+				let leaseRef = noop;
+				const rawRelease = CoreHooks.markFetchOwner(true);
+				leaseRef = track(() => {
+					contextFetchLeases.delete(leaseRef);
+					rawRelease();
+				});
+				contextFetchLeases.add(leaseRef);
+				return leaseRef;
 			},
 			hasGqlFetchSubscribers: () => CoreHooks.hasGqlFetchSubscribers(),
 			emitGqlFetch: (event) => {
-				if (!disposed) CoreHooks.emitGqlFetch(event);
+				if (!isClosed()) CoreHooks.emitGqlFetch(event);
 			},
 			onGqlFetch: (cb) => whenAlive(() => CoreHooks.onGqlFetch(cb)),
 			blockRpc: (fn) => whenAlive(() => CoreHooks.blockRpc(fn)),
@@ -2221,7 +3241,7 @@
 		let apiWrapper = null;
 		const getSessionWrapper = () => {
 			if (!sessionWrapper) sessionWrapper = {
-				peek: (opts) => getCoreSession().peek(disposed && opts?.reconcile ? {
+				peek: (opts) => getCoreSession().peek(isClosed() && opts?.reconcile ? {
 					...opts,
 					reconcile: false
 				} : opts),
@@ -2234,100 +3254,104 @@
 				get scoreFormat() {
 					return getCoreSession().scoreFormat;
 				},
-				hasAuth: () => getCoreSession().hasAuth(),
+				hasAuth: (opts) => getCoreSession().hasAuth(isClosed() ? {
+					...opts,
+					reconcile: false
+				} : opts),
 				clear: () => {
-					if (!disposed) getCoreSession().clear();
+					if (!isClosed()) getCoreSession().clear();
 				},
 				syncFromPage: () => {
-					if (!disposed) getCoreSession().syncFromPage?.();
+					if (!isClosed()) getCoreSession().syncFromPage?.();
 				},
 				recordHint: (hint) => {
-					if (!disposed) getCoreSession().recordHint(hint);
+					if (!isClosed()) getCoreSession().recordHint(hint);
 				}
 			};
 			return sessionWrapper;
 		};
 		const getApiWrapper = () => {
-			if (!apiWrapper) apiWrapper = {
-				query: (...args) => getCoreApi().query(...args),
-				getMediaList: (...args) => getCoreApi().getMediaList(...args),
-				viewer: (...args) => getCoreApi().viewer(...args),
-				clearViewer: () => getCoreApi().clearViewer(),
-				invalidate: (...args) => getCoreApi().invalidate(...args),
-				invalidateMediaList: (...args) => getCoreApi().invalidateMediaList(...args),
-				hasAuth: () => getCoreApi().hasAuth(),
-				resumeAt: () => getCoreApi().resumeAt(),
-				media: getCoreApi().media,
-				get session() {
-					return getSessionWrapper();
-				}
-			};
+			if (!apiWrapper) apiWrapper = scopeAniListClient(getCoreApi, ac.signal, isClosed);
 			return apiWrapper;
 		};
 		const eventOwner = Symbol(`events:${rec.id}`);
 		let retainedTracked = false;
-		const openModuleModal = (opts) => {
-			if (disposed) {
-				const deadEl = document.createElement("div");
-				return {
-					backdrop: deadEl,
-					sheet: deadEl,
-					body: deadEl,
-					footer: deadEl,
-					close: noop
-				};
-			}
-			const modalId = getId(opts.id ?? `modal-${++modalSeq}`);
-			const handle = createModal({
-				...opts,
-				id: modalId
-			});
-			track(handle.close);
-			return handle;
+		const cancelAllPersistent = () => {
+			for (const h of persistentHandles) h.cancel();
 		};
 		return {
 			id: rec.id,
 			title: rec.title,
 			help: rec.help,
-			getId,
+			signal: ac.signal,
+			getId: rootScope.getId,
 			get: (key) => Settings.get(key),
-			set: (key, val) => Settings.set(key, val),
-			storage: createScopedStorage(storagePrefix, () => disposed, whenAlive),
-			persistent: (key, prune) => persistent(`${storagePrefix}${key}`, prune),
+			set: (key, val) => {
+				if (!isClosed()) Settings.set(key, val);
+			},
+			storage: createScopedStorage(storagePrefix, () => disposed, whenAlive, false, cancelAllPersistent),
+			persistent: (key, prune) => {
+				const p = persistent(`${storagePrefix}${key}`, prune);
+				const handle = {
+					cancel: p.cancel,
+					flush: p.flush
+				};
+				if (!isClosed()) {
+					persistentHandles.add(handle);
+					if (!pagehideRegistered && typeof window !== "undefined") {
+						pagehideRegistered = true;
+						rootScope.listen(window, "pagehide", () => {
+							if (isClosed()) return;
+							for (const h of persistentHandles) h.flush();
+						});
+					}
+					track(() => {
+						persistentHandles.delete(handle);
+						p.cancel();
+					});
+				}
+				return {
+					get data() {
+						return p.data;
+					},
+					set data(val) {
+						p.data = val;
+					},
+					save: () => {
+						if (!isClosed()) p.save();
+					},
+					cancel: () => p.cancel(),
+					flush: () => {
+						if (!isClosed()) p.flush();
+					}
+				};
+			},
 			ready: (cb) => whenAlive(() => Core.ready(cb)),
 			onNav: (cb) => whenAlive(() => Core.onNavigate(cb)),
 			onBodyMutation: (cb) => whenAlive(() => Core.onBodyMutation(cb)),
 			onRoute,
-			mount: rootScoped.mount,
-			addStyle: rootScoped.addStyle,
-			modal: openModuleModal,
-			listen: rootScoped.listen,
-			interval: rootScoped.interval,
-			timeout: rootScoped.timeout,
+			mount: (spec) => addMount(spec, rootScope.track, ac.signal),
+			addStyle: rootScope.addStyle,
+			modal: rootScope.modal,
+			confirm: rootScope.confirm,
+			alert: rootScope.alert,
+			listen: rootScope.listen,
+			interval: rootScope.interval,
+			timeout: rootScope.timeout,
+			debounce: rootScope.debounce,
+			raf: rootScope.raf,
+			observe: rootScope.observe,
 			trackEl: (el) => {
 				track(() => el.remove());
 				return el;
 			},
-			waitForSelector: rootScoped.waitForSelector,
-			silently: (fn) => Core.silently(fn),
+			waitForSelector: rootScope.waitForSelector,
+			silently: (fn) => {
+				if (!isClosed()) Core.silently(fn);
+			},
 			ownUi: (selector) => whenAlive(() => Core.registerOwnUi(selector)),
-			onCleanup: (fn) => {
-				track(fn);
-			},
-			http: {
-				request: httpRequest,
-				text: async (url, opts) => {
-					const r = await httpRequest(url, opts);
-					if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
-					return r.responseText || "";
-				},
-				json: async (url, opts) => {
-					const r = await httpRequest(url, opts);
-					if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
-					return JSON.parse(r.responseText || "");
-				},
-				download: httpDownload
-			},
+			onCleanup: rootScope.onCleanup,
+			http: rootHttp,
 			get api() {
 				return getApiWrapper();
 			},
@@ -2345,18 +3369,19 @@
 				},
 				connect: (id) => {
 					assertAccountAllowed(id);
-					if (!disposed) getAccountProvider(id)?.connect();
+					if (!isClosed()) getAccountProvider(id)?.connect();
 				},
 				disconnect: (id) => {
 					assertAccountAllowed(id);
-					if (!disposed) getAccountProvider(id)?.disconnect();
+					if (!isClosed()) getAccountProvider(id)?.disconnect();
 				},
 				clearSecrets: (providerId) => {
 					if (providerId !== void 0) {
 						assertAccountAllowed(providerId);
-						clearAccountSecrets(providerId);
+						if (!isClosed()) clearAccountSecrets(providerId);
 						return;
 					}
+					if (isClosed()) return;
 					for (const id of allowedAccounts) clearAccountSecrets(id);
 				},
 				watch: (id, cb) => {
@@ -2365,9 +3390,15 @@
 				}
 			},
 			toast: {
-				show: showToast,
-				success: toastSuccess,
-				error: toastError
+				show: (msg, opts) => {
+					if (!isClosed()) showToast(msg, opts);
+				},
+				success: (msg, opts) => {
+					if (!isClosed()) toastSuccess(msg, opts);
+				},
+				error: (msg, opts) => {
+					if (!isClosed()) toastError(msg, opts);
+				}
 			},
 			menuCommand: (label, onClick) => whenAlive(() => registerMenuCommand(label, onClick)),
 			services: {
@@ -2377,10 +3408,10 @@
 			},
 			events: {
 				emit: (event, ...args) => {
-					if (!disposed) EventBus.emit(event, ...args);
+					if (!isClosed()) EventBus.emit(event, ...args);
 				},
 				emitRetained: (event, ...args) => {
-					if (disposed) return;
+					if (isClosed()) return;
 					if (!retainedTracked) {
 						retainedTracked = true;
 						track(() => EventBus.clearRetainedByOwner(eventOwner));
@@ -2393,7 +3424,7 @@
 			hooks: trackedHooks,
 			log: ctxLog,
 			setStandalonePaused: (paused) => {
-				if (disposed) return;
+				if (isClosed()) return;
 				const next = !!paused;
 				rec.standalonePaused = next;
 				if (next) cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
@@ -2403,7 +3434,7 @@
 	}
 	function disposeRecord(rec, resetStandalone = true) {
 		rec.bootSeq++;
-		const hadCleanups = rec.cleanups.length > 0;
+		const hadCleanups = rec.cleanups.size > 0;
 		if (rec.booted || hadCleanups) runCleanupsReverse(rec.id, rec.cleanups);
 		rec.abortController = null;
 		rec.booted = false;
@@ -2461,7 +3492,7 @@
 		const seq = ++rec.bootSeq;
 		rec.runtimeError = void 0;
 		const ac = new AbortController();
-		const cleanups = [];
+		const cleanups = new Set();
 		rec.cleanups = cleanups;
 		rec.abortController = ac;
 		rec.booted = true;
@@ -2482,11 +3513,19 @@
 					runCleanupsReverse(rec.id, cleanups);
 					return;
 				}
-				if (rec.standalonePaused) rec.booted = false;
+				if (rec.standalonePaused) {
+					rec.booted = false;
+					return;
+				}
+				if (!rec.runtimeError && rec.booted) emitStatusChange(rec.id, { active: true });
 			}, (err) => {
 				handleFailure(err);
 			});
-			if (rec.standalonePaused) rec.booted = false;
+			if (rec.standalonePaused) {
+				rec.booted = false;
+				return Promise.resolve();
+			}
+			if (!rec.runtimeError && rec.booted) emitStatusChange(rec.id, { active: true });
 			return Promise.resolve();
 		} catch (err) {
 			handleFailure(err);
@@ -2508,8 +3547,8 @@
 		});
 	}
 	function defineModule(meta) {
-		if (!ID_RE.test(meta.id)) {
-			coreLog.error(`Invalid module ID "${meta.id}". Must match ${ID_RE}.`);
+		if (!ID_RE.test(meta.id) || RESERVED_MODULE_IDS.has(meta.id)) {
+			coreLog.error(`Invalid or reserved module ID "${meta.id}". Must match ${ID_RE} and not be reserved.`);
 			invalidIds.set(meta.id, {
 				active: false,
 				reason: "invalid-id"
@@ -2575,13 +3614,13 @@
 			standalonePaused: false,
 			booted: false,
 			bootSeq: 0,
-			cleanups: [],
+			cleanups: new Set(),
 			abortController: null
 		});
 	}
 	function registerShellModule(name, init, hosts = ["anilist.co"]) {
-		if (!ID_RE.test(name)) {
-			coreLog.error(`Invalid shell module ID "${name}". Must match ${ID_RE}.`);
+		if (!ID_RE.test(name) || RESERVED_MODULE_IDS.has(name)) {
+			coreLog.error(`Invalid or reserved shell module ID "${name}". Must match ${ID_RE} and not be reserved.`);
 			invalidIds.set(name, {
 				active: false,
 				reason: "invalid-id"
@@ -2602,6 +3641,14 @@
 			});
 			return;
 		}
+		const runShellInit = (ctx) => {
+			const res = init();
+			if (typeof res === "function") {
+				ctx?.onCleanup(res);
+				return;
+			}
+			return res;
+		};
 		registerRecord({
 			id: name,
 			title: name,
@@ -2614,14 +3661,14 @@
 			dependsOn: [],
 			after: [],
 			accounts: [],
-			setup: () => init(),
-			legacyInit: init,
+			setup: (ctx) => runShellInit(ctx),
+			legacyInit: () => runShellInit(),
 			invalidId: false,
 			idCollision: false,
 			standalonePaused: false,
 			booted: false,
 			bootSeq: 0,
-			cleanups: [],
+			cleanups: new Set(),
 			abortController: null
 		});
 	}
@@ -2682,6 +3729,7 @@
 		}
 	}
 	function startModules(early) {
+		if (!early) deferredStarted = true;
 		const graph = resolveAllStates();
 		syncAllLiveStatuses(graph.statuses);
 		for (const rec of graph.ordered) {
@@ -2712,13 +3760,30 @@
 					const rec = recordsById.get(id);
 					if (rec && !rec.booted) {
 						rec.runtimeError = void 0;
-						rec.standalonePaused = false;
+						if (rec.standalone) {
+							let probeRes = false;
+							try {
+								probeRes = rec.standalone.probe();
+							} catch {
+								probeRes = false;
+							}
+							if (probeRes && typeof probeRes.then === "function") {
+								rec.standalonePaused = false;
+								Promise.resolve(probeRes).then((found) => {
+									if (!found) return;
+									rec.standalonePaused = true;
+									cascadeDispose([rec.id], { preserveStandaloneSeeds: true });
+									syncAllLiveStatuses(resolveAllStates().statuses);
+								}, () => {});
+							} else rec.standalonePaused = !!probeRes;
+						} else rec.standalonePaused = false;
 					}
 				}
 				const freshGraph = resolveAllStates();
 				syncAllLiveStatuses(freshGraph.statuses);
 				for (const rec of freshGraph.ordered) {
 					if (rec.booted) continue;
+					if (!rec.early && !deferredStarted && !document.body) continue;
 					const failedDeps = getFailedDeps(rec);
 					if (failedDeps.length > 0) {
 						emitStatusChange(rec.id, {
@@ -2734,10 +3799,16 @@
 			getStatus(id) {
 				const live = liveStatuses.get(id);
 				if (live) return live;
-				return resolveAllStates().statuses[id] || {
+				const st = resolveAllStates().statuses[id];
+				if (!st) return {
 					active: false,
 					reason: "disabled"
 				};
+				if (st.active) {
+					const rec = recordsById.get(id);
+					if (!rec || !rec.booted || rec.standalonePaused || rec.runtimeError) return { active: false };
+				}
+				return st;
 			},
 			resolveStagedStates(stagedEnabled) {
 				return resolveAllStates(stagedEnabled).statuses;
@@ -2798,13 +3869,10 @@
 				for (const id of Object.keys(d)) if (!(Date.now() - Number(d[id]?.updated) < PRUNE_AGE)) delete d[id];
 			});
 			const cache = cacheStore.data;
-			const pending = new Set();
-			const active = new Set();
-			const timers = new Map();
 			const optimistic = new Map();
-			let running = 0;
-			let routeTimeout = null;
-			const onListPage = () => location.pathname.includes("/animelist");
+			let disposed = false;
+			const ANIMELIST_RE = /^\/user\/[^/]+\/animelist\/?$/i;
+			const onListPage = () => ANIMELIST_RE.test(location.pathname);
 			const idOf = (entry) => entry.querySelector("a[href*=\"/anime/\"]")?.getAttribute("href")?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] || null;
 			const needsFetch = (id) => {
 				const d = cache[id];
@@ -2853,21 +3921,6 @@
 				if (dot.classList.contains(CLASS) !== behind) dot.classList.toggle(CLASS, behind);
 				return id;
 			}
-			function scanAll() {
-				if (!onListPage()) return;
-				const stale = new Set();
-				for (const entry of watchingEntries()) {
-					const id = updateEntry(entry);
-					if (id && needsFetch(id)) stale.add(id);
-				}
-				queueIDs(stale);
-			}
-			function repaint(ids) {
-				for (const entry of watchingEntries()) {
-					const id = idOf(entry);
-					if (id && ids.has(id)) updateEntry(entry);
-				}
-			}
 			function makeEntry(media) {
 				const next = media.nextAiringEpisode;
 				const now = Date.now();
@@ -2891,95 +3944,6 @@
 					nextCheck
 				};
 			}
-			function scheduleRefresh(id, at) {
-				const existing = timers.get(id);
-				if (existing) existing();
-				timers.delete(id);
-				if (!routeTimeout || !Number.isFinite(at)) return;
-				const cancel = routeTimeout(() => {
-					timers.delete(id);
-					queueIDs([id]);
-					repaint(new Set([id]));
-				}, Math.min(Math.max(0, at - Date.now()), 2147483647));
-				timers.set(id, cancel);
-			}
-			async function updateBatch(ids) {
-				const returned = new Set();
-				try {
-					const data = await ctx.api.query(QUERY, { ids: ids.map(Number) });
-					for (const m of data?.Page?.media || []) {
-						const id = String(m.id);
-						returned.add(id);
-						cache[id] = makeEntry(m);
-						scheduleRefresh(id, cache[id].nextCheck);
-					}
-				} catch (_) {}
-				const retryAt = Date.now() + ERROR_RETRY;
-				for (const id of ids) {
-					if (returned.has(id)) continue;
-					const ex = cache[id];
-					if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
-					else cache[id] = {
-						aired: null,
-						nextEpisode: null,
-						status: null,
-						nextCheck: retryAt,
-						updated: Date.now()
-					};
-					scheduleRefresh(id, retryAt);
-				}
-				cacheStore.save();
-				if (returned.size) repaint(returned);
-			}
-			function queueIDs(ids) {
-				for (const raw of ids) {
-					const id = String(raw);
-					if (!active.has(id)) pending.add(id);
-				}
-				while (running < CONCURRENCY && pending.size) {
-					const batch = [];
-					for (const id of pending) {
-						pending.delete(id);
-						active.add(id);
-						batch.push(id);
-						if (batch.length >= BATCH) break;
-					}
-					running++;
-					updateBatch(batch).catch((e) => ctx.log.error("airing batch", e)).finally(() => {
-						batch.forEach((id) => active.delete(id));
-						running--;
-						queueIDs([]);
-					});
-				}
-			}
-			const dirty = new Set();
-			let fullScan = false;
-			let raf = 0;
-			function flush() {
-				raf = 0;
-				if (!onListPage()) {
-					dirty.clear();
-					fullScan = false;
-					return;
-				}
-				if (fullScan) {
-					fullScan = false;
-					dirty.clear();
-					scanAll();
-					return;
-				}
-				const stale = new Set();
-				for (const entry of dirty) {
-					const id = updateEntry(entry);
-					if (id && needsFetch(id)) stale.add(id);
-				}
-				dirty.clear();
-				queueIDs(stale);
-			}
-			const mark = () => {
-				if (!raf) raf = requestAnimationFrame(flush);
-			};
-			const refresh = debounce(scanAll, 100);
 			const isIncrease = (el) => {
 				for (let n = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
 					const label = `${n.getAttribute?.("aria-label") || ""} ${n.getAttribute?.("title") || ""}`.trim().toLowerCase();
@@ -2989,11 +3953,132 @@
 				}
 				return false;
 			};
-			ctx.onRoute(/^\/user\/[^/]+\/animelist(?:\/|$)/i, (rc) => {
-				routeTimeout = rc.timeout;
-				fullScan = false;
-				rc.onCleanup(ctx.onBodyMutation((muts) => {
-					if (rc.signal.aborted) return;
+			ctx.onRoute(ANIMELIST_RE, (rc) => {
+				if (disposed) return;
+				let routeActive = true;
+				const isRouteAlive = () => !disposed && routeActive && !rc.signal.aborted;
+				const pending = new Set();
+				const active = new Set();
+				const timers = new Map();
+				let running = 0;
+				const dirty = new Set();
+				let fullScan = false;
+				let raf = 0;
+				function scanAll() {
+					if (!isRouteAlive() || !onListPage()) return;
+					const stale = new Set();
+					for (const entry of watchingEntries()) {
+						const id = updateEntry(entry);
+						if (id && needsFetch(id)) stale.add(id);
+					}
+					queueIDs(stale);
+				}
+				function repaint(ids) {
+					if (!isRouteAlive() || !onListPage()) return;
+					for (const entry of watchingEntries()) {
+						const id = idOf(entry);
+						if (id && ids.has(id)) updateEntry(entry);
+					}
+				}
+				function scheduleRefresh(id, at) {
+					const existing = timers.get(id);
+					if (existing) existing();
+					timers.delete(id);
+					if (!isRouteAlive() || !Number.isFinite(at)) return;
+					const cancel = rc.timeout(() => {
+						timers.delete(id);
+						if (!isRouteAlive()) return;
+						queueIDs([id]);
+						repaint(new Set([id]));
+					}, Math.min(Math.max(0, at - Date.now()), 2147483647));
+					timers.set(id, cancel);
+				}
+				async function updateBatch(ids) {
+					if (!isRouteAlive()) return;
+					const returned = new Set();
+					try {
+						const data = await rc.api.query(QUERY, { ids: ids.map(Number) });
+						if (!isRouteAlive()) return;
+						for (const m of data?.Page?.media || []) {
+							const id = String(m.id);
+							returned.add(id);
+							cache[id] = makeEntry(m);
+							scheduleRefresh(id, cache[id].nextCheck);
+						}
+					} catch (err) {
+						if (!isRouteAlive() || isAbortError(err)) return;
+					}
+					if (!isRouteAlive()) return;
+					const retryAt = Date.now() + ERROR_RETRY;
+					for (const id of ids) {
+						if (returned.has(id)) continue;
+						const ex = cache[id];
+						if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
+						else cache[id] = {
+							aired: null,
+							nextEpisode: null,
+							status: null,
+							nextCheck: retryAt,
+							updated: Date.now()
+						};
+						scheduleRefresh(id, retryAt);
+					}
+					cacheStore.save();
+					if (returned.size) repaint(returned);
+				}
+				function queueIDs(ids) {
+					if (!isRouteAlive()) return;
+					for (const raw of ids) {
+						const id = String(raw);
+						if (!active.has(id)) pending.add(id);
+					}
+					while (running < CONCURRENCY && pending.size) {
+						if (!isRouteAlive()) break;
+						const batch = [];
+						for (const id of pending) {
+							pending.delete(id);
+							active.add(id);
+							batch.push(id);
+							if (batch.length >= BATCH) break;
+						}
+						running++;
+						updateBatch(batch).catch((e) => {
+							if (isRouteAlive() && !isAbortError(e)) ctx.log.error("airing batch", e);
+						}).finally(() => {
+							batch.forEach((id) => active.delete(id));
+							running--;
+							if (isRouteAlive()) queueIDs([]);
+						});
+					}
+				}
+				function flush() {
+					raf = 0;
+					if (!isRouteAlive() || !onListPage()) {
+						dirty.clear();
+						fullScan = false;
+						return;
+					}
+					if (fullScan) {
+						fullScan = false;
+						dirty.clear();
+						scanAll();
+						return;
+					}
+					const stale = new Set();
+					for (const entry of dirty) {
+						const id = updateEntry(entry);
+						if (id && needsFetch(id)) stale.add(id);
+					}
+					dirty.clear();
+					queueIDs(stale);
+				}
+				const mark = () => {
+					if (!isRouteAlive()) return;
+					if (!raf) raf = requestAnimationFrame(flush);
+				};
+				const refresh = rc.debounce(scanAll, 100);
+				rc.onBodyMutation((muts) => {
+					if (!isRouteAlive()) return;
 					for (const m of muts) {
 						const own = (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest?.(".entry");
 						if (own) {
@@ -3011,7 +4096,7 @@
 							mark();
 						}
 					}
-				}));
+				});
 				rc.listen(document, "pointerdown", (e) => {
 					if (!(e.target instanceof Element) || !isIncrease(e.target)) return;
 					const entry = e.target.closest(".entry");
@@ -3041,37 +4126,129 @@
 				});
 				rc.interval(scanAll, 6e4);
 				const startList = () => {
-					if (rc.signal.aborted) return;
+					if (!isRouteAlive()) return;
 					scanAll();
-					for (const [id, entry] of Object.entries(cache)) if (entry && Number.isFinite(entry.nextCheck) && Date.now() < entry.nextCheck) scheduleRefresh(id, entry.nextCheck);
+					const visibleIds = new Set();
+					for (const el of watchingEntries()) {
+						const id = idOf(el);
+						if (id) visibleIds.add(id);
+					}
+					for (const id of visibleIds) {
+						const entry = cache[id];
+						if (entry && Number.isFinite(entry.nextCheck) && Date.now() < entry.nextCheck) scheduleRefresh(id, entry.nextCheck);
+					}
 					rc.timeout(scanAll, 500);
 					rc.timeout(scanAll, 1500);
 				};
-				rc.onCleanup(ctx.ready(startList));
+				rc.ready(startList);
 				rc.onCleanup(() => {
-					if (routeTimeout === rc.timeout) routeTimeout = null;
+					routeActive = false;
+					refresh.cancel();
 					if (raf) cancelAnimationFrame(raf);
 					raf = 0;
 					for (const cancel of timers.values()) cancel();
 					timers.clear();
+					pending.clear();
 					dirty.clear();
 					fullScan = false;
 				});
 			});
 			ctx.onCleanup(() => {
-				routeTimeout = null;
-				if (raf) cancelAnimationFrame(raf);
-				raf = 0;
-				for (const cancel of timers.values()) cancel();
-				timers.clear();
-				pending.clear();
-				active.clear();
+				disposed = true;
 				optimistic.clear();
-				dirty.clear();
 				document.querySelectorAll(`.${CLASS}`).forEach((el) => el.classList.remove(CLASS));
 			});
 		}
 	});
+	var flightConfigs = new WeakMap();
+	function attachFlightWaiter(flight, opts) {
+		const cfg = flightConfigs.get(flight);
+		const makeAbortError = cfg?.makeAbortError ?? createAbortError;
+		const onEvict = cfg?.onEvict;
+		const check = opts?.check;
+		const signal = opts?.signal;
+		try {
+			check?.();
+		} catch (err) {
+			return Promise.reject(err);
+		}
+		if (signal?.aborted) return Promise.reject(makeAbortError(signal));
+		flight.waiters++;
+		if (!signal) return flight.promise.then((val) => {
+			flight.waiters = Math.max(0, flight.waiters - 1);
+			check?.();
+			return val;
+		}, (err) => {
+			flight.waiters = Math.max(0, flight.waiters - 1);
+			throw err;
+		});
+		return new Promise((resolve, reject) => {
+			let done = false;
+			const release = () => {
+				if (done) return true;
+				done = true;
+				signal.removeEventListener("abort", onAbort);
+				flight.waiters = Math.max(0, flight.waiters - 1);
+				return false;
+			};
+			const onAbort = () => {
+				if (release()) return;
+				if (flight.waiters <= 0 && !flight.settled && !flight.controller.signal.aborted) {
+					flight.controller.abort();
+					onEvict?.(flight);
+				}
+				reject(makeAbortError(signal));
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			flight.promise.then((val) => {
+				if (release()) return;
+				try {
+					check?.();
+					resolve(val);
+				} catch (err) {
+					reject(err);
+				}
+			}, (err) => {
+				if (release()) return;
+				reject(err);
+			});
+		});
+	}
+	function createSharedFlight(opts) {
+		const controller = new AbortController();
+		const makeAbortError = opts.createAbortError ?? createAbortError;
+		const flight = {
+			controller,
+			promise: null,
+			waiters: 0,
+			settled: false,
+			wait: (waiterOpts) => attachFlightWaiter(flight, waiterOpts)
+		};
+		flightConfigs.set(flight, {
+			makeAbortError,
+			onEvict: opts.onEvict
+		});
+		let rawPromise;
+		try {
+			rawPromise = opts.start(controller.signal);
+		} catch (err) {
+			rawPromise = Promise.reject(err);
+		}
+		const promise = rawPromise.then((val) => {
+			flight.settled = true;
+			opts.onSettled?.(flight);
+			return val;
+		}, (err) => {
+			flight.settled = true;
+			opts.onSettled?.(flight);
+			throw err;
+		});
+		promise.catch(() => {});
+		flight.promise = promise;
+		return flight;
+	}
+	var DEFAULT_ICON = "https://www.google.com/s2/favicons?domain=youtube.com&sz=32";
+	var VALID_ICON_SCHEME_RE = /^\s*https?:\/\//i;
 	var DEFAULT_ANISONGS_CONFIG = {
 		active: [],
 		presets: [
@@ -3155,7 +4332,7 @@
 			const id = String(p.id || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
 			const name = String(p.name || "").trim();
 			const url = String(p.url || "").trim();
-			const icon = String(p.icon || "").trim() || "https://www.google.com/s2/favicons?domain=youtube.com&sz=32";
+			const rawIcon = p.icon != null ? String(p.icon).trim() : "";
 			if (!id) return {
 				valid: false,
 				error: `Preset at index ${i} requires an ID.`
@@ -3168,6 +4345,11 @@
 				valid: false,
 				error: `Preset "${id}" has an invalid URL. Must start with http:// or https://.`
 			};
+			if (rawIcon && !VALID_ICON_SCHEME_RE.test(rawIcon)) return {
+				valid: false,
+				error: `Preset "${id}" has an invalid icon URL. Must start with http:// or https://.`
+			};
+			const icon = rawIcon || DEFAULT_ICON;
 			if (seenIds.has(id)) return {
 				valid: false,
 				error: `Duplicate preset ID "${id}". Each preset ID must be unique.`
@@ -3379,19 +4561,22 @@
     `,
 			footerHtml: `
       <button class="ala-btn ala-btn--primary" id="ala-as-btn-done" type="button">Apply &amp; Save</button>
-      <button class="ala-btn ala-as-close" type="button">Cancel</button>
-    `
+      <button class="ala-btn" type="button" data-ala-close>Cancel</button>
+    `,
+			style: buildAniSongsModalCss
 		});
-		ctx.addStyle("anisongs-modal", () => buildAniSongsModalCss(`#${modal.backdrop.id}`));
 		const { backdrop, close } = modal;
-		backdrop.querySelectorAll(".ala-as-close").forEach((btn) => btn.addEventListener("click", close));
+		const onClick = (selector, fn) => {
+			const el = backdrop.querySelector(selector);
+			if (el) modal.listen(el, "click", fn);
+		};
 		const tabs = backdrop.querySelectorAll(".ala-as-tab");
 		const viewPresets = backdrop.querySelector("#ala-as-view-presets");
 		const viewJson = backdrop.querySelector("#ala-as-view-json");
 		const jsonArea = backdrop.querySelector("#ala-as-json-area");
 		const jsonStatus = backdrop.querySelector("#ala-as-json-status");
 		tabs.forEach((t) => {
-			t.addEventListener("click", () => {
+			modal.listen(t, "click", () => {
 				tabs.forEach((o) => o.classList.toggle("is-active", o === t));
 				const isJson = t.dataset.tab === "json";
 				viewPresets.style.display = isJson ? "none" : "block";
@@ -3408,9 +4593,12 @@
 		const formHeading = backdrop.querySelector("#ala-as-form-heading");
 		const savePresetBtn = backdrop.querySelector("#ala-as-btn-save-preset");
 		const cancelPresetBtn = backdrop.querySelector("#ala-as-btn-cancel-preset");
+		const activeList = backdrop.querySelector("#ala-as-active-list");
+		const availableChips = backdrop.querySelector("#ala-as-available-chips");
+		const presetList = backdrop.querySelector("#ala-as-preset-list");
 		let editingPresetId = null;
 		backdrop.querySelectorAll(".ala-as-var-tag").forEach((chip) => {
-			chip.addEventListener("click", () => {
+			modal.listen(chip, "click", () => {
 				const tag = chip.dataset.var || "";
 				urlInput.value += tag;
 				urlInput.focus();
@@ -3425,13 +4613,30 @@
 			iconInput.value = "";
 			urlInput.value = "";
 		};
-		cancelPresetBtn.addEventListener("click", resetForm);
-		savePresetBtn.addEventListener("click", () => {
+		modal.listen(cancelPresetBtn, "click", resetForm);
+		modal.listen(savePresetBtn, "click", async () => {
+			if (savePresetBtn.disabled) return;
 			const name = nameInput.value.trim();
 			const url = urlInput.value.trim();
-			const icon = iconInput.value.trim() || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.replace(/^https?:\/\//i, "").split("/")[0])}&sz=32`;
-			if (!name) return alert("Please enter a preset name.");
-			if (!url || !/^https?:\/\//i.test(url)) return alert("Please enter a valid URL template starting with http:// or https://.");
+			const rawIcon = iconInput.value.trim();
+			const showFormError = async (msg) => {
+				savePresetBtn.disabled = true;
+				try {
+					await ctx.alert(msg);
+				} finally {
+					if (!modal.signal.aborted) savePresetBtn.disabled = false;
+				}
+			};
+			if (!name) return void await showFormError("Please enter a preset name.");
+			if (!url || !/^https?:\/\//i.test(url)) {
+				await showFormError("Please enter a valid URL template starting with http:// or https://.");
+				return;
+			}
+			if (rawIcon && !VALID_ICON_SCHEME_RE.test(rawIcon)) {
+				await showFormError("Please enter a valid icon URL starting with http:// or https://.");
+				return;
+			}
+			const icon = rawIcon || `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.replace(/^https?:\/\//i, "").split("/")[0])}&sz=32`;
 			if (editingPresetId) {
 				const idx = stateConfig.presets.findIndex((p) => p.id === editingPresetId);
 				if (idx !== -1) stateConfig.presets[idx] = {
@@ -3441,7 +4646,10 @@
 					url
 				};
 			} else {
-				const id = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_") + "_" + Math.floor(Math.random() * 1e3);
+				let id = `${name.toLowerCase().replace(/[^a-z0-9_-]/g, "_") || "preset"}_${Math.floor(Math.random() * 1e3)}`;
+				const candidateBase = id;
+				let suffix = 1;
+				while (stateConfig.presets.some((p) => p.id === id)) id = `${candidateBase}_${suffix++}`;
 				stateConfig.presets.push({
 					id,
 					name,
@@ -3454,9 +4662,6 @@
 			renderUI();
 		});
 		function renderUI() {
-			const activeList = backdrop.querySelector("#ala-as-active-list");
-			const availableChips = backdrop.querySelector("#ala-as-available-chips");
-			const presetList = backdrop.querySelector("#ala-as-preset-list");
 			const presetMap = new Map();
 			stateConfig.presets.forEach((p) => presetMap.set(p.id, p));
 			stateConfig.active = stateConfig.active.filter((id) => presetMap.has(id));
@@ -3468,16 +4673,16 @@
 					const isTop = idx === 0;
 					const isBottom = idx === totalActive - 1;
 					return `
-          <div class="ala-as-item" data-id="${p.id}">
-            <img class="ala-as-item-icon" src="${p.icon}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=youtube.com&sz=32'">
+          <div class="ala-as-item" data-id="${esc(p.id)}">
+            <img class="ala-as-item-icon" src="${esc(p.icon)}" alt="">
             <div class="ala-as-item-info">
-              <span class="ala-as-item-name">${p.name}</span>
-              <span class="ala-as-item-url">${p.url}</span>
+              <span class="ala-as-item-name">${esc(p.name)}</span>
+              <span class="ala-as-item-url">${esc(p.url)}</span>
             </div>
             <div class="ala-as-item-actions">
               <button type="button" class="ala-btn ala-btn--sm ala-as-act-up" data-idx="${idx}" ${isTop ? "disabled" : ""} title="Move Up">▲</button>
               <button type="button" class="ala-btn ala-btn--sm ala-as-act-down" data-idx="${idx}" ${isBottom ? "disabled" : ""} title="Move Down">▼</button>
-              <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-as-act-remove" data-id="${p.id}" title="Remove from active">✕</button>
+              <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-as-act-remove" data-id="${esc(p.id)}" title="Remove from active">✕</button>
             </div>
           </div>
         `;
@@ -3487,118 +4692,181 @@
 			const inactivePresets = stateConfig.presets.filter((p) => !activeSet.has(p.id));
 			if (!inactivePresets.length) availableChips.innerHTML = `<span style="font-size:12px;color:rgb(var(--color-text-lighter))">All presets are currently active.</span>`;
 			else availableChips.innerHTML = inactivePresets.map((p) => `
-          <button type="button" class="ala-as-chip ala-as-chip-activate" data-id="${p.id}">
-            <img style="width:14px;height:14px;object-fit:contain" src="${p.icon}" alt="">
-            <span>+ ${p.name}</span>
+          <button type="button" class="ala-as-chip ala-as-chip-activate" data-id="${esc(p.id)}">
+            <img style="width:14px;height:14px;object-fit:contain" src="${esc(p.icon)}" alt="">
+            <span>+ ${esc(p.name)}</span>
           </button>
         `).join("");
 			presetList.innerHTML = stateConfig.presets.map((p) => {
 				const isActive = activeSet.has(p.id);
 				return `
-        <div class="ala-as-item" data-id="${p.id}">
-          <img class="ala-as-item-icon" src="${p.icon}" alt="" onerror="this.src='https://www.google.com/s2/favicons?domain=youtube.com&sz=32'">
+        <div class="ala-as-item" data-id="${esc(p.id)}">
+          <img class="ala-as-item-icon" src="${esc(p.icon)}" alt="">
           <div class="ala-as-item-info">
             <span class="ala-as-item-name">
-              ${p.name}
+              ${esc(p.name)}
               ${isActive ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(var(--color-blue),.15);color:rgb(var(--color-blue))">Active</span>` : ""}
             </span>
-            <span class="ala-as-item-url">${p.url}</span>
+            <span class="ala-as-item-url">${esc(p.url)}</span>
           </div>
           <div class="ala-as-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-as-btn-edit-preset" data-id="${p.id}">Edit</button>
-            <button type="button" class="ala-icon-btn ala-as-btn-del-preset" data-id="${p.id}" title="Delete preset">✕</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-as-btn-edit-preset" data-id="${esc(p.id)}">Edit</button>
+            <button type="button" class="ala-icon-btn ala-as-btn-del-preset" data-id="${esc(p.id)}" title="Delete preset">✕</button>
           </div>
         </div>
       `;
 			}).join("");
-			activeList.querySelectorAll(".ala-as-act-up").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					if (btn.disabled) return;
-					const idx = Number(btn.dataset.idx);
-					if (idx > 0) {
-						const temp = stateConfig.active[idx - 1];
-						stateConfig.active[idx - 1] = stateConfig.active[idx];
-						stateConfig.active[idx] = temp;
-						renderUI();
-					}
-				});
-			});
-			activeList.querySelectorAll(".ala-as-act-down").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					if (btn.disabled) return;
-					const idx = Number(btn.dataset.idx);
-					if (idx < stateConfig.active.length - 1) {
-						const temp = stateConfig.active[idx + 1];
-						stateConfig.active[idx + 1] = stateConfig.active[idx];
-						stateConfig.active[idx] = temp;
-						renderUI();
-					}
-				});
-			});
-			activeList.querySelectorAll(".ala-as-act-remove").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = btn.dataset.id;
-					stateConfig.active = stateConfig.active.filter((a) => a !== id);
-					renderUI();
-				});
-			});
-			availableChips.querySelectorAll(".ala-as-chip-activate").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = btn.dataset.id;
-					if (id && !stateConfig.active.includes(id)) {
-						stateConfig.active.push(id);
-						renderUI();
-					}
-				});
-			});
-			presetList.querySelectorAll(".ala-as-btn-edit-preset").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = btn.dataset.id;
-					const p = stateConfig.presets.find((x) => x.id === id);
-					if (!p) return;
-					editingPresetId = p.id;
-					formHeading.textContent = `Edit Preset: ${p.name}`;
-					savePresetBtn.textContent = "Update Preset";
-					cancelPresetBtn.style.display = "inline-flex";
-					nameInput.value = p.name;
-					iconInput.value = p.icon;
-					urlInput.value = p.url;
-					nameInput.focus();
-				});
-			});
-			presetList.querySelectorAll(".ala-as-btn-del-preset").forEach((btn) => {
-				btn.addEventListener("click", () => {
-					const id = btn.dataset.id;
-					if (!id) return;
-					if (stateConfig.presets.length <= 1) return alert("You must have at least one preset configured.");
-					if (!confirm(`Delete preset?`)) return;
-					stateConfig.presets = stateConfig.presets.filter((p) => p.id !== id);
-					stateConfig.active = stateConfig.active.filter((a) => a !== id);
-					if (editingPresetId === id) resetForm();
-					renderUI();
+			for (const container of [
+				activeList,
+				availableChips,
+				presetList
+			]) container.querySelectorAll("img").forEach((img) => {
+				img.addEventListener("error", () => {
+					if (img.src !== DEFAULT_ICON) img.src = DEFAULT_ICON;
+				}, {
+					once: true,
+					signal: modal.signal
 				});
 			});
 		}
-		backdrop.querySelector("#ala-as-btn-copy-json")?.addEventListener("click", async () => {
-			try {
-				await navigator.clipboard.writeText(jsonArea.value);
-				alert("Copied configuration to clipboard!");
-			} catch (_) {
-				jsonArea.select();
-				document.execCommand("copy");
-				alert("Copied configuration to clipboard!");
+		modal.listen(activeList, "click", (e) => {
+			const target = e.target;
+			const upBtn = target.closest(".ala-as-act-up");
+			if (upBtn) {
+				if (upBtn.disabled) return;
+				const idx = Number(upBtn.dataset.idx);
+				if (idx > 0) {
+					const temp = stateConfig.active[idx - 1];
+					stateConfig.active[idx - 1] = stateConfig.active[idx];
+					stateConfig.active[idx] = temp;
+					renderUI();
+				}
+				return;
+			}
+			const downBtn = target.closest(".ala-as-act-down");
+			if (downBtn) {
+				if (downBtn.disabled) return;
+				const idx = Number(downBtn.dataset.idx);
+				if (idx < stateConfig.active.length - 1) {
+					const temp = stateConfig.active[idx + 1];
+					stateConfig.active[idx + 1] = stateConfig.active[idx];
+					stateConfig.active[idx] = temp;
+					renderUI();
+				}
+				return;
+			}
+			const removeBtn = target.closest(".ala-as-act-remove");
+			if (removeBtn) {
+				const id = removeBtn.dataset.id;
+				stateConfig.active = stateConfig.active.filter((a) => a !== id);
+				renderUI();
 			}
 		});
-		backdrop.querySelector("#ala-as-btn-reset-defaults")?.addEventListener("click", () => {
-			if (!confirm("Reset all music search providers and shortcuts to default settings?")) return;
-			stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
-			jsonArea.value = JSON.stringify(stateConfig, null, 2);
-			renderUI();
-			jsonStatus.className = "ala-as-status ala-as-status--success";
-			jsonStatus.textContent = "Reset to default presets.";
-			jsonStatus.style.display = "block";
+		modal.listen(availableChips, "click", (e) => {
+			const btn = e.target.closest(".ala-as-chip-activate");
+			if (!btn) return;
+			const id = btn.dataset.id;
+			if (id && !stateConfig.active.includes(id)) {
+				stateConfig.active.push(id);
+				renderUI();
+			}
 		});
-		backdrop.querySelector("#ala-as-btn-apply-json")?.addEventListener("click", () => {
+		let presetActionPending = false;
+		modal.listen(presetList, "click", async (e) => {
+			const target = e.target;
+			const editBtn = target.closest(".ala-as-btn-edit-preset");
+			if (editBtn) {
+				if (presetActionPending) return;
+				const id = editBtn.dataset.id;
+				const p = stateConfig.presets.find((x) => x.id === id);
+				if (!p) return;
+				editingPresetId = p.id;
+				formHeading.textContent = `Edit Preset: ${p.name}`;
+				savePresetBtn.textContent = "Update Preset";
+				cancelPresetBtn.style.display = "inline-flex";
+				nameInput.value = p.name;
+				iconInput.value = p.icon;
+				urlInput.value = p.url;
+				nameInput.focus();
+				return;
+			}
+			const delBtn = target.closest(".ala-as-btn-del-preset");
+			if (delBtn) {
+				if (presetActionPending || delBtn.disabled) return;
+				const id = delBtn.dataset.id;
+				if (!id) return;
+				if (stateConfig.presets.length <= 1) {
+					presetActionPending = true;
+					delBtn.disabled = true;
+					try {
+						await ctx.alert("You must have at least one preset configured.");
+					} finally {
+						presetActionPending = false;
+						if (!modal.signal.aborted && delBtn.isConnected) delBtn.disabled = false;
+					}
+					return;
+				}
+				presetActionPending = true;
+				delBtn.disabled = true;
+				let confirmed = false;
+				try {
+					confirmed = await ctx.confirm({
+						title: "Delete Preset",
+						message: "Delete preset?",
+						confirmText: "Delete",
+						danger: true
+					});
+				} finally {
+					presetActionPending = false;
+					if (!modal.signal.aborted && delBtn.isConnected) delBtn.disabled = false;
+				}
+				if (!confirmed || modal.signal.aborted || ctx.signal.aborted) return;
+				stateConfig.presets = stateConfig.presets.filter((p) => p.id !== id);
+				stateConfig.active = stateConfig.active.filter((a) => a !== id);
+				if (editingPresetId === id) resetForm();
+				renderUI();
+			}
+		});
+		const copyJsonBtn = backdrop.querySelector("#ala-as-btn-copy-json");
+		if (copyJsonBtn) modal.listen(copyJsonBtn, "click", async () => {
+			if (copyJsonBtn.disabled) return;
+			copyJsonBtn.disabled = true;
+			try {
+				try {
+					await navigator.clipboard.writeText(jsonArea.value);
+				} catch (_) {
+					jsonArea.select();
+					document.execCommand?.("copy");
+				}
+				if (modal.signal.aborted || ctx.signal.aborted) return;
+				ctx.toast.success("Copied configuration to clipboard!");
+			} finally {
+				if (!modal.signal.aborted) copyJsonBtn.disabled = false;
+			}
+		});
+		const resetDefaultsBtn = backdrop.querySelector("#ala-as-btn-reset-defaults");
+		if (resetDefaultsBtn) modal.listen(resetDefaultsBtn, "click", async () => {
+			if (resetDefaultsBtn.disabled) return;
+			resetDefaultsBtn.disabled = true;
+			try {
+				if (!await ctx.confirm({
+					title: "Reset Defaults",
+					message: "Reset all music search providers and shortcuts to default settings?",
+					confirmText: "Reset",
+					danger: true
+				}) || modal.signal.aborted || ctx.signal.aborted) return;
+				stateConfig = JSON.parse(JSON.stringify(DEFAULT_ANISONGS_CONFIG));
+				jsonArea.value = JSON.stringify(stateConfig, null, 2);
+				resetForm();
+				renderUI();
+				jsonStatus.className = "ala-as-status ala-as-status--success";
+				jsonStatus.textContent = "Reset to default presets.";
+				jsonStatus.style.display = "block";
+			} finally {
+				if (!modal.signal.aborted) resetDefaultsBtn.disabled = false;
+			}
+		});
+		onClick("#ala-as-btn-apply-json", () => {
 			const check = validateAniSongsConfig(jsonArea.value);
 			if (!check.valid || !check.config) {
 				jsonStatus.className = "ala-as-status ala-as-status--error";
@@ -3607,14 +4875,26 @@
 				return;
 			}
 			stateConfig = check.config;
+			resetForm();
 			renderUI();
 			jsonStatus.className = "ala-as-status ala-as-status--success";
 			jsonStatus.textContent = "Configuration applied successfully!";
 			jsonStatus.style.display = "block";
 		});
-		backdrop.querySelector("#ala-as-btn-done")?.addEventListener("click", () => {
+		const doneBtn = backdrop.querySelector("#ala-as-btn-done");
+		if (doneBtn) modal.listen(doneBtn, "click", async () => {
+			if (doneBtn.disabled) return;
 			const check = validateAniSongsConfig(stateConfig);
-			if (!check.valid || !check.config) return alert(check.error || "Invalid configuration");
+			if (!check.valid || !check.config) {
+				doneBtn.disabled = true;
+				try {
+					await ctx.alert(check.error || "Invalid configuration");
+				} finally {
+					if (!modal.signal.aborted) doneBtn.disabled = false;
+				}
+				return;
+			}
+			if (modal.signal.aborted || ctx.signal.aborted) return;
 			ctx.onApply(check.config);
 			close();
 		});
@@ -3629,8 +4909,9 @@
 	};
 	function resolveProviderLink(preset, song, groupType) {
 		const directSite = DIRECT_SITE_MAP[preset.id];
-		const directUrl = directSite && song.resources ? song.resources[directSite] : null;
-		if (directUrl) return {
+		const rawDirect = directSite && song.resources ? song.resources[directSite] : null;
+		const directUrl = typeof rawDirect === "string" ? rawDirect.trim() : "";
+		if (directUrl && /^https?:\/\//i.test(directUrl)) return {
 			url: directUrl,
 			isDirect: true
 		};
@@ -3740,8 +5021,8 @@
 		const resources = {};
 		for (const r of resourcesList) {
 			const site = str(r?.site).toUpperCase();
-			const link = str(r?.link);
-			if (site && link) resources[site] = link;
+			const link = typeof r?.link === "string" ? r.link.trim() : "";
+			if (site && /^https?:\/\//i.test(link)) resources[site] = link;
 		}
 		return {
 			type,
@@ -4033,8 +5314,11 @@
 		if (typeof document === "undefined") return 0;
 		return Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0);
 	}
-	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop, listen, timeout) {
-		if (typeof window === "undefined" || typeof window.scrollBy !== "function") return () => {};
+	function followElementWhileCollapsing(anchor, collapsible, startScrollY, startDocHeight, startAnchorDocTop, listen, timeout, onCleanup, raf, onFinish) {
+		if (typeof window === "undefined" || typeof window.scrollBy !== "function") {
+			onFinish?.();
+			return () => {};
+		}
 		const stepScroll = () => {
 			const docShrink = Math.max(0, startDocHeight - getDocumentHeight());
 			if (docShrink <= .5) return;
@@ -4045,21 +5329,32 @@
 		};
 		if (prefersReducedMotion()) {
 			stepScroll();
+			onFinish?.();
 			return () => {};
 		}
-		let rafId = 0;
+		let cancelRaf = () => {};
 		let active = true;
 		let unlistenWheel = () => {};
 		let unlistenTouch = () => {};
 		let cancelTimer = () => {};
+		const scheduleFrame = (fn) => {
+			if (raf) return raf(fn);
+			const id = requestAnimationFrame(fn);
+			return () => cancelAnimationFrame(id);
+		};
 		const stop = () => {
 			if (!active) return;
 			active = false;
-			if (rafId) cancelAnimationFrame(rafId);
+			cancelRaf();
+			cancelRaf = () => {};
 			cancelTimer();
+			cancelTimer = () => {};
 			collapsible.removeEventListener("transitionend", onEnd);
 			unlistenWheel();
+			unlistenWheel = () => {};
 			unlistenTouch();
+			unlistenTouch = () => {};
+			onFinish?.();
 		};
 		const onEnd = (e) => {
 			if (e.target === collapsible && e.propertyName === "grid-template-rows") {
@@ -4068,9 +5363,12 @@
 			}
 		};
 		const tick = () => {
-			if (!active) return;
+			if (!active || !anchor.isConnected || !collapsible.isConnected) {
+				stop();
+				return;
+			}
 			stepScroll();
-			rafId = requestAnimationFrame(tick);
+			cancelRaf = scheduleFrame(tick);
 		};
 		cancelTimer = scheduleFallback(() => {
 			stepScroll();
@@ -4087,10 +5385,11 @@
 				once: true
 			});
 		}
-		rafId = requestAnimationFrame(tick);
+		onCleanup?.(stop);
+		cancelRaf = scheduleFrame(tick);
 		return stop;
 	}
-	function createSongGroup(title, songs, activePresets, groupType, listen, timeout) {
+	function createSongGroup(title, songs, activePresets, groupType, listen, timeout, onCleanup, raf) {
 		const g = document.createElement("div");
 		g.className = "daiya-anisongs-group";
 		const h = document.createElement("h2");
@@ -4105,7 +5404,7 @@
 		}
 		const initial = songs.slice(0, INITIAL_VISIBLE_SONGS);
 		const rest = songs.slice(INITIAL_VISIBLE_SONGS);
-		initial.forEach((s) => g.appendChild(createSongCard(s, activePresets, groupType)));
+		initial.forEach((s) => g.appendChild(createSongCard(s, activePresets, groupType, timeout)));
 		if (!rest.length) return g;
 		const extraWrap = document.createElement("div");
 		extraWrap.className = "daiya-anisong-collapsible daiya-anisongs-extra";
@@ -4122,9 +5421,13 @@
 		btn.setAttribute("aria-expanded", "false");
 		let expanded = false;
 		let stopFollow = null;
-		btn.addEventListener("click", () => {
+		let cleanupRegistered = false;
+		const stopCurrentFollow = () => {
 			stopFollow?.();
 			stopFollow = null;
+		};
+		btn.addEventListener("click", () => {
+			stopCurrentFollow();
 			const startScrollY = typeof window !== "undefined" ? window.scrollY : 0;
 			const startDocHeight = getDocumentHeight();
 			const startBtnDocTop = btn.getBoundingClientRect().top + startScrollY;
@@ -4133,7 +5436,15 @@
 			extraWrap.classList.toggle("is-open", expanded);
 			btn.textContent = expanded ? "Show less" : showAllLabel;
 			btn.setAttribute("aria-expanded", String(expanded));
-			if (!expanded) stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen, timeout);
+			if (!expanded) {
+				if (!cleanupRegistered && onCleanup) {
+					cleanupRegistered = true;
+					onCleanup(stopCurrentFollow);
+				}
+				stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen, timeout, void 0, raf, () => {
+					stopFollow = null;
+				});
+			}
 		});
 		g.appendChild(btn);
 		return g;
@@ -4284,48 +5595,85 @@
         }
       }
     }`;
-			const loadThemes = memo(async (id) => {
-				const hit = cache[String(id)];
-				if (hit && hit.expires > Date.now()) return hit.data;
-				const [themesRes, alRes] = await Promise.allSettled([ctx.http.json(API, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						"User-Agent": "AL-Additions"
-					},
-					data: JSON.stringify({
-						query: atQuery,
-						variables: { id: [Number(id)] }
-					})
-				}), ctx.api.query(`query ($id: Int) {
-        Media(id: $id) {
+			let disposed = false;
+			const inFlight = new Map();
+			const loadThemes = (id, signal) => {
+				const key = String(id);
+				const hit = cache[key];
+				if (hit && hit.expires > Date.now()) {
+					if (signal?.aborted) return Promise.reject(createAbortError(signal));
+					return Promise.resolve(hit.data);
+				}
+				const alQuery = `query ($id: Int, $type: MediaType) {
+        Media(id: $id, type: $type) {
           title { userPreferred english romaji native }
           seasonYear
           season
         }
-      }`, { id: Number(id) })]);
-				const result = themesRes.status === "fulfilled" ? themesRes.value : null;
-				const alMedia = alRes.status === "fulfilled" ? alRes.value?.Media : null;
-				const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite) ? result.data.filterAnimeByExternalSite[0] : null;
-				const animeName = str(alMedia?.title?.userPreferred) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || document.querySelector(".header h1")?.textContent?.trim() || "";
-				const data = groupThemes(rawAnime, {
-					animeName,
-					animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
-					animeEn: str(alMedia?.title?.english) || animeName,
-					animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || "",
-					year: alMedia?.seasonYear || rawAnime?.year || "",
-					season: alMedia?.season || rawAnime?.season || ""
+      }`;
+				let flight = inFlight.get(key);
+				if (!flight) {
+					flight = createSharedFlight({
+						start: async (flightSignal) => {
+							const [themesRes, alRes] = await Promise.allSettled([ctx.http.json(API, {
+								method: "POST",
+								headers: {
+									"Content-Type": "application/json",
+									"User-Agent": "AL-Additions"
+								},
+								data: JSON.stringify({
+									query: atQuery,
+									variables: { id: [Number(id)] }
+								}),
+								signal: flightSignal
+							}), ctx.api.query(alQuery, {
+								id: Number(id),
+								type: "ANIME"
+							}, { signal: flightSignal })]);
+							if (flightSignal.aborted || disposed) throw createAbortError(flightSignal);
+							if (themesRes.status === "rejected") throw themesRes.reason;
+							if (alRes.status === "rejected" && isAbortError(alRes.reason)) throw alRes.reason;
+							const result = themesRes.value;
+							if (Array.isArray(result?.errors) && result.errors.length && !Array.isArray(result?.data?.filterAnimeByExternalSite)) throw new Error(String(result.errors[0]?.message || "AnimeThemes GraphQL error"));
+							const alOk = alRes.status === "fulfilled";
+							const alMedia = alOk ? alRes.value?.Media : null;
+							const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite) ? result.data.filterAnimeByExternalSite[0] : null;
+							const animeName = str(alMedia?.title?.userPreferred) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || document.querySelector(".header h1")?.textContent?.trim() || "";
+							const data = groupThemes(rawAnime, {
+								animeName,
+								animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
+								animeEn: str(alMedia?.title?.english) || animeName,
+								animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || "",
+								year: alMedia?.seasonYear || rawAnime?.year || "",
+								season: alMedia?.season || rawAnime?.season || ""
+							});
+							if (!disposed && !flightSignal.aborted && alOk) {
+								const empty = !data.OP.length && !data.ED.length;
+								cache[key] = {
+									expires: Date.now() + (empty ? EMPTY_TTL : TTL),
+									data
+								};
+								cacheStore.save();
+							}
+							return data;
+						},
+						onEvict: (f) => {
+							if (inFlight.get(key) === f) inFlight.delete(key);
+						},
+						onSettled: (f) => {
+							if (inFlight.get(key) === f) inFlight.delete(key);
+						}
+					});
+					inFlight.set(key, flight);
+				}
+				return flight.wait({
+					signal,
+					check: () => {
+						if (disposed) throw createAbortError(signal);
+					}
 				});
-				const empty = !data.OP.length && !data.ED.length;
-				cache[String(id)] = {
-					expires: Date.now() + (empty ? EMPTY_TTL : TTL),
-					data
-				};
-				cacheStore.save();
-				return data;
-			});
-			function mount(state, overview, listen = ctx.listen, timeout = ctx.timeout) {
-				document.getElementById(ROOT)?.remove();
+			};
+			function buildRoot(state, listen, timeout, onCleanup, raf) {
 				const config = getValidAniSongsConfig(ctx.get("aniSongsProviders"));
 				const presetMap = new Map();
 				config.presets.forEach((p) => presetMap.set(p.id, p));
@@ -4335,9 +5683,9 @@
 				root.dataset.animeId = state.id;
 				const cols = document.createElement("div");
 				cols.className = "daiya-anisongs-columns";
-				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP", listen, timeout), createSongGroup("Endings", state.themes.ED, activePresets, "ED", listen, timeout));
+				cols.append(createSongGroup("Openings", state.themes.OP, activePresets, "OP", listen, timeout, onCleanup, raf), createSongGroup("Endings", state.themes.ED, activePresets, "ED", listen, timeout, onCleanup, raf));
 				root.appendChild(cols);
-				overview.appendChild(root);
+				return root;
 			}
 			let backoff = {
 				id: null,
@@ -4353,21 +5701,29 @@
 					busy: true
 				};
 				try {
-					const themes = await loadThemes(id, id);
+					const themes = await loadThemes(id, rc.signal);
 					if (rc.signal.aborted) return;
 					if (!themes.OP.length && !themes.ED.length) return;
 					mine.themes = themes;
 					const overview = await rc.waitForSelector(".overview", 1e4);
 					if (rc.signal.aborted || !overview) return;
-					mount(mine, overview, rc.listen, rc.timeout);
-					rc.onCleanup(ctx.onBodyMutation(() => {
-						if (!rc.signal.aborted && !document.getElementById(ROOT)) {
-							const ov = document.querySelector(".overview");
-							if (ov) mount(mine, ov, rc.listen, rc.timeout);
+					let mountCleanups = [];
+					rc.mount({
+						id: "root",
+						anchor: ".overview",
+						position: "beforeend",
+						ownUi: true,
+						create: () => {
+							for (const fn of mountCleanups.splice(0)) fn();
+							document.getElementById(ROOT)?.remove();
+							return buildRoot(mine, rc.listen, rc.timeout, (fn) => mountCleanups.push(fn), rc.raf);
+						},
+						onMount: () => () => {
+							for (const fn of mountCleanups.splice(0)) fn();
 						}
-					}));
+					});
 				} catch (err) {
-					if (rc.signal.aborted) return;
+					if (rc.signal.aborted || disposed || isAbortError(err)) return;
 					ctx.log.error("Anisongs sync error:", err);
 					backoff = {
 						id,
@@ -4378,6 +5734,9 @@
 				}
 			});
 			ctx.onCleanup(() => {
+				disposed = true;
+				for (const flight of inFlight.values()) flight.controller.abort();
+				inFlight.clear();
 				document.getElementById(ROOT)?.remove();
 			});
 		}
@@ -4405,6 +5764,18 @@
 			return el;
 		}
 		return null;
+	}
+	function safeDecodeURIComponent$1(raw) {
+		try {
+			return decodeURIComponent(raw);
+		} catch {
+			return raw;
+		}
+	}
+	function sanitizeBannerSlug(raw) {
+		const sanitized = raw.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim();
+		if (!sanitized || sanitized === "." || sanitized === "..") return "anilist";
+		return sanitized;
 	}
 	defineModule({
 		id: "banner",
@@ -4441,70 +5812,119 @@
       @media (hover:hover){.ala-banner-dl:hover .ala-banner-lbl,.ala-banner-dl:focus-visible .ala-banner-lbl{max-width:130px;margin-left:7px}}
       @media (pointer:coarse){.ala-banner-dl{right:8px;bottom:8px;height:40px;min-width:40px;border-radius:20px}}
       @media (prefers-reduced-motion:reduce){.ala-banner-lbl{transition:none}}`);
+			const BANNER_SEL = ".banner";
 			const bannerUrl = (banner) => (banner.style.backgroundImage || getComputedStyle(banner).backgroundImage).match(/url\((['"]?)(.*?)\1\)/)?.[2] || null;
-			let activeSlug = null;
-			async function download() {
-				const banner = document.querySelector(".banner");
-				const url = banner && activeSlug && bannerUrl(banner);
-				if (!url) return null;
-				const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
-				return ctx.http.download(url, `anilist-banner-${activeSlug}.${ext}`);
-			}
-			function createButton() {
-				const btn = document.createElement("button");
-				btn.type = "button";
-				btn.className = "ala-banner-dl";
-				btn.title = "Download banner image";
-				btn.setAttribute("aria-label", "Download banner image");
-				btn.innerHTML = `<span class="ala-banner-ico">${icon("download", 18)}</span><span class="ala-banner-lbl">Download banner</span>`;
-				const ico = btn.firstElementChild;
-				const lbl = btn.lastElementChild;
-				btn.addEventListener("click", (e) => {
-					e.preventDefault();
-					e.stopPropagation();
-					download().then((outcome) => {
-						if (!outcome) return;
-						btn.classList.add("is-done");
-						ico.innerHTML = icon("check", 18);
-						lbl.textContent = outcome === "tab" ? "Opened" : "Saved";
-						ctx.timeout(() => {
-							btn.classList.remove("is-done");
-							ico.innerHTML = icon("download", 18);
-							lbl.textContent = "Download banner";
-						}, 1600);
-					}).catch(() => {});
-				});
-				return btn;
-			}
-			function scan() {
-				const banner = document.querySelector(".banner");
-				if (!banner) return;
-				let btn = banner.querySelector(".ala-banner-dl");
-				const show = !!activeSlug && !!bannerUrl(banner);
-				if (!btn && !show) return;
-				if (!btn) {
-					btn = createButton();
-					banner.appendChild(btn);
-				}
-				btn.hidden = !show;
-			}
-			const scanSoon = debounce(scan, 150);
 			ctx.onRoute(/^\/(?:(anime|manga)\/(\d+)|user\/([^/?#]+))(?:\/|$)/, (rc) => {
 				const mediaId = rc.match?.[2];
 				const userSeg = rc.match?.[3];
 				if (userSeg && !ctx.get("bannerProfiles")) return;
-				activeSlug = mediaId || userSeg || "anilist";
-				scan();
-				rc.timeout(scan, 300);
-				rc.onCleanup(ctx.onBodyMutation(scanSoon));
-				return () => {
-					activeSlug = null;
-					scan();
+				const slug = sanitizeBannerSlug(mediaId || (userSeg ? safeDecodeURIComponent$1(userSeg) : "anilist"));
+				let mountHandle = null;
+				let currentBanner = null;
+				let currentBannerUrl = null;
+				function createButton() {
+					const btn = document.createElement("button");
+					btn.type = "button";
+					btn.className = "ala-banner-dl";
+					btn.title = "Download banner image";
+					btn.setAttribute("aria-label", "Download banner image");
+					btn.innerHTML = `<span class="ala-banner-ico">${icon("download", 18)}</span><span class="ala-banner-lbl">Download banner</span>`;
+					const ico = btn.firstElementChild;
+					const lbl = btn.lastElementChild;
+					let cancelResetTimer = null;
+					let downloading = false;
+					btn.addEventListener("click", (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						if (rc.signal.aborted || !btn.isConnected || downloading) return;
+						const banner = btn.closest(BANNER_SEL) || document.querySelector(BANNER_SEL);
+						const url = banner ? bannerUrl(banner) : null;
+						if (!url) return;
+						const ext = (url.match(/\.(jpg|jpeg|png|webp)(?:\?|$)/i)?.[1] || "jpg").toLowerCase();
+						downloading = true;
+						rc.http.download(url, `anilist-banner-${slug}.${ext}`).then((outcome) => {
+							downloading = false;
+							if (rc.signal.aborted || !btn.isConnected || !outcome) return;
+							btn.classList.add("is-done");
+							ico.innerHTML = icon("check", 18);
+							lbl.textContent = outcome === "tab" ? "Opened" : "Saved";
+							cancelResetTimer?.();
+							cancelResetTimer = rc.timeout(() => {
+								cancelResetTimer = null;
+								if (rc.signal.aborted || !btn.isConnected) return;
+								btn.classList.remove("is-done");
+								ico.innerHTML = icon("download", 18);
+								lbl.textContent = "Download banner";
+							}, 1600);
+						}).catch((err) => {
+							downloading = false;
+							if (rc.signal.aborted || isAbortError(err)) return;
+							ctx.log.warn("Failed to download banner image:", err);
+							ctx.toast.error("Failed to download banner image.");
+						});
+					});
+					return btn;
+				}
+				const sync = () => {
+					if (rc.signal.aborted) return;
+					const banner = document.querySelector(BANNER_SEL);
+					const url = banner ? bannerUrl(banner) : null;
+					if (!banner || !url) {
+						currentBanner = null;
+						currentBannerUrl = null;
+						if (mountHandle) {
+							mountHandle.unmount();
+							mountHandle = null;
+						}
+						return;
+					}
+					if (mountHandle && !mountHandle.el()?.isConnected) {
+						mountHandle.unmount();
+						mountHandle = null;
+					}
+					if (!mountHandle || currentBanner !== banner || currentBannerUrl !== url) {
+						mountHandle?.unmount();
+						currentBanner = banner;
+						currentBannerUrl = url;
+						mountHandle = rc.mount({
+							id: "dl",
+							anchor: () => document.querySelector(BANNER_SEL),
+							position: "beforeend",
+							ownUi: true,
+							match: () => {
+								const b = document.querySelector(BANNER_SEL);
+								return !!(b && bannerUrl(b));
+							},
+							create: createButton
+						});
+					}
 				};
-			});
-			ctx.onCleanup(() => {
-				activeSlug = null;
-				document.querySelectorAll(".ala-banner-dl").forEach((el) => el.remove());
+				const scheduleSync = rc.debounce(sync, 50);
+				sync();
+				rc.timeout(sync, 300);
+				rc.onBodyMutation(scheduleSync);
+				rc.ready(() => {
+					if (document.body) rc.observe(document.body, {
+						attributes: true,
+						attributeFilter: ["style", "class"],
+						subtree: true
+					}, (records) => {
+						if (rc.signal.aborted) return;
+						for (const r of records) {
+							const target = r.target;
+							if (target === currentBanner || target instanceof Element && target.classList.contains("banner")) {
+								scheduleSync();
+								return;
+							}
+						}
+					});
+				});
+				rc.onCleanup(() => {
+					mountHandle?.unmount();
+					mountHandle = null;
+					currentBanner = null;
+					currentBannerUrl = null;
+				});
 			});
 		}
 	});
@@ -4807,8 +6227,7 @@
 			isMutatingDOM: false,
 			disposed: false,
 			loadAbortState: null,
-			resizeCleanup: null,
-			indicatorTimer: null,
+			headerCleanup: null,
 			prefetchRelease: null
 		};
 	}
@@ -4979,10 +6398,13 @@
 		const frag = document.createDocumentFragment();
 		for (const el of entries) frag.appendChild(el);
 		state.isMutatingDOM = true;
-		listContainer.appendChild(frag);
-		const emptyEl = listContainer.querySelector(".ala-compare-empty");
-		if (emptyEl) listContainer.appendChild(emptyEl);
-		state.isMutatingDOM = false;
+		try {
+			listContainer.appendChild(frag);
+			const emptyEl = listContainer.querySelector(".ala-compare-empty");
+			if (emptyEl) listContainer.appendChild(emptyEl);
+		} finally {
+			state.isMutatingDOM = false;
+		}
 	}
 	function updateStatusCounts(state, sidebar, entries) {
 		const counts = {
@@ -5004,11 +6426,7 @@
 		const badge = sidebar.querySelector(".ala-compare-active-badge");
 		if (badge) badge.textContent = `${state.activeStatuses.size}/${STATUSES.length}`;
 	}
-	function setLoadIndicator(state, sidebar, text) {
-		if (state.indicatorTimer) {
-			state.indicatorTimer();
-			state.indicatorTimer = null;
-		}
+	function setLoadIndicator(sidebar, text) {
 		let indicator = sidebar.querySelector("#ala-compare-load-indicator");
 		if (!text) {
 			indicator?.remove();
@@ -5059,10 +6477,6 @@
 			state.prefetchRelease();
 			state.prefetchRelease = null;
 		}
-		if (state.indicatorTimer) {
-			state.indicatorTimer();
-			state.indicatorTimer = null;
-		}
 		if (state.loadAbortState) {
 			state.loadAbortState.abort = true;
 			state.loadAbortState = null;
@@ -5071,18 +6485,19 @@
 		state.isCompareLoaded = false;
 		state.loadFailed = false;
 		state.isMutatingDOM = false;
-		if (state.resizeCleanup) {
-			state.resizeCleanup();
-			state.resizeCleanup = null;
+		if (state.headerCleanup) {
+			state.headerCleanup();
+			state.headerCleanup = null;
 		}
 		document.getElementById("ala-compare-table")?.remove();
 		const wrap = document.getElementById("ala-compare-wrap");
 		if (wrap) {
 			const main = wrap.querySelector(".ala-compare-main");
 			const compareRoot = main?.querySelector(".compare:not(#ala-compare-table)") || main?.firstElementChild;
-			if (compareRoot && wrap.parentElement) {
+			if (compareRoot) {
+				if (compareRoot.dataset) delete compareRoot.dataset.alaCompareInit;
 				if (compareRoot.style) compareRoot.style.display = "";
-				wrap.parentElement.insertBefore(compareRoot, wrap);
+				if (wrap.parentElement) wrap.parentElement.insertBefore(compareRoot, wrap);
 			}
 			wrap.remove();
 		} else {
@@ -5115,7 +6530,7 @@
 		}
 		state.lastProcessedCount = -1;
 	}
-	function renderSidebarCard(ctx, state, sidebar, compareRoot) {
+	function renderSidebarCard(rc, state, sidebar, compareRoot) {
 		if (sidebar.querySelector(".ala-compare-card")) return;
 		sidebar.innerHTML = `
     <details class="ala-compare-card" ${window.innerWidth <= 850 ? "" : "open"}>
@@ -5148,7 +6563,6 @@
 				if (details) details.open = true;
 			}
 		});
-		state.resizeCleanup?.();
 		let isDesktop = window.innerWidth > 850;
 		const syncDetailsOpen = () => {
 			if (!details) return;
@@ -5158,7 +6572,7 @@
 				isDesktop = nowDesktop;
 			}
 		};
-		state.resizeCleanup = ctx.listen(window, "resize", syncDetailsOpen);
+		rc.listen(window, "resize", syncDetailsOpen);
 		sidebar.querySelectorAll(".ala-compare-cb").forEach((cb) => {
 			cb.addEventListener("change", () => {
 				const st = cb.dataset.status;
@@ -5193,9 +6607,16 @@
 			otherScoreHeader: headerCells.find((el) => el !== yourScoreHeader && /score/i.test(el.textContent || "")) || header.querySelectorAll(".score")[1] || headerCells[2]
 		};
 	}
-	function setupCompareView(ctx, state, compareRoot, header, entries, onReadyToLoad) {
+	function setupCompareView(rc, state, compareRoot, header, entries, onReadyToLoad) {
 		if (header) header.querySelectorAll(".status").forEach((statusEl) => {
-			if (!statusEl.querySelector(".ala-header-label")) statusEl.innerHTML = `<span class="ala-header-label">${statusEl.textContent?.trim() || ""}</span>`;
+			if (!statusEl.querySelector(".ala-header-label")) {
+				const text = statusEl.textContent?.trim() || "";
+				const label = document.createElement("span");
+				label.className = "ala-header-label";
+				label.textContent = text;
+				statusEl.textContent = "";
+				statusEl.appendChild(label);
+			}
 		});
 		const { titleHeader, yourScoreHeader, otherScoreHeader } = findCompareHeaders(header);
 		const container = compareRoot.closest(".content.container") || compareRoot.parentElement;
@@ -5218,14 +6639,24 @@
 			main.appendChild(compareRoot);
 		}
 		if (sidebar) {
-			renderSidebarCard(ctx, state, sidebar, compareRoot);
+			renderSidebarCard(rc, state, sidebar, compareRoot);
 			if (entries.length > 0) updateStatusCounts(state, sidebar, entries);
 		}
 		if (header && titleHeader && yourScoreHeader && otherScoreHeader && !header._alaHeaderBound) {
+			state.headerCleanup?.();
 			header._alaHeaderBound = true;
-			titleHeader.addEventListener("click", () => triggerSort(state, "title", compareRoot));
-			yourScoreHeader.addEventListener("click", () => triggerSort(state, "yourScore", compareRoot));
-			otherScoreHeader.addEventListener("click", () => triggerSort(state, "otherScore", compareRoot));
+			const onTitleClick = () => triggerSort(state, "title", compareRoot);
+			const onYourScoreClick = () => triggerSort(state, "yourScore", compareRoot);
+			const onOtherScoreClick = () => triggerSort(state, "otherScore", compareRoot);
+			titleHeader.addEventListener("click", onTitleClick);
+			yourScoreHeader.addEventListener("click", onYourScoreClick);
+			otherScoreHeader.addEventListener("click", onOtherScoreClick);
+			state.headerCleanup = () => {
+				titleHeader.removeEventListener("click", onTitleClick);
+				yourScoreHeader.removeEventListener("click", onYourScoreClick);
+				otherScoreHeader.removeEventListener("click", onOtherScoreClick);
+				delete header._alaHeaderBound;
+			};
 		}
 		if (header && titleHeader) {
 			header.dataset.alaCompareInit = "true";
@@ -5238,7 +6669,6 @@
 				if (!text || text === "") scoreEl.textContent = "0";
 			});
 		});
-		disableNativeScrollers(compareRoot);
 		if (entries.length > 0) {
 			applyFilter(state, compareRoot, entries);
 			applySort(state, compareRoot, entries, state.activeSortCol, state.activeSortDir);
@@ -5268,7 +6698,7 @@
 			type: isManga ? "MANGA" : "ANIME"
 		};
 	}
-	async function resolveCompareUsers(ctx) {
+	async function resolveCompareUsers(ctx, rc) {
 		const route = parseCompareRoute();
 		const type = route?.type || (location.pathname.toLowerCase().includes("mangalist") ? "MANGA" : "ANIME");
 		const bridge = ctx.hooks.getCacheBridge();
@@ -5294,7 +6724,7 @@
 		let viewerId = snap.userId || void 0;
 		let viewerName = snap.username || void 0;
 		if (!viewerId || !viewerName) {
-			const viewer = await ctx.api.viewer();
+			const viewer = await rc.api.viewer(false, { signal: rc.signal });
 			if (viewer) {
 				viewerId = viewer.id;
 				viewerName = viewer.name;
@@ -5387,56 +6817,64 @@
 		updateSortArrows(titleH, scores[0] || null, scores[1] || null, state.activeSortCol, state.activeSortDir);
 		matchedNodes.sort((a, b) => compareEntries(getEntryData(a), getEntryData(b), state.activeSortCol, state.activeSortDir));
 		state.isMutatingDOM = true;
-		customTable.querySelectorAll(".entry:not(.header)").forEach((el) => el.remove());
-		const frag = document.createDocumentFragment();
-		for (const el of matchedNodes) frag.appendChild(el);
-		customTable.appendChild(frag);
-		if (matchedNodes.length === 0) {
-			let empty = customTable.querySelector(".no-results");
-			if (!empty) {
-				empty = document.createElement("div");
-				empty.className = "no-results";
-				empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
-				customTable.appendChild(empty);
+		try {
+			customTable.querySelectorAll(".entry:not(.header)").forEach((el) => el.remove());
+			const frag = document.createDocumentFragment();
+			for (const el of matchedNodes) frag.appendChild(el);
+			customTable.appendChild(frag);
+			if (matchedNodes.length === 0) {
+				let empty = customTable.querySelector(".no-results");
+				if (!empty) {
+					empty = document.createElement("div");
+					empty.className = "no-results";
+					empty.textContent = `You don't have any ${type.toLowerCase()} in common ｡ﾟヽ(ﾟ´Д｀)ﾉﾟ｡`;
+					customTable.appendChild(empty);
+				}
+				customHeader.style.display = "none";
+			} else {
+				customTable.querySelector(".no-results")?.remove();
+				customHeader.style.display = "";
 			}
-			customHeader.style.display = "none";
-		} else {
-			customTable.querySelector(".no-results")?.remove();
-			customHeader.style.display = "";
+			const emptyEl = customTable.querySelector(".ala-compare-empty");
+			if (emptyEl) customTable.appendChild(emptyEl);
+		} finally {
+			state.isMutatingDOM = false;
 		}
-		const emptyEl = customTable.querySelector(".ala-compare-empty");
-		if (emptyEl) customTable.appendChild(emptyEl);
-		state.isMutatingDOM = false;
 		return customTable;
 	}
-	async function loadAllEntriesViaMediaList(ctx, state, compareRoot, sidebar) {
-		if (state.isLoadingAll || state.isCompareLoaded || state.loadFailed) return;
+	async function loadAllEntriesViaMediaList(ctx, rc, state, compareRoot, sidebar) {
+		if (state.isLoadingAll || state.isCompareLoaded || state.loadFailed || rc.signal.aborted) return;
 		state.isLoadingAll = true;
 		const abortState = { abort: false };
 		state.loadAbortState = abortState;
 		state.prefetchRelease?.();
-		state.prefetchRelease = ctx.hooks.setPrefetchPaused(true);
-		state.indicatorTimer = ctx.timeout(() => {
-			if (!abortState.abort && isComparePage()) setLoadIndicator(state, sidebar, "Loading full compare list...");
+		const releasePrefetch = ctx.hooks.setPrefetchPaused(true);
+		state.prefetchRelease = releasePrefetch;
+		rc.onCleanup(releasePrefetch);
+		let cancelIndicatorTimer = rc.timeout(() => {
+			cancelIndicatorTimer = null;
+			if (!abortState.abort && !rc.signal.aborted && isComparePage()) setLoadIndicator(sidebar, "Loading full compare list...");
 		}, 250);
 		try {
-			const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers(ctx);
-			if (abortState.abort || !isComparePage()) return;
+			const { viewerId, viewerName, otherId, otherName, type } = await resolveCompareUsers(ctx, rc);
+			if (abortState.abort || rc.signal.aborted || !isComparePage()) return;
 			const viewerTarget = viewerId || viewerName;
 			const otherTarget = otherId || otherName;
 			if (!viewerTarget || !otherTarget) {
 				ctx.log.debug("Missing viewer or other user for getMediaList, keeping fallback");
-				state.loadFailed = true;
+				if (state.loadAbortState === abortState && !abortState.abort && !rc.signal.aborted) state.loadFailed = true;
 				return;
 			}
-			const [myListRes, otherListRes] = await Promise.all([ctx.api.getMediaList(viewerTarget, type, {
+			const [myListRes, otherListRes] = await Promise.all([rc.api.getMediaList(viewerTarget, type, {
 				userId: viewerId,
-				userName: viewerId ? void 0 : viewerName
-			}), ctx.api.getMediaList(otherTarget, type, {
+				userName: viewerId ? void 0 : viewerName,
+				signal: rc.signal
+			}), rc.api.getMediaList(otherTarget, type, {
 				userId: otherId,
-				userName: otherId ? void 0 : otherName
+				userName: otherId ? void 0 : otherName,
+				signal: rc.signal
 			})]);
-			if (abortState.abort || !isComparePage()) return;
+			if (abortState.abort || rc.signal.aborted || !isComparePage()) return;
 			const myMap = new Map();
 			for (const entry of myListRes.allEntries) myMap.set(entry.mediaId, entry);
 			const safeOtherName = esc(otherListRes.user?.name || otherName || "User");
@@ -5461,16 +6899,24 @@
 			updateStatusCounts(state, sidebar, matchedNodes);
 			applyFilter(state, customTable, matchedNodes);
 		} catch (err) {
-			state.loadFailed = true;
-			ctx.log.error("CompareView getMediaList error:", err);
-		} finally {
-			state.isLoadingAll = false;
-			state.loadAbortState = null;
-			if (state.prefetchRelease) {
-				state.prefetchRelease();
-				state.prefetchRelease = null;
+			if (state.loadAbortState === abortState && !abortState.abort && !rc.signal.aborted && !isAbortError(err)) {
+				state.loadFailed = true;
+				ctx.log.error("CompareView getMediaList error:", err);
 			}
-			setLoadIndicator(state, sidebar, null);
+		} finally {
+			if (cancelIndicatorTimer) {
+				cancelIndicatorTimer();
+				cancelIndicatorTimer = null;
+			}
+			if (state.loadAbortState === abortState && !abortState.abort) {
+				state.isLoadingAll = false;
+				state.loadAbortState = null;
+				if (state.prefetchRelease) {
+					state.prefetchRelease();
+					state.prefetchRelease = null;
+				}
+				setLoadIndicator(sidebar, null);
+			}
 		}
 	}
 	defineModule({
@@ -5491,29 +6937,29 @@
 			ctx.ownUi("#ala-compare-sidebar");
 			const state = createCompareState();
 			ctx.hooks.blockRpc(createCompareRpcBlocker(state));
-			const checkView = debounce(() => {
-				if (state.disposed || state.isMutatingDOM || !isComparePage()) return;
-				if (state.isCompareLoaded) return;
-				const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
-				if (!compareRoot) return;
-				const header = compareRoot.querySelector(".entry.header");
-				const entries = Array.from(compareRoot.querySelectorAll(".entry:not(.header)"));
-				if (!compareRoot.dataset.alaCompareInit || !state.isCompareLoaded && entries.length !== state.lastProcessedCount) {
-					state.lastProcessedCount = entries.length;
-					setupCompareView(ctx, state, compareRoot, header, entries, (root, sidebar) => {
-						loadAllEntriesViaMediaList(ctx, state, root, sidebar);
-					});
-				}
-			}, 60);
 			ctx.onRoute(() => isComparePage(), (rc) => {
 				if (state.disposed) return;
 				state.currentRoute = rc.pathname;
 				resetCompareFilters(state);
 				cleanupCompareView(state);
-				rc.onCleanup(ctx.ready(checkView));
-				rc.onCleanup(ctx.onBodyMutation(() => {
-					if (!rc.signal.aborted && !state.disposed && !state.isMutatingDOM) checkView();
-				}));
+				const checkView = rc.debounce(() => {
+					if (state.disposed || state.isMutatingDOM || !isComparePage()) return;
+					if (state.isCompareLoaded) return;
+					const compareRoot = document.querySelector(".compare:not(#ala-compare-table)");
+					if (!compareRoot) return;
+					const header = compareRoot.querySelector(".entry.header");
+					const entries = Array.from(compareRoot.querySelectorAll(".entry:not(.header)"));
+					if (!compareRoot.dataset.alaCompareInit || !state.isCompareLoaded && entries.length !== state.lastProcessedCount) {
+						state.lastProcessedCount = entries.length;
+						setupCompareView(rc, state, compareRoot, header, entries, (root, sidebar) => {
+							loadAllEntriesViaMediaList(ctx, rc, state, root, sidebar);
+						});
+					}
+				}, 60);
+				rc.ready(checkView);
+				rc.onBodyMutation(() => {
+					if (!state.disposed && !state.isMutatingDOM) checkView();
+				});
 				return () => {
 					state.currentRoute = "";
 					cleanupCompareView(state);
@@ -5601,6 +7047,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (am !== bm) return am - bm;
 		return (a.day ?? 0) - (b.day ?? 0);
 	}
+	function compareFuzzyDatesCompatible(a, b) {
+		if (a.year == null || b.year == null) return 0;
+		if (a.year !== b.year) return a.year - b.year;
+		if (a.month == null || b.month == null) return 0;
+		if (a.month !== b.month) return a.month - b.month;
+		if (a.day == null || b.day == null) return 0;
+		return a.day - b.day;
+	}
 	function isFirstProgress(progress) {
 		if (!progress) return false;
 		return /^1(?:\s*-|$)/.test(progress.trim());
@@ -5642,7 +7096,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		let newCompletedAt = null;
 		if (needsFinish && earliestCompleted) {
 			const candidateFinish = fuzzyDateFromTimestamp(earliestCompleted.createdAt);
-			if (isDateEmpty(entry.startedAt) || compareFuzzyDates(entry.startedAt, candidateFinish) <= 0) newCompletedAt = candidateFinish;
+			if (isDateEmpty(entry.startedAt) || compareFuzzyDatesCompatible(entry.startedAt, candidateFinish) <= 0) newCompletedAt = candidateFinish;
 		}
 		let newStartedAt = null;
 		let startSource = null;
@@ -5651,7 +7105,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (startAct) {
 				const candidateStart = fuzzyDateFromTimestamp(startAct.createdAt);
 				const effectiveFinish = newCompletedAt ?? entry.completedAt;
-				if (isDateEmpty(effectiveFinish) || compareFuzzyDates(candidateStart, effectiveFinish) <= 0) {
+				if (isDateEmpty(effectiveFinish) || compareFuzzyDatesCompatible(candidateStart, effectiveFinish) <= 0) {
 					newStartedAt = candidateStart;
 					startSource = startAct.status.trim().toLowerCase() === "completed" ? "completed (no ep/ch log)" : startAct.progress ? `${startAct.status} ${startAct.progress}` : startAct.status;
 				}
@@ -5669,7 +7123,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	function assumeStartFromFinish(entry, fillPartialDates) {
 		if (!entryNeedsStart(entry, fillPartialDates)) return null;
 		if (!(fillPartialDates ? isDateComplete(entry.completedAt) : !isDateEmpty(entry.completedAt))) return null;
-		if (compareFuzzyDates(entry.startedAt, entry.completedAt) === 0) return null;
+		if (isDateComplete(entry.startedAt) && isDateComplete(entry.completedAt) && compareFuzzyDates(entry.startedAt, entry.completedAt) === 0) return null;
 		return {
 			entry,
 			newStartedAt: { ...entry.completedAt },
@@ -5703,6 +7157,105 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	function isAssumedProposal(p) {
 		return Boolean(p.startSource?.startsWith("assumed"));
 	}
+	var buildDateBackfillModalCss = (sel) => `@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
+      @keyframes alaDbfIndeterminate {0%{transform:translateX(-100%);}100%{transform:translateX(350%);}}
+      @keyframes alaDbfPulse {0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.85);}}
+      ${sel} .ala-core-sheet {max-height:88vh;border:1px solid rgba(var(--color-text),0.1);font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
+      ${sel} .ala-core-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);align-items:flex-start;}
+      ${sel} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
+      ${sel} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
+      ${sel} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
+      ${sel} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
+      ${sel} .ala-core-body {padding:18px 22px;}
+      ${sel} .ala-core-body::-webkit-scrollbar {width:8px;}
+      ${sel} .ala-core-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
+      ${sel} .ala-core-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
+      ${sel} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+      ${sel} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
+      ${sel} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
+      ${sel} .ala-dbf-mode-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;}
+      ${sel} .ala-dbf-mode-card {display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:8px;width:100%;padding:16px 18px;border-radius:8px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.1);color:rgb(var(--color-text));cursor:pointer;transition:border-color 0.15s,transform 0.12s,background 0.15s;}
+      ${sel} .ala-dbf-mode-card:hover {border-color:rgb(var(--color-blue));background:rgba(var(--color-blue),0.06);transform:translateY(-1px);}
+      ${sel} .ala-dbf-mode-card-head {display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;flex-wrap:wrap;}
+      ${sel} .ala-dbf-mode-card-title {font-size:1.4rem;font-weight:700;color:rgb(var(--color-text));}
+      ${sel} .ala-dbf-mode-badge {padding:2px 8px;border-radius:999px;font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;background:rgba(var(--color-blue),0.16);color:rgb(var(--color-blue));}
+      ${sel} .ala-dbf-mode-desc {font-size:1.2rem;line-height:1.45;color:rgb(var(--color-text-lighter));font-weight:400;}
+      ${sel} .ala-dbf-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;}
+      ${sel} .ala-dbf-stat-card {padding:10px 14px;border-radius:7px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.07);display:flex;flex-direction:column;gap:3px;min-width:0;}
+      ${sel} .ala-dbf-stat-label {font-size:1.1rem;text-transform:uppercase;letter-spacing:0.04em;color:rgb(var(--color-text-lighter));font-weight:600;}
+      ${sel} .ala-dbf-stat-val {font-size:1.65rem;font-weight:700;font-variant-numeric:tabular-nums;}
+      ${sel} .ala-dbf-stat-val.green {color:rgb(var(--color-green));}
+      ${sel} .ala-dbf-stat-val.blue {color:rgb(var(--color-blue));}
+      ${sel} .ala-dbf-toolbar {display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
+      ${sel} .ala-dbf-search {flex:1;min-width:180px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(var(--color-text),0.14);background:rgb(var(--color-background));color:rgb(var(--color-text));font-size:1.25rem;outline:none;transition:border-color 0.15s;}
+      ${sel} .ala-dbf-search:focus {border-color:rgb(var(--color-blue));}
+      ${sel} .ala-dbf-section {margin-bottom:16px;border:1px solid rgba(var(--color-text),0.08);border-radius:8px;background:rgb(var(--color-background));overflow-x:hidden;}
+      ${sel} .ala-dbf-section:last-child {margin-bottom:0;}
+      ${sel} .ala-dbf-section-head {padding:10px 14px;background:rgba(var(--color-foreground),0.55);border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-weight:700;font-size:1.3rem;}
+      ${sel} .ala-dbf-section-head.collapsible {cursor:pointer;user-select:none;}
+      ${sel} .ala-dbf-section-head.collapsible:hover {background:rgba(var(--color-text),0.05);}
+      ${sel} .ala-dbf-table-wrap {width:100%;overflow-x:hidden;}
+      ${sel} table {width:100%;table-layout:fixed;border-collapse:collapse;font-size:1.25rem;}
+      ${sel} thead th {background:rgb(var(--color-background));color:rgb(var(--color-text-lighter));font-size:1.1rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:9px 12px;border-bottom:1px solid rgba(var(--color-text),0.12);text-align:left;}
+      ${sel} tbody td {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.06);vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;}
+      ${sel} tbody tr:last-child td {border-bottom:none;}
+      ${sel} tbody tr {transition:background 0.12s,opacity 0.12s;}
+      ${sel} tbody tr:hover {background:rgba(var(--color-text),0.035);}
+      ${sel} tbody tr.is-selected {background:rgba(var(--color-blue),0.055);}
+      ${sel} tbody tr.is-unselected {opacity:0.72;}
+      ${sel} input[type="checkbox"] {width:16px;height:16px;accent-color:rgb(var(--color-blue));cursor:pointer;vertical-align:middle;}
+      ${sel} .ala-dbf-media-link {color:rgb(var(--color-text));text-decoration:none;font-weight:600;transition:color 0.12s;}
+      ${sel} .ala-dbf-media-link:hover {color:rgb(var(--color-blue));text-decoration:underline;}
+      ${sel} .ala-dbf-type-badge {display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:1rem;font-weight:700;letter-spacing:0.03em;background:rgba(var(--color-blue),0.15);color:rgb(var(--color-blue));vertical-align:middle;}
+      ${sel} .ala-dbf-type-badge.manga {background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));}
+      ${sel} .ala-dbf-date-diff {display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;font-variant-numeric:tabular-nums;}
+      ${sel} .ala-dbf-old-date {color:rgb(var(--color-text-lighter));}
+      ${sel} .ala-dbf-arrow {color:rgb(var(--color-text-lighter));font-size:1.1rem;}
+      ${sel} .ala-dbf-new-date {display:inline-block;padding:2px 7px;border-radius:4px;background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));font-weight:700;}
+      ${sel} .ala-dbf-new-date.assumed {background:rgba(235,168,52,0.16);color:rgb(235,168,52);}
+      ${sel} .ala-dbf-source {margin-top:3px;font-size:1.1rem;color:rgb(var(--color-text-lighter));}
+      ${sel} .ala-dbf-source.assumed {color:rgb(235,168,52);}
+      ${sel} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
+      ${sel} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
+      ${sel} .ala-core-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);justify-content:space-between;gap:12px;flex-wrap:wrap;}
+      ${sel} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
+      ${sel} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
+      ${sel} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
+      ${sel} .ala-dbf-dot.paused {background:rgb(235,168,52);}
+      ${sel} .ala-dbf-dot.done {background:rgb(var(--color-green));}
+      ${sel} .ala-dbf-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      ${sel} .ala-dbf-actions[hidden] {display:none;}
+      ${sel} button.ala-dbf-btn {padding:7px 14px;border:1px solid transparent;border-radius:6px;cursor:pointer;font-size:1.25rem;font-weight:600;background:rgb(var(--color-blue));color:#fff;transition:filter 0.14s,background 0.14s,opacity 0.14s;}
+      ${sel} button.ala-dbf-btn:hover:not(:disabled) {filter:brightness(1.08);}
+      ${sel} button.ala-dbf-btn.secondary {background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
+      ${sel} button.ala-dbf-btn.secondary:hover:not(:disabled) {background:rgba(var(--color-text),0.16);}
+      ${sel} button.ala-dbf-btn.apply {background:rgb(var(--color-green));color:#fff;}
+      ${sel} button.ala-dbf-btn.mini {padding:5px 10px;font-size:1.15rem;}
+      ${sel} button:disabled {opacity:0.45;cursor:not-allowed;}
+      @media (max-width:640px) {
+        ${sel} {padding:10px;}
+        ${sel} .ala-core-sheet {max-height:92vh;}
+        ${sel} .ala-core-head {padding:12px 14px;}
+        ${sel} .ala-core-body {padding:12px 14px;}
+        ${sel} .ala-dbf-mode-grid {grid-template-columns:1fr;}
+        ${sel} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
+        ${sel} .ala-dbf-search {font-size:16px;}
+        ${sel} .ala-core-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
+        ${sel} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
+        ${sel} .ala-dbf-actions[hidden] {display:none;}
+        ${sel} .ala-core-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
+        ${sel} table,${sel} tbody,${sel} tr,${sel} td {display:block;width:100%;}
+        ${sel} thead {display:none;}
+        ${sel} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
+        ${sel} tbody tr:last-child {border-bottom:none;}
+        ${sel} tbody td {padding:4px 0;border-bottom:none;}
+        ${sel} tbody td.ala-dbf-check-cell {float:left;width:28px;padding-top:2px;}
+        ${sel} tbody td.ala-dbf-title-cell {padding-left:28px;margin-bottom:4px;}
+        ${sel} tbody td.ala-dbf-unresolved-title {margin-bottom:4px;}
+        ${sel} tbody td[data-label] {display:flex;align-items:baseline;gap:8px;padding-left:28px;font-size:1.2rem;}
+        ${sel} tbody td.ala-dbf-unresolved-meta[data-label] {padding-left:0;}
+        ${sel} tbody td[data-label]::before {content:attr(data-label);flex-shrink:0;min-width:54px;font-size:1.1rem;font-weight:700;text-transform:uppercase;color:rgb(var(--color-text-lighter));}
+      }`;
 	defineModule({
 		id: "dateBackfill",
 		key: "dateBackfillEnabled",
@@ -5754,127 +7307,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			help: "Log list scans, activity pagination, and entry updates."
 		},
 		setup(ctx) {
-			const MODAL_ID = ctx.getId("modal");
-			let activeModalAbort = null;
-			ctx.onCleanup(() => {
-				activeModalAbort?.abort();
-				activeModalAbort = null;
-			});
-			ctx.addStyle(`@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
-      @keyframes alaDbfIndeterminate {0%{transform:translateX(-100%);}100%{transform:translateX(350%);}}
-      @keyframes alaDbfPulse {0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.85);}}
-      #${MODAL_ID} .ala-core-sheet {max-height:88vh;border:1px solid rgba(var(--color-text),0.1);font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
-      #${MODAL_ID} .ala-core-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);align-items:flex-start;}
-      #${MODAL_ID} .ala-dbf-title-wrap {display:flex;flex-direction:column;gap:4px;min-width:0;}
-      #${MODAL_ID} .ala-dbf-subtitle {font-size:1.2rem;color:rgb(var(--color-text-lighter));line-height:1.35;}
-      #${MODAL_ID} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
-      #${MODAL_ID} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
-      #${MODAL_ID} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
-      #${MODAL_ID} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-core-body {padding:18px 22px;}
-      #${MODAL_ID} .ala-core-body::-webkit-scrollbar {width:8px;}
-      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
-      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
-      #${MODAL_ID} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
-      #${MODAL_ID} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
-      #${MODAL_ID} .ala-dbf-mode-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;}
-      #${MODAL_ID} .ala-dbf-mode-card {display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:8px;width:100%;padding:16px 18px;border-radius:8px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.1);color:rgb(var(--color-text));cursor:pointer;transition:border-color 0.15s,transform 0.12s,background 0.15s;}
-      #${MODAL_ID} .ala-dbf-mode-card:hover {border-color:rgb(var(--color-blue));background:rgba(var(--color-blue),0.06);transform:translateY(-1px);}
-      #${MODAL_ID} .ala-dbf-mode-card-head {display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-mode-card-title {font-size:1.4rem;font-weight:700;color:rgb(var(--color-text));}
-      #${MODAL_ID} .ala-dbf-mode-badge {padding:2px 8px;border-radius:999px;font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;background:rgba(var(--color-blue),0.16);color:rgb(var(--color-blue));}
-      #${MODAL_ID} .ala-dbf-mode-desc {font-size:1.2rem;line-height:1.45;color:rgb(var(--color-text-lighter));font-weight:400;}
-      #${MODAL_ID} .ala-dbf-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;}
-      #${MODAL_ID} .ala-dbf-stat-card {padding:10px 14px;border-radius:7px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.07);display:flex;flex-direction:column;gap:3px;min-width:0;}
-      #${MODAL_ID} .ala-dbf-stat-label {font-size:1.1rem;text-transform:uppercase;letter-spacing:0.04em;color:rgb(var(--color-text-lighter));font-weight:600;}
-      #${MODAL_ID} .ala-dbf-stat-val {font-size:1.65rem;font-weight:700;font-variant-numeric:tabular-nums;}
-      #${MODAL_ID} .ala-dbf-stat-val.green {color:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-stat-val.blue {color:rgb(var(--color-blue));}
-      #${MODAL_ID} .ala-dbf-toolbar {display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-search {flex:1;min-width:180px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(var(--color-text),0.14);background:rgb(var(--color-background));color:rgb(var(--color-text));font-size:1.25rem;outline:none;transition:border-color 0.15s;}
-      #${MODAL_ID} .ala-dbf-search:focus {border-color:rgb(var(--color-blue));}
-      #${MODAL_ID} .ala-dbf-section {margin-bottom:16px;border:1px solid rgba(var(--color-text),0.08);border-radius:8px;background:rgb(var(--color-background));overflow-x:hidden;}
-      #${MODAL_ID} .ala-dbf-section:last-child {margin-bottom:0;}
-      #${MODAL_ID} .ala-dbf-section-head {padding:10px 14px;background:rgba(var(--color-foreground),0.55);border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-weight:700;font-size:1.3rem;}
-      #${MODAL_ID} .ala-dbf-section-head.collapsible {cursor:pointer;user-select:none;}
-      #${MODAL_ID} .ala-dbf-section-head.collapsible:hover {background:rgba(var(--color-text),0.05);}
-      #${MODAL_ID} .ala-dbf-table-wrap {width:100%;overflow-x:hidden;}
-      #${MODAL_ID} table {width:100%;table-layout:fixed;border-collapse:collapse;font-size:1.25rem;}
-      #${MODAL_ID} thead th {background:rgb(var(--color-background));color:rgb(var(--color-text-lighter));font-size:1.1rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:9px 12px;border-bottom:1px solid rgba(var(--color-text),0.12);text-align:left;}
-      #${MODAL_ID} tbody td {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.06);vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;}
-      #${MODAL_ID} tbody tr:last-child td {border-bottom:none;}
-      #${MODAL_ID} tbody tr {transition:background 0.12s,opacity 0.12s;}
-      #${MODAL_ID} tbody tr:hover {background:rgba(var(--color-text),0.035);}
-      #${MODAL_ID} tbody tr.is-selected {background:rgba(var(--color-blue),0.055);}
-      #${MODAL_ID} tbody tr.is-unselected {opacity:0.72;}
-      #${MODAL_ID} input[type="checkbox"] {width:16px;height:16px;accent-color:rgb(var(--color-blue));cursor:pointer;vertical-align:middle;}
-      #${MODAL_ID} .ala-dbf-media-link {color:rgb(var(--color-text));text-decoration:none;font-weight:600;transition:color 0.12s;}
-      #${MODAL_ID} .ala-dbf-media-link:hover {color:rgb(var(--color-blue));text-decoration:underline;}
-      #${MODAL_ID} .ala-dbf-type-badge {display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:1rem;font-weight:700;letter-spacing:0.03em;background:rgba(var(--color-blue),0.15);color:rgb(var(--color-blue));vertical-align:middle;}
-      #${MODAL_ID} .ala-dbf-type-badge.manga {background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-date-diff {display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;font-variant-numeric:tabular-nums;}
-      #${MODAL_ID} .ala-dbf-old-date {color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID} .ala-dbf-arrow {color:rgb(var(--color-text-lighter));font-size:1.1rem;}
-      #${MODAL_ID} .ala-dbf-new-date {display:inline-block;padding:2px 7px;border-radius:4px;background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));font-weight:700;}
-      #${MODAL_ID} .ala-dbf-new-date.assumed {background:rgba(235,168,52,0.16);color:rgb(235,168,52);}
-      #${MODAL_ID} .ala-dbf-source {margin-top:3px;font-size:1.1rem;color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID} .ala-dbf-source.assumed {color:rgb(235,168,52);}
-      #${MODAL_ID} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
-      #${MODAL_ID} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
-      #${MODAL_ID} .ala-core-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);justify-content:space-between;gap:12px;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
-      #${MODAL_ID} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
-      #${MODAL_ID} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
-      #${MODAL_ID} .ala-dbf-dot.paused {background:rgb(235,168,52);}
-      #${MODAL_ID} .ala-dbf-dot.done {background:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
-      #${MODAL_ID} button.ala-dbf-btn {padding:7px 14px;border:1px solid transparent;border-radius:6px;cursor:pointer;font-size:1.25rem;font-weight:600;background:rgb(var(--color-blue));color:#fff;transition:filter 0.14s,background 0.14s,opacity 0.14s;}
-      #${MODAL_ID} button.ala-dbf-btn:hover:not(:disabled) {filter:brightness(1.08);}
-      #${MODAL_ID} button.ala-dbf-btn.secondary {background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
-      #${MODAL_ID} button.ala-dbf-btn.secondary:hover:not(:disabled) {background:rgba(var(--color-text),0.16);}
-      #${MODAL_ID} button.ala-dbf-btn.apply {background:rgb(var(--color-green));color:#fff;}
-      #${MODAL_ID} button.ala-dbf-btn.mini {padding:5px 10px;font-size:1.15rem;}
-      #${MODAL_ID} button:disabled {opacity:0.45;cursor:not-allowed;}
-      @media (max-width:640px) {
-        #${MODAL_ID} {padding:10px;}
-        #${MODAL_ID} .ala-core-sheet {max-height:92vh;}
-        #${MODAL_ID} .ala-core-head {padding:12px 14px;}
-        #${MODAL_ID} .ala-core-body {padding:12px 14px;}
-        #${MODAL_ID} .ala-dbf-mode-grid {grid-template-columns:1fr;}
-        #${MODAL_ID} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
-        #${MODAL_ID} .ala-dbf-search {font-size:16px;}
-        #${MODAL_ID} .ala-core-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
-        #${MODAL_ID} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
-        #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
-        #${MODAL_ID} .ala-core-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
-        #${MODAL_ID} table,#${MODAL_ID} tbody,#${MODAL_ID} tr,#${MODAL_ID} td {display:block;width:100%;}
-        #${MODAL_ID} thead {display:none;}
-        #${MODAL_ID} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
-        #${MODAL_ID} tbody tr:last-child {border-bottom:none;}
-        #${MODAL_ID} tbody td {padding:4px 0;border-bottom:none;}
-        #${MODAL_ID} tbody td.ala-dbf-check-cell {float:left;width:28px;padding-top:2px;}
-        #${MODAL_ID} tbody td.ala-dbf-title-cell {padding-left:28px;margin-bottom:4px;}
-        #${MODAL_ID} tbody td.ala-dbf-unresolved-title {margin-bottom:4px;}
-        #${MODAL_ID} tbody td[data-label] {display:flex;align-items:baseline;gap:8px;padding-left:28px;font-size:1.2rem;}
-        #${MODAL_ID} tbody td.ala-dbf-unresolved-meta[data-label] {padding-left:0;}
-        #${MODAL_ID} tbody td[data-label]::before {content:attr(data-label);flex-shrink:0;min-width:54px;font-size:1.1rem;font-weight:700;text-transform:uppercase;color:rgb(var(--color-text-lighter));}
-      }`);
-			async function resolveUserId() {
+			async function resolveUserId(signal) {
 				if (ctx.session.userId) return ctx.session.userId;
 				if (!ctx.session.hasAuth()) return null;
-				return (await ctx.api.viewer())?.id ?? null;
+				return (await ctx.api.viewer(false, { signal }))?.id ?? null;
 			}
 			function openModal() {
-				activeModalAbort?.abort();
-				const modalAbort = new AbortController();
-				activeModalAbort = modalAbort;
 				let activeScanAbort = null;
-				modalAbort.signal.addEventListener("abort", () => {
-					activeScanAbort?.abort();
-					activeScanAbort = null;
-				});
+				let scanStarting = false;
+				let isApplying = false;
 				const renderIdleScreenHtml = () => {
 					const scopeSetting = ctx.get("dateBackfillScope");
 					const orderSetting = ctx.get("dateBackfillOrder");
@@ -5907,9 +7348,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
         `;
 				};
 				const modal = ctx.modal({
-					id: MODAL_ID,
+					id: "modal",
 					title: "Missing Date Backfill",
+					subtitle: "Recover missing start and completion dates from your AniList activity logs",
 					maxWidth: "960px",
+					style: buildDateBackfillModalCss,
 					bodyHtml: renderIdleScreenHtml(),
 					footerHtml: `
           <div class="ala-dbf-status">
@@ -5920,25 +7363,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
             <button type="button" class="ala-dbf-btn secondary" data-act="primary-action">Pause</button>
             <button type="button" class="ala-dbf-btn apply" data-act="apply" disabled>Apply Selected (0)</button>
           </div>
-        `,
-					onClose: () => modalAbort.abort()
+        `
+				});
+				modal.onCleanup(() => {
+					activeScanAbort?.abort();
+					activeScanAbort = null;
 				});
 				const overlay = modal.backdrop;
 				const bodyEl = modal.body;
 				const statusEl = modal.footer.querySelector("[data-role=\"status\"]");
 				const dotEl = modal.footer.querySelector("[data-role=\"dot\"]");
 				const footerActionsEl = modal.footer.querySelector("[data-role=\"footer-actions\"]");
-				const h2 = modal.sheet.querySelector(".ala-core-head")?.querySelector("h2");
-				if (h2) {
-					const wrap = document.createElement("div");
-					wrap.className = "ala-dbf-title-wrap";
-					h2.parentNode?.insertBefore(wrap, h2);
-					wrap.appendChild(h2);
-					const sub = document.createElement("div");
-					sub.className = "ala-dbf-subtitle";
-					sub.textContent = "Recover missing start and completion dates from your AniList activity logs";
-					wrap.appendChild(sub);
-				}
 				const track = document.createElement("div");
 				track.className = "ala-dbf-progress-track";
 				track.innerHTML = "<div class=\"ala-dbf-progress-fill\" data-role=\"progress\"></div>";
@@ -5976,40 +7411,27 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					dotEl.className = `ala-dbf-dot ${tone === "idle" ? "" : tone}`.trim();
 					statusEl.textContent = text;
 				};
-				const sleepInterruptible = (ms, signal) => new Promise((resolve, reject) => {
-					if (signal.aborted) {
-						reject(new DOMException("Aborted", "AbortError"));
-						return;
-					}
-					if (ms <= 0 || pauseRequested) {
-						resolve();
-						return;
-					}
-					let done = false;
-					const finish = () => {
-						if (done) return;
-						done = true;
-						wakeSleepFn = null;
-						signal.removeEventListener("abort", onAbort);
-						resolve();
-					};
-					const cancelTimer = ctx.timeout(finish, ms);
-					const onAbort = () => {
-						if (done) return;
-						done = true;
-						wakeSleepFn = null;
-						cancelTimer();
-						reject(new DOMException("Aborted", "AbortError"));
-					};
+				const sleepInterruptible = async (ms, signal) => {
+					if (signal.aborted) throw createAbortError(signal);
+					if (ms <= 0 || pauseRequested) return;
+					const wakeAc = new AbortController();
+					const { signal: combinedSignal, dispose } = composeAbortSignals(signal, wakeAc.signal);
 					wakeSleepFn = () => {
-						cancelTimer();
-						finish();
+						wakeAc.abort();
 					};
-					signal.addEventListener("abort", onAbort, { once: true });
-				});
+					try {
+						await sleep(ms, combinedSignal);
+					} catch (err) {
+						if (!signal.aborted && wakeAc.signal.aborted) return;
+						throw err;
+					} finally {
+						wakeSleepFn = null;
+						dispose();
+					}
+				};
 				const waitIfPaused = (signal) => new Promise((resolve, reject) => {
 					if (signal.aborted) {
-						reject(new DOMException("Aborted", "AbortError"));
+						reject(createAbortError(signal));
 						return;
 					}
 					if (!pauseRequested) {
@@ -6022,7 +7444,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					setStatusIndicator("paused", `Paused (${modeLabel(activeMode)}) — ${proposals.length} found, ${unresolved.length} not yet found.`);
 					const onAbort = () => {
 						resumeResolver = null;
-						reject(new DOMException("Aborted", "AbortError"));
+						reject(createAbortError(signal));
 					};
 					resumeResolver = () => {
 						signal.removeEventListener("abort", onAbort);
@@ -6034,6 +7456,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					signal.addEventListener("abort", onAbort, { once: true });
 				});
 				const updateButtons = () => {
+					const backBtn = bodyEl.querySelector("[data-act=\"back-idle\"]");
+					const selectionBtns = bodyEl.querySelectorAll("[data-act=\"toggle-all\"], [data-act=\"select-confirmed\"]");
+					const checkboxes = bodyEl.querySelectorAll("input[type=\"checkbox\"][data-media-id]");
 					if (scanState === "idle") {
 						footerActionsEl.hidden = true;
 						return;
@@ -6042,29 +7467,34 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					const selectedCount = proposals.filter((p) => p.selected).length;
 					applyBtn.textContent = `Apply Selected (${selectedCount})`;
 					if (scanState === "scanning") {
-						primaryActionBtn.disabled = pauseRequested;
+						primaryActionBtn.disabled = isApplying || pauseRequested;
 						primaryActionBtn.textContent = pauseRequested ? "Pausing..." : "Pause";
 						primaryActionBtn.className = "ala-dbf-btn secondary";
 						applyBtn.disabled = true;
 					} else if (scanState === "paused") {
-						primaryActionBtn.disabled = false;
+						primaryActionBtn.disabled = isApplying;
 						primaryActionBtn.textContent = "Resume Scan";
 						primaryActionBtn.className = "ala-dbf-btn";
-						applyBtn.disabled = selectedCount === 0;
+						applyBtn.disabled = isApplying || selectedCount === 0;
 					} else {
-						primaryActionBtn.disabled = false;
+						primaryActionBtn.disabled = isApplying;
 						primaryActionBtn.textContent = activeMode === "TARGETED" ? "Full Feed Scan" : "Fast Scan";
 						primaryActionBtn.className = "ala-dbf-btn";
-						applyBtn.disabled = selectedCount === 0;
+						applyBtn.disabled = isApplying || selectedCount === 0;
 					}
+					if (backBtn) backBtn.disabled = isApplying || scanState === "scanning";
+					for (const btn of selectionBtns) btn.disabled = isApplying;
+					for (const cb of checkboxes) cb.disabled = isApplying;
 				};
 				const setScanState = (next) => {
 					scanState = next;
 					updateButtons();
 				};
 				const resetToIdleScreen = () => {
+					if (isApplying) return;
 					activeScanAbort?.abort();
 					activeScanAbort = null;
+					scanStarting = false;
 					pauseRequested = false;
 					resumeResolver = null;
 					wakeSleepFn = null;
@@ -6093,7 +7523,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
                 type="button"
                 class="ala-dbf-btn secondary mini"
                 data-act="back-idle"
-                ${scanState === "scanning" ? "disabled" : ""}
+                ${isApplying || scanState === "scanning" ? "disabled" : ""}
                 title="Return to scan mode selection"
               >← Modes</button>
               <input
@@ -6101,7 +7531,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
                 class="ala-dbf-search"
                 data-role="filter"
                 placeholder="Filter entries by title..."
-                value="${escapeHtml(filterQuery)}"
+                value="${esc(filterQuery)}"
               />
             </div>
             <div data-role="results"></div>
@@ -6109,7 +7539,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						resultsContainer = bodyEl.querySelector("[data-role=\"results\"]");
 					} else {
 						const backBtn = bodyEl.querySelector("[data-act=\"back-idle\"]");
-						if (backBtn) backBtn.disabled = scanState === "scanning";
+						if (backBtn) backBtn.disabled = isApplying || scanState === "scanning";
 					}
 					return resultsContainer;
 				};
@@ -6121,15 +7551,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					renderResults();
 					updateButtons();
 				};
-				ctx.listen(overlay, "click", (ev) => {
+				modal.listen(overlay, "click", (ev) => {
 					const target = ev.target.closest("[data-act]");
 					if (!target) return;
 					const act = target.dataset.act;
 					if (act === "scan-fast") runScan("TARGETED");
 					else if (act === "scan-full") runScan("FEED");
 					else if (act === "back-idle") {
-						if (scanState !== "scanning") resetToIdleScreen();
+						if (!isApplying && scanState !== "scanning" && !scanStarting) resetToIdleScreen();
 					} else if (act === "primary-action") {
+						if (isApplying) return;
 						if (scanState === "scanning" && !pauseRequested) {
 							pauseRequested = true;
 							updateButtons();
@@ -6138,6 +7569,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						else if (scanState === "done") runScan(activeMode === "TARGETED" ? "FEED" : "TARGETED");
 					} else if (act === "apply") runApply();
 					else if (act === "toggle-all") {
+						if (isApplying) return;
 						const nextVal = !(proposals.length > 0 && proposals.every((p) => p.selected));
 						for (const p of proposals) {
 							p.selected = nextVal;
@@ -6146,6 +7578,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						renderResults();
 						updateButtons();
 					} else if (act === "select-confirmed") {
+						if (isApplying) return;
 						for (const p of proposals) {
 							const nextVal = !isAssumedProposal(p);
 							p.selected = nextVal;
@@ -6158,14 +7591,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						renderResults();
 					}
 				});
-				ctx.listen(overlay, "input", (ev) => {
+				modal.listen(overlay, "input", (ev) => {
 					const input = ev.target;
 					if (input.dataset.role === "filter") {
 						filterQuery = input.value;
 						renderResults();
 					}
 				});
-				ctx.listen(overlay, "change", (ev) => {
+				modal.listen(overlay, "change", (ev) => {
+					if (isApplying) return;
 					const input = ev.target;
 					if (input.type === "checkbox" && input.dataset.mediaId !== void 0) {
 						const mediaId = Number(input.dataset.mediaId);
@@ -6188,13 +7622,45 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					return ` (rate-limit pause: ${Math.max(1, Math.ceil((resumeAt - Date.now()) / 1e3))}s)`;
 				};
 				async function runScan(mode) {
+					if (isApplying || scanStarting || scanState === "scanning" || modal.signal.aborted) return;
+					scanStarting = true;
+					const modeButtons = Array.from(bodyEl.querySelectorAll("[data-act=\"scan-fast\"], [data-act=\"scan-full\"]"));
+					const backBtn = bodyEl.querySelector("[data-act=\"back-idle\"]");
+					for (const btn of modeButtons) btn.disabled = true;
+					if (backBtn) backBtn.disabled = true;
+					primaryActionBtn.disabled = true;
 					activeScanAbort?.abort();
 					const scanAbort = new AbortController();
 					activeScanAbort = scanAbort;
 					const signal = scanAbort.signal;
-					const userId = await resolveUserId();
-					if (signal.aborted) return;
+					const restorePreScanButtons = () => {
+						for (const btn of modeButtons) btn.disabled = false;
+						if (backBtn) backBtn.disabled = scanState === "scanning";
+						updateButtons();
+					};
+					let userId = null;
+					try {
+						userId = await resolveUserId(modal.signal);
+					} catch (err) {
+						scanStarting = false;
+						if (signal.aborted || modal.signal.aborted || isAbortError(err)) return;
+						ctx.log.error("Failed to resolve AniList user:", err);
+						if (activeScanAbort === scanAbort) activeScanAbort = null;
+						restorePreScanButtons();
+						ctx.toast.error("Date backfill scan failed.");
+						return;
+					}
+					scanStarting = false;
+					if (signal.aborted || modal.signal.aborted) {
+						if (!modal.signal.aborted) {
+							if (activeScanAbort === scanAbort) activeScanAbort = null;
+							restorePreScanButtons();
+						}
+						return;
+					}
 					if (!userId) {
+						if (activeScanAbort === scanAbort) activeScanAbort = null;
+						restorePreScanButtons();
 						ctx.toast.error("Please log in to AniList first.");
 						return;
 					}
@@ -6224,7 +7690,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					try {
 						for (const type of mediaTypes) {
 							setStatusIndicator("active", `Loading ${type.toLowerCase()} list...${formatRateLimitHint()}`);
-							const listRes = await ctx.api.getMediaList(userId, type);
+							const listRes = await ctx.api.getMediaList(userId, type, { signal });
 							if (signal.aborted) return;
 							for (const raw of listRes.allEntries) {
 								if (raw.status === "PLANNING") continue;
@@ -6265,7 +7731,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 								if (!cand || resolvedIds.has(mid)) continue;
 								const st = act.status.trim().toLowerCase();
 								if (effectiveOrder === "ASC") {
-									if (!isDateEmpty(cand.completedAt) && compareFuzzyDates(fuzzyDateFromTimestamp(act.createdAt), cand.completedAt) > 0) {
+									if (!isDateEmpty(cand.completedAt) && compareFuzzyDatesCompatible(fuzzyDateFromTimestamp(act.createdAt), cand.completedAt) > 0) {
 										resolvedIds.add(mid);
 										noEarlierLogsIds.add(mid);
 										if (!foundStart.has(mid) && !foundFinish.has(mid)) ruledOutReasons.set(mid, "Passed completion date without earlier log");
@@ -6330,7 +7796,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 										types: activityTypes,
 										mediaIds: activeIds,
 										sort: [querySort === "DESC" ? "ID_DESC" : "ID"]
-									});
+									}, { signal });
 									if (signal.aborted) return;
 									ingestActivities(pageData.Page.activities, querySort);
 									refreshSnapshotAndRender();
@@ -6363,7 +7829,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 									page,
 									types: activityTypes,
 									sort: [sortDir]
-								});
+								}, { signal });
 								if (signal.aborted) return;
 								ingestActivities(pageData.Page.activities, order);
 								refreshSnapshotAndRender();
@@ -6386,7 +7852,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						refreshSnapshotAndRender();
 						setStatusIndicator("done", `${modeLabel(mode)} complete: ${proposals.length} found, ${unresolved.length} without matching logs.`);
 					} catch (err) {
-						if (err?.name === "AbortError") return;
+						if (signal.aborted || modal.signal.aborted || isAbortError(err)) return;
 						ctx.log.error("Scan failed:", err);
 						setScanState("done");
 						setProgress(0, "idle");
@@ -6426,7 +7892,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					let foundSectionHtml = "";
 					if (filteredProposals.length > 0) {
 						const allSelected = proposals.every((p) => p.selected);
-						const confirmedOnlyBtn = hasAssumed ? `<button type="button" class="ala-dbf-btn secondary mini" data-act="select-confirmed" title="Select only entries backed by activity logs">Confirmed Only</button>` : "";
+						const confirmedOnlyBtn = hasAssumed ? `<button type="button" class="ala-dbf-btn secondary mini" data-act="select-confirmed" title="Select only entries backed by activity logs" ${isApplying ? "disabled" : ""}>Confirmed Only</button>` : "";
 						const rows = filteredProposals.map((p) => {
 							const assumed = isAssumedProposal(p);
 							const mediaUrl = `/${p.entry.mediaType.toLowerCase()}/${p.entry.mediaId}`;
@@ -6437,7 +7903,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
                       <span class="ala-dbf-arrow">→</span>
                       <span class="ala-dbf-new-date ${assumed ? "assumed" : ""}">${formatFuzzyDate(p.newStartedAt)}</span>
                     </div>
-                    <div class="ala-dbf-source ${assumed ? "assumed" : ""}">${escapeHtml(p.startSource ?? "")}</div>
+                    <div class="ala-dbf-source ${assumed ? "assumed" : ""}">${esc(p.startSource ?? "")}</div>
                   </div>` : `<span class="ala-dbf-old-date">${formatFuzzyDate(p.entry.startedAt)}</span>`;
 							const finishCell = p.newCompletedAt ? `<div class="ala-dbf-date-diff">
                     <span class="ala-dbf-old-date">${formatFuzzyDate(p.entry.completedAt)}</span>
@@ -6446,9 +7912,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
                   </div>` : `<span class="ala-dbf-old-date">${formatFuzzyDate(p.entry.completedAt)}</span>`;
 							return `
                 <tr class="${p.selected ? "is-selected" : "is-unselected"}">
-                  <td class="ala-dbf-check-cell"><input type="checkbox" data-media-id="${p.entry.mediaId}" ${p.selected ? "checked" : ""} /></td>
+                  <td class="ala-dbf-check-cell"><input type="checkbox" data-media-id="${p.entry.mediaId}" ${p.selected ? "checked" : ""} ${isApplying ? "disabled" : ""} /></td>
                   <td class="ala-dbf-title-cell">
-                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(p.entry.title)}</a>
+                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${esc(p.entry.title)}</a>
                     <span class="${typeClass}">${p.entry.mediaType}</span>
                   </td>
                   <td data-label="Start">${startCell}</td>
@@ -6462,7 +7928,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
                 <span>Found Entries (${filteredProposals.length}${query ? ` of ${proposals.length}` : ""})</span>
                 <div class="ala-dbf-actions">
                   ${confirmedOnlyBtn}
-                  <button type="button" class="ala-dbf-btn secondary mini" data-act="toggle-all">
+                  <button type="button" class="ala-dbf-btn secondary mini" data-act="toggle-all" ${isApplying ? "disabled" : ""}>
                     ${allSelected ? "Unselect All" : "Select All"}
                   </button>
                 </div>
@@ -6496,15 +7962,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						const uRows = filteredUnresolved.map((u) => {
 							const mediaUrl = `/${u.entry.mediaType.toLowerCase()}/${u.entry.mediaId}`;
 							const typeClass = u.entry.mediaType === "MANGA" ? "ala-dbf-type-badge manga" : "ala-dbf-type-badge";
-							const statusNote = u.ruledOutReason ? escapeHtml(u.ruledOutReason) : isSearching ? "Still scanning..." : "No matching activity in history";
+							const statusNote = u.ruledOutReason ? esc(u.ruledOutReason) : isSearching ? "Still scanning..." : "No matching activity in history";
 							return `
                 <tr>
                   <td class="ala-dbf-unresolved-title">
-                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.entry.title)}</a>
+                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${esc(u.entry.title)}</a>
                     <span class="${typeClass}">${u.entry.mediaType}</span>
                   </td>
-                  <td class="ala-dbf-unresolved-meta" data-label="Status"><span class="ala-dbf-pill">${escapeHtml(u.entry.status)}</span></td>
-                  <td class="ala-dbf-unresolved-meta" data-label="Missing">${escapeHtml(u.missingLabel)}</td>
+                  <td class="ala-dbf-unresolved-meta" data-label="Status"><span class="ala-dbf-pill">${esc(u.entry.status)}</span></td>
+                  <td class="ala-dbf-unresolved-meta" data-label="Missing">${esc(u.missingLabel)}</td>
                   <td class="ala-dbf-unresolved-meta" data-label="Scan" style="color:rgb(var(--color-text-lighter));font-size:1.15rem;">${statusNote}</td>
                 </tr>
               `;
@@ -6538,15 +8004,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					bodyEl.scrollTop = prevScroll;
 				}
 				async function runApply() {
+					if (isApplying || modal.signal.aborted) return;
 					const chosen = proposals.filter((p) => p.selected);
 					if (chosen.length === 0) return;
+					isApplying = true;
 					const previousState = scanState;
-					primaryActionBtn.disabled = true;
-					applyBtn.disabled = true;
-					const backBtn = bodyEl.querySelector("[data-act=\"back-idle\"]");
-					if (backBtn) backBtn.disabled = true;
+					updateButtons();
 					const delayMs = ctx.get("dateBackfillDelayMs");
-					const signal = modalAbort.signal;
+					const signal = modal.signal;
 					let saved = 0;
 					try {
 						for (const item of chosen) {
@@ -6556,40 +8021,41 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							const vars = { id: item.entry.entryId };
 							if (item.newStartedAt) vars.startedAt = item.newStartedAt;
 							if (item.newCompletedAt) vars.completedAt = item.newCompletedAt;
-							await ctx.api.query(SAVE_ENTRY_MUTATION, vars);
+							await ctx.api.query(SAVE_ENTRY_MUTATION, vars, { signal });
+							if (signal.aborted) return;
 							candidates.delete(item.entry.mediaId);
 							activitiesByMedia.delete(item.entry.mediaId);
 							noEarlierLogsIds.delete(item.entry.mediaId);
 							selectionState.delete(item.entry.mediaId);
 							saved += 1;
 							appliedCount += 1;
-							if (saved < chosen.length) await sleepInterruptible(delayMs, signal);
+							if (saved < chosen.length) {
+								await sleepInterruptible(delayMs, signal);
+								if (signal.aborted) return;
+							}
 						}
+						if (signal.aborted) return;
 						setProgress(100, "applying");
 						refreshSnapshotAndRender();
 						if (previousState === "paused") setStatusIndicator("paused", `Applied ${saved} updates (scan still paused — click Resume Scan to continue).`);
 						else setStatusIndicator("done", `Done! Updated ${saved} entries.`);
 						ctx.toast.success(`Updated dates on ${saved} AniList entries.`);
 					} catch (err) {
-						if (err?.name === "AbortError") return;
+						if (signal.aborted || isAbortError(err)) return;
 						ctx.log.error("Update failed:", err);
 						setProgress(0, "idle");
 						refreshSnapshotAndRender();
 						setStatusIndicator("idle", `Stopped after ${saved}/${chosen.length}: ${err?.message ?? String(err)}`);
 						ctx.toast.error("Failed while saving updates.");
 					} finally {
-						setScanState(previousState);
-						const refreshedBackBtn = bodyEl.querySelector("[data-act=\"back-idle\"]");
-						if (refreshedBackBtn) refreshedBackBtn.disabled = previousState === "scanning";
+						isApplying = false;
+						if (!signal.aborted) setScanState(previousState);
 					}
 				}
 			}
 			ctx.menuCommand("Backfill Missing Media Dates", () => openModal());
 		}
 	});
-	function escapeHtml(str) {
-		return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-	}
 	var CFG = {
 		lazyMedia: false,
 		rowSkipping: false,
@@ -6654,6 +8120,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	var epoch = 0;
 	var pausedUntil = 0;
 	var freshFloor = 0;
+	var lastAuth = "";
 	function setBytes(val) {
 		bytes = val;
 	}
@@ -6666,9 +8133,23 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	function setFreshFloor(val) {
 		freshFloor = val;
 	}
+	function setLastAuth(val) {
+		lastAuth = val;
+	}
+	function clearLastAuth() {
+		lastAuth = "";
+	}
 	var rpcCache = new Map();
 	var rpcInflight = new Map();
 	var rpcEpoch = 0;
+	var rpcClearListeners = new Set();
+	function onRpcClear(fn) {
+		rpcClearListeners.add(fn);
+	}
+	var cacheClearListeners = new Set();
+	function onCacheClear(fn) {
+		cacheClearListeners.add(fn);
+	}
 	var clearAll = () => {
 		epoch++;
 		store.clear();
@@ -6680,11 +8161,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		freshFloor = Date.now();
 		rpcCache.clear();
 		rpcInflight.clear();
+		for (const fn of rpcClearListeners) attempt(fn);
 	};
 	var clearGlobalCache = () => {
 		clearAll();
 		clearRpc();
+		for (const fn of cacheClearListeners) attempt(fn);
 	};
+	function resetRuntimeState() {
+		clearGlobalCache();
+		userMap.clear();
+		idToUserMap.clear();
+		pausedUntil = 0;
+		freshFloor = 0;
+		lastAuth = "";
+	}
 	function rememberUser(name, id) {
 		if (!name || !id || typeof id !== "number") return;
 		const normName = String(name).trim().toLowerCase();
@@ -6752,7 +8243,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		win.__ALFL_USER_MAP__ = userMap;
 		win.__ALFL_ID_MAP__ = idToUserMap;
 	}
+	function unregisterGlobalBridges() {
+		if (win.__ALFL_STATS__ === stats) delete win.__ALFL_STATS__;
+		if (win.__ALFL_CLEAR__ === clearGlobalCache) delete win.__ALFL_CLEAR__;
+		if (win.__ALFL_GQL_STORE__ === store) delete win.__ALFL_GQL_STORE__;
+		if (win.__ALFL_RPC_CACHE__ === rpcCache) delete win.__ALFL_RPC_CACHE__;
+		if (win.__ALFL_RPC_INFLIGHT__ === rpcInflight) delete win.__ALFL_RPC_INFLIGHT__;
+		if (win.__ALFL_USER_MAP__ === userMap) delete win.__ALFL_USER_MAP__;
+		if (win.__ALFL_ID_MAP__ === idToUserMap) delete win.__ALFL_ID_MAP__;
+	}
+	var patchedCreateFns = new WeakSet();
 	function installLazyMedia() {
+		const restores = [];
 		const lazify = (el) => {
 			if (!el || el.nodeType !== 1) return;
 			switch (el.localName) {
@@ -6766,10 +8268,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				case "video": if (!el.hasAttribute("preload")) el.preload = "metadata";
 			}
 		};
+		const seenTargets = new Set();
 		const patchCreate = (target) => {
-			if (!target) return;
+			if (!target || seenTargets.has(target)) return;
+			seenTargets.add(target);
 			const orig = target.createElement;
-			if (typeof orig !== "function") return;
+			if (typeof orig !== "function" || patchedCreateFns.has(orig)) return;
+			const hadOwn = Object.prototype.hasOwnProperty.call(target, "createElement");
+			const origDesc = hadOwn ? Object.getOwnPropertyDescriptor(target, "createElement") : void 0;
 			const patched = function(tag, options) {
 				const el = orig.call(this, tag, options);
 				try {
@@ -6777,8 +8283,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				} catch {}
 				return el;
 			};
+			patchedCreateFns.add(patched);
+			let installed = false;
 			try {
 				target.createElement = patched;
+				installed = target.createElement === patched;
 			} catch {
 				try {
 					Object.defineProperty(target, "createElement", {
@@ -6786,8 +8295,31 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						writable: true,
 						configurable: true
 					});
+					installed = target.createElement === patched;
 				} catch {}
 			}
+			if (installed) restores.push(() => {
+				if (target.createElement !== patched) return;
+				if (!hadOwn) try {
+					delete target.createElement;
+					return;
+				} catch {}
+				if (origDesc) try {
+					Object.defineProperty(target, "createElement", origDesc);
+					return;
+				} catch {}
+				try {
+					target.createElement = orig;
+				} catch {
+					try {
+						Object.defineProperty(target, "createElement", {
+							value: orig,
+							writable: true,
+							configurable: true
+						});
+					} catch {}
+				}
+			});
 		};
 		patchCreate(win.Document?.prototype);
 		patchCreate(win.HTMLDocument?.prototype);
@@ -6805,17 +8337,22 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		attempt(() => {
 			const desc = Object.getOwnPropertyDescriptor(ElementProto, "innerHTML");
 			if (!desc || !desc.set || !desc.configurable) return;
+			const patchedSet = function(value) {
+				desc.set.call(this, value);
+				if (typeof value === "string" && MEDIA_TAG.test(value)) attempt(() => lazifyTree(this instanceof win.HTMLTemplateElement ? this.content : this));
+			};
 			Object.defineProperty(ElementProto, "innerHTML", {
 				...desc,
-				set(value) {
-					desc.set.call(this, value);
-					if (typeof value === "string" && MEDIA_TAG.test(value)) attempt(() => lazifyTree(this instanceof win.HTMLTemplateElement ? this.content : this));
-				}
+				set: patchedSet
+			});
+			restores.push(() => {
+				if (Object.getOwnPropertyDescriptor(ElementProto, "innerHTML")?.set === patchedSet) Object.defineProperty(ElementProto, "innerHTML", desc);
 			});
 		});
 		attempt(() => {
 			const native = ElementProto.insertAdjacentHTML;
-			ElementProto.insertAdjacentHTML = function(position, html) {
+			if (typeof native !== "function") return;
+			const patchedInsert = function(position, html) {
 				const r = native.call(this, position, html);
 				if (typeof html === "string" && MEDIA_TAG.test(html)) {
 					const outer = /^(?:beforebegin|afterend)$/i.test(position);
@@ -6823,7 +8360,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				}
 				return r;
 			};
+			ElementProto.insertAdjacentHTML = patchedInsert;
+			restores.push(() => {
+				if (ElementProto.insertAdjacentHTML === patchedInsert) ElementProto.insertAdjacentHTML = native;
+			});
 		});
+		return () => {
+			for (let i = restores.length - 1; i >= 0; i--) attempt(restores[i]);
+		};
 	}
 	var ROW_GROUPS = [
 		{
@@ -6845,15 +8389,23 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				const sheet = new win.CSSStyleSheet();
 				sheet.replaceSync(text);
 				doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, sheet];
-				return;
+				return () => {
+					attempt(() => {
+						doc.adoptedStyleSheets = (doc.adoptedStyleSheets || []).filter((s) => s !== sheet);
+					});
+				};
 			}
 		} catch {}
 		const style = doc.createElement("style");
 		style.textContent = text;
 		(doc.head || doc.documentElement).appendChild(style);
+		return () => {
+			attempt(() => style.remove());
+		};
 	}
-	function installRowSkipping() {
-		injectCSS(`@supports (content-visibility: auto) and (contain-intrinsic-height: auto 1px) { ${ROW_GROUPS.map(({ selector, h }, i) => `
+	function installRowSkipping(deps) {
+		let disposed = false;
+		const cssText = `@supports (content-visibility: auto) and (contain-intrinsic-height: auto 1px) { ${ROW_GROUPS.map(({ selector, h }, i) => `
         ${selector} {
             content-visibility: auto;
             contain-intrinsic-height: auto var(--alfast-h${i}, ${h}px);
@@ -6862,10 +8414,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
         ${selector}:hover,
         ${selector}:focus-within {
             content-visibility: visible;
-        }`).join("\n")} }`);
+        }`).join("\n")} }`;
+		const removeStyle = deps?.addStyle ? deps.addStyle(cssText) : injectCSS(cssText);
+		const addListener = deps?.listen ?? ((t, type, fn, opts) => {
+			t.addEventListener(type, fn, opts);
+			return () => t.removeEventListener(type, fn, opts);
+		});
 		const measuredFor = ROW_GROUPS.map(() => "");
 		let timers = [];
+		let resizeTimer = 0;
 		function measure() {
+			if (disposed) return;
 			const path = win.location.pathname;
 			const vh = win.innerHeight || doc.documentElement.clientHeight;
 			ROW_GROUPS.forEach(({ selector }, i) => {
@@ -6893,33 +8452,54 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		function schedule() {
 			timers.forEach(clearTimeout);
+			timers = [];
+			if (disposed) return;
 			timers = [
 				500,
 				1800,
 				4500
 			].map((ms) => setTimeout(() => idle(win, () => {
-				if (!doc.hidden) measure();
+				if (!disposed && !doc.hidden) measure();
 			}), ms));
 		}
 		onNav(schedule);
+		const listenerCleanups = [];
 		if (doc.readyState !== "loading") schedule();
-		else doc.addEventListener("DOMContentLoaded", schedule, { once: true });
-		win.addEventListener("load", schedule, { once: true });
-		let resizeTimer = 0;
+		else listenerCleanups.push(addListener(doc, "DOMContentLoaded", schedule, { once: true }));
+		listenerCleanups.push(addListener(win, "load", schedule, { once: true }));
 		const onResize = () => {
 			clearTimeout(resizeTimer);
+			if (disposed) return;
 			resizeTimer = setTimeout(() => {
+				resizeTimer = 0;
+				if (disposed) return;
 				measuredFor.fill("");
 				schedule();
 			}, 200);
 		};
-		win.addEventListener("resize", onResize, { passive: true });
-		win.addEventListener("orientationchange", onResize, { passive: true });
+		listenerCleanups.push(addListener(win, "resize", onResize, { passive: true }));
+		listenerCleanups.push(addListener(win, "orientationchange", onResize, { passive: true }));
+		return () => {
+			disposed = true;
+			timers.forEach(clearTimeout);
+			timers = [];
+			clearTimeout(resizeTimer);
+			resizeTimer = 0;
+			const navIdx = navListeners.indexOf(schedule);
+			if (navIdx >= 0) navListeners.splice(navIdx, 1);
+			for (const unsub of listenerCleanups) attempt(unsub);
+			attempt(removeStyle);
+			attempt(() => {
+				for (let i = 0; i < ROW_GROUPS.length; i++) doc.documentElement?.style?.removeProperty(`--alfast-h${i}`);
+			});
+		};
 	}
 	function installObserverCoalescing() {
 		const Native = win.MutationObserver;
-		if (typeof Native !== "function") return;
+		if (typeof Native !== "function") return () => {};
+		let disposed = false;
 		const states = new WeakMap();
+		const activeTimers = new Set();
 		const ignoresRecords = (fn) => {
 			if (typeof fn !== "function" || fn.length !== 0) return false;
 			try {
@@ -6933,11 +8513,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		};
 		const isPageRoot = (t) => t === doc || t === doc.documentElement || t === doc.body;
 		function schedule(st) {
-			if (st.timer) return;
+			if (disposed || st.timer) return;
 			const wait = Math.max(0, st.last + CFG.observerBatchMs - performance.now());
-			st.timer = setTimeout(() => {
+			const handle = setTimeout(() => {
+				activeTimers.delete(handle);
 				st.timer = 0;
-				if (!st.queue.length) return;
+				if (disposed || !st.queue.length) return;
 				const records = st.queue.splice(0);
 				stats.observerBatches++;
 				stats.observerRecordsMerged += records.length;
@@ -6950,6 +8531,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				}
 				st.last = performance.now();
 			}, wait);
+			st.timer = handle;
+			activeTimers.add(handle);
 		}
 		class CoalescedMutationObserver extends Native {
 			constructor(callback) {
@@ -6963,7 +8546,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					self: null
 				};
 				super(typeof callback === "function" ? (records) => {
-					if (!st.on) return callback.call(st.self, records, st.self);
+					if (disposed || !st.on) return callback.call(st.self, records, st.self);
 					for (const r of records) st.queue.push(r);
 					schedule(st);
 				} : callback);
@@ -6972,12 +8555,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			observe(target, options) {
 				const st = states.get(this);
-				if (st && st.eligible && options && options.subtree && isPageRoot(target)) st.on = true;
+				if (st && !disposed && st.eligible && options && options.subtree && isPageRoot(target)) st.on = true;
 				return super.observe(target, options);
 			}
 			disconnect() {
 				const st = states.get(this);
 				if (st) {
+					if (st.timer) {
+						clearTimeout(st.timer);
+						activeTimers.delete(st.timer);
+						st.timer = 0;
+					}
 					st.queue.length = 0;
 					st.on = false;
 				}
@@ -6998,17 +8586,309 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		} catch {
 			win.MutationObserver = CoalescedMutationObserver;
 		}
+		return () => {
+			disposed = true;
+			for (const t of activeTimers) clearTimeout(t);
+			activeTimers.clear();
+			if (win.MutationObserver === CoalescedMutationObserver) try {
+				Object.defineProperty(win, "MutationObserver", {
+					value: Native,
+					writable: true,
+					configurable: true
+				});
+			} catch {
+				win.MutationObserver = Native;
+			}
+		};
 	}
-	var isTaxonomyQuery = (parsed) => /\bGenreCollection\b|\bMediaTagCollection\b/i.test(String(parsed?.query || ""));
-	var isMediaListQuery = (parsed) => /\bMediaListCollection\b/i.test(String(parsed?.query || ""));
-	var isViewerQuery = (parsed) => /\bViewer\b/i.test(String(parsed?.query || ""));
-	var isUserQuery = (parsed) => /\bUser\s*\(/i.test(String(parsed?.query || "")) && !isVolatile(parsed);
-	var isMutation = (parsed) => /\bmutation\b/i.test(String(parsed?.query || "").replace(/#[^\n\r]*/g, " "));
-	var isVolatile = (parsed) => /\b(?:notifications|activities|Activity|Notification)\s*\(/.test(String(parsed?.query || "").replace(/#[^\n\r]*/g, " "));
+	var UNFILTERED_MLC_KEYS = new Set([
+		"type",
+		"userId",
+		"userName"
+	]);
+	var GQL_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+	var GQL_TOKEN_RE = /#[^\n\r]*|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\.\.\.|[{}():@$\[\]]|-?\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_]*/g;
+	function decodeGqlString(tok) {
+		if (tok.startsWith("\"\"\"") && tok.endsWith("\"\"\"") && tok.length >= 6) return tok.slice(3, -3);
+		if (tok.startsWith("\"") && tok.endsWith("\"") && tok.length >= 2) try {
+			const parsed = JSON.parse(tok);
+			return typeof parsed === "string" ? parsed : null;
+		} catch {
+			return tok.slice(1, -1);
+		}
+		return null;
+	}
+	function stripGqlCommentsAndStrings(q) {
+		if (typeof q !== "string") return "";
+		return q.replace(/"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|#[^\n\r]*/g, " ");
+	}
+	function scanGqlRoot(q) {
+		const fields = new Set();
+		const mlcArgs = new Map();
+		let rootFieldCount = 0;
+		let hasMutation = false;
+		let mlcArgsOk = true;
+		let hasRootFragment = false;
+		let hasAliasedMlc = false;
+		if (typeof q !== "string" || !q) return {
+			fields,
+			rootFieldCount,
+			hasMutation,
+			mlcArgsOk,
+			mlcArgs,
+			hasRootFragment,
+			hasAliasedMlc
+		};
+		const rawTokens = q.match(GQL_TOKEN_RE);
+		const tokens = rawTokens ? rawTokens.filter((t) => t[0] !== "#") : null;
+		if (!tokens || tokens.length === 0) return {
+			fields,
+			rootFieldCount,
+			hasMutation,
+			mlcArgsOk,
+			mlcArgs,
+			hasRootFragment,
+			hasAliasedMlc
+		};
+		let braceDepth = 0;
+		let parenDepth = 0;
+		let blockKind = "none";
+		let nextHeader = null;
+		let inMlcArgs = false;
+		let mlcCount = 0;
+		for (let i = 0; i < tokens.length; i++) {
+			const tok = tokens[i];
+			if (tok === "{") {
+				if (braceDepth === 0 && parenDepth === 0) {
+					blockKind = nextHeader === "other" ? "other" : "query";
+					nextHeader = null;
+				}
+				braceDepth++;
+				continue;
+			}
+			if (tok === "}") {
+				if (braceDepth > 0) braceDepth--;
+				if (braceDepth === 0) blockKind = "none";
+				continue;
+			}
+			if (tok === "(") {
+				if (blockKind === "query" && braceDepth === 1 && parenDepth === 0 && tokens[i - 1] === "MediaListCollection") inMlcArgs = true;
+				parenDepth++;
+				continue;
+			}
+			if (tok === ")") {
+				if (parenDepth > 0) parenDepth--;
+				if (parenDepth === 0) inMlcArgs = false;
+				continue;
+			}
+			if (braceDepth === 0 && parenDepth === 0) {
+				if (tok === "mutation") {
+					hasMutation = true;
+					nextHeader = "other";
+				} else if (tok === "subscription" || tok === "fragment") nextHeader = "other";
+				else if (tok === "query") nextHeader = "query";
+				continue;
+			}
+			if (inMlcArgs && parenDepth === 1) {
+				if (!GQL_IDENT_RE.test(tok) || tokens[i + 1] !== ":") {
+					mlcArgsOk = false;
+					continue;
+				}
+				if (!UNFILTERED_MLC_KEYS.has(tok) || mlcArgs.has(tok)) {
+					mlcArgsOk = false;
+					i += 1;
+					continue;
+				}
+				const valIdx = i + 2;
+				const valTok = tokens[valIdx];
+				if (valTok === "$") {
+					const varName = tokens[valIdx + 1];
+					if (varName && GQL_IDENT_RE.test(varName)) {
+						mlcArgs.set(tok, {
+							kind: "var",
+							name: varName
+						});
+						i = valIdx + 1;
+					} else mlcArgsOk = false;
+				} else if (tok === "type" && valTok && /^(?:ANIME|MANGA)$/.test(valTok)) {
+					mlcArgs.set("type", {
+						kind: "literal",
+						value: valTok
+					});
+					i = valIdx;
+				} else if (tok === "userId" && valTok && /^\d+$/.test(valTok)) {
+					const num = Number(valTok);
+					if (Number.isSafeInteger(num) && num > 0) {
+						mlcArgs.set("userId", {
+							kind: "literal",
+							value: num
+						});
+						i = valIdx;
+					} else mlcArgsOk = false;
+				} else if (tok === "userName" && valTok && valTok[0] === "\"") {
+					const str = decodeGqlString(valTok);
+					if (typeof str === "string" && str.trim().length > 0) {
+						mlcArgs.set("userName", {
+							kind: "literal",
+							value: str
+						});
+						i = valIdx;
+					} else mlcArgsOk = false;
+				} else mlcArgsOk = false;
+				continue;
+			}
+			if (blockKind === "query" && braceDepth === 1 && parenDepth === 0) {
+				if (tok === "...") {
+					hasRootFragment = true;
+					continue;
+				}
+				if (tok === "@") {
+					if (fields.has("MediaListCollection")) mlcArgsOk = false;
+					continue;
+				}
+				if (!GQL_IDENT_RE.test(tok)) continue;
+				const prev = tokens[i - 1];
+				const next = tokens[i + 1];
+				if (prev === "..." || prev === "@" || next === ":") continue;
+				if (tok === "MediaListCollection") {
+					mlcCount++;
+					if (prev === ":" || mlcCount > 1) hasAliasedMlc = true;
+				}
+				rootFieldCount++;
+				fields.add(tok);
+			}
+		}
+		return {
+			fields,
+			rootFieldCount,
+			hasMutation,
+			mlcArgsOk,
+			mlcArgs,
+			hasRootFragment,
+			hasAliasedMlc
+		};
+	}
+	function getTaxonomyKind(parsed) {
+		const { fields } = scanGqlRoot(String(parsed?.query || ""));
+		const hasGenre = fields.has("GenreCollection");
+		const hasTag = fields.has("MediaTagCollection");
+		if (hasGenre && hasTag && fields.size === 2) return "both";
+		if (hasGenre && !hasTag && fields.size === 1) return "genres";
+		if (!hasGenre && hasTag && fields.size === 1) return "tags";
+		return null;
+	}
+	var isTaxonomyQuery = (parsed) => getTaxonomyKind(parsed) !== null;
+	var isMediaListQuery = (parsed) => scanGqlRoot(String(parsed?.query || "")).fields.has("MediaListCollection");
+	function resolveMediaListQuery(parsed) {
+		const scan = scanGqlRoot(String(parsed?.query || ""));
+		const rawVars = parsed?.variables && typeof parsed.variables === "object" && !Array.isArray(parsed.variables) ? parsed.variables : {};
+		let hasInlineLiterals = false;
+		for (const ref of scan.mlcArgs.values()) if (ref.kind === "literal") {
+			hasInlineLiterals = true;
+			break;
+		}
+		let canonical = scan.fields.size === 1 && scan.fields.has("MediaListCollection") && scan.rootFieldCount === 1 && !scan.hasMutation && !scan.hasRootFragment && !scan.hasAliasedMlc && scan.mlcArgsOk;
+		if (!canonical) return {
+			canonical: false,
+			vars: normalizeVariables(rawVars),
+			hasInlineLiterals
+		};
+		const boundVarNames = new Set();
+		for (const ref of scan.mlcArgs.values()) if (ref.kind === "var") boundVarNames.add(ref.name);
+		for (const k of Object.keys(rawVars)) {
+			if (rawVars[k] === void 0 || rawVars[k] === null) continue;
+			if (!boundVarNames.has(k) && !UNFILTERED_MLC_KEYS.has(k)) {
+				canonical = false;
+				break;
+			}
+		}
+		const effectiveVars = {};
+		if (canonical) {
+			const typeArg = scan.mlcArgs.get("type");
+			if (typeArg?.kind === "literal") {
+				const lit = String(typeArg.value).toUpperCase();
+				if (rawVars.type !== void 0 && rawVars.type !== null && String(rawVars.type).toUpperCase() !== lit) canonical = false;
+				else effectiveVars.type = lit;
+			} else if (typeArg?.kind === "var") {
+				const v = rawVars[typeArg.name];
+				if (v !== void 0 && v !== null) {
+					if (typeof v !== "string" || !/^(?:ANIME|MANGA)$/i.test(v.trim())) canonical = false;
+					else {
+						const norm = v.trim().toUpperCase();
+						if (typeArg.name !== "type" && rawVars.type !== void 0 && rawVars.type !== null && String(rawVars.type).toUpperCase() !== norm) canonical = false;
+						else effectiveVars.type = norm;
+					}
+				}
+			} else if (rawVars.type !== void 0 && rawVars.type !== null && String(rawVars.type).toUpperCase() !== "ANIME") canonical = false;
+		}
+		if (canonical) {
+			const idArg = scan.mlcArgs.get("userId");
+			if (idArg?.kind === "literal") {
+				const lit = Number(idArg.value);
+				if (rawVars.userId !== void 0 && rawVars.userId !== null && Number(rawVars.userId) !== lit) canonical = false;
+				else effectiveVars.userId = lit;
+			} else if (idArg?.kind === "var") {
+				const v = rawVars[idArg.name];
+				if (v !== void 0 && v !== null) {
+					const num = typeof v === "number" ? v : typeof v === "string" && /^\d+$/.test(v.trim()) ? Number(v.trim()) : NaN;
+					if (!Number.isSafeInteger(num) || num <= 0) canonical = false;
+					else if (idArg.name !== "userId" && rawVars.userId !== void 0 && rawVars.userId !== null && Number(rawVars.userId) !== num) canonical = false;
+					else effectiveVars.userId = num;
+				}
+			} else if (rawVars.userId !== void 0 && rawVars.userId !== null) canonical = false;
+		}
+		if (canonical) {
+			const nameArg = scan.mlcArgs.get("userName");
+			if (nameArg?.kind === "literal") {
+				const lit = String(nameArg.value).trim();
+				if (rawVars.userName !== void 0 && rawVars.userName !== null && String(rawVars.userName).trim().toLowerCase() !== lit.toLowerCase()) canonical = false;
+				else effectiveVars.userName = lit;
+			} else if (nameArg?.kind === "var") {
+				const v = rawVars[nameArg.name];
+				if (v !== void 0 && v !== null) {
+					if (typeof v !== "string" || !v.trim()) canonical = false;
+					else if (nameArg.name !== "userName" && rawVars.userName !== void 0 && rawVars.userName !== null && String(rawVars.userName).trim().toLowerCase() !== v.trim().toLowerCase()) canonical = false;
+					else effectiveVars.userName = v.trim();
+				}
+			} else if (rawVars.userName !== void 0 && rawVars.userName !== null) canonical = false;
+		}
+		if (canonical && effectiveVars.userId && effectiveVars.userName) {
+			const mappedId = userMap.get(String(effectiveVars.userName).toLowerCase());
+			if (mappedId && mappedId !== effectiveVars.userId) canonical = false;
+			else if (scan.mlcArgs.get("userId")?.kind === "literal" && scan.mlcArgs.get("userName")?.kind === "literal" && mappedId !== effectiveVars.userId) canonical = false;
+		}
+		return {
+			canonical,
+			vars: normalizeVariables(canonical ? effectiveVars : rawVars),
+			hasInlineLiterals
+		};
+	}
+	function isUnfilteredMediaListQuery(parsed) {
+		return resolveMediaListQuery(parsed).canonical;
+	}
+	var isViewerQuery = (parsed) => scanGqlRoot(String(parsed?.query || "")).fields.has("Viewer");
+	var isUserQuery = (parsed) => scanGqlRoot(String(parsed?.query || "")).fields.has("User") && !isVolatile(parsed);
+	var isMutation = (parsed) => scanGqlRoot(String(parsed?.query || "")).hasMutation;
+	var isVolatile = (parsed) => /\b(?:notifications|activities|Activity|Notification)\s*\(/.test(stripGqlCommentsAndStrings(String(parsed?.query || "")));
 	var noStore = (d) => d.cache === "no-store" || d.cache === "reload" || !!d.headers.get("cache-control")?.toLowerCase().includes("no-store");
 	function normalizeGqlQuery(q) {
 		if (typeof q !== "string") return "";
-		return q.replace(/#[^\n\r]*/g, "").replace(/\s+/g, " ").replace(/\s*([{}():,])\s*/g, "$1").trim();
+		return q.replace(/"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|#[^\n\r]*/g, (m) => m[0] === "#" ? "" : m).replace(/\s+/g, " ").replace(/\s*([{}():,])\s*/g, "$1").trim();
+	}
+	function hashString(input) {
+		let h1 = 2166136261;
+		let h2 = 2166136261;
+		for (let i = 0; i < input.length; i++) {
+			const c = input.charCodeAt(i);
+			h1 ^= c;
+			h1 = Math.imul(h1, 16777619);
+			h2 ^= c + (i & 255);
+			h2 = Math.imul(h2, 16777619);
+		}
+		return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
+	}
+	function hashGqlQuery(q) {
+		return hashString(normalizeGqlQuery(q));
 	}
 	function stableStringify(obj) {
 		if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
@@ -7040,16 +8920,59 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			return null;
 		}
 	}
+	function buildQueryCacheKey(prefix, endpoint, query, variables, authHeader) {
+		const queryStr = typeof query === "string" ? query : String(query || "");
+		const q = {
+			query: queryStr,
+			variables
+		};
+		if (isMediaListQuery(q)) {
+			const { canonical, vars } = resolveMediaListQuery(q);
+			const { type = "ANIME", userId, userName, ...rest } = vars;
+			let resolvedId = userId;
+			if (!resolvedId && userName) resolvedId = userMap.get(String(userName).toLowerCase());
+			const who = resolvedId || (userName ? String(userName).toLowerCase() : getViewerFromWindow().id || "me");
+			const suffix = canonical ? stableStringify(rest) : `${stableStringify(rest)}:${hashGqlQuery(queryStr)}`;
+			return `${prefix}:MediaListCollection:${String(type).toUpperCase()}:${who}:${suffix}`;
+		}
+		const taxKind = getTaxonomyKind(q);
+		if (taxKind) {
+			const normVars = stableStringify(normalizeVariables(variables));
+			return `${prefix}:Taxonomy:${taxKind}:${hashGqlQuery(queryStr)}:${normVars}`;
+		}
+		const auth = String(authHeader || "");
+		if (isViewerQuery(q)) {
+			const authId = auth ? hashString(auth) : "anon";
+			const normVars = stableStringify(normalizeVariables(variables));
+			return `${prefix}:Viewer:${authId}:${hashGqlQuery(queryStr)}:${normVars}`;
+		}
+		const normQuery = normalizeGqlQuery(queryStr);
+		const normVars = stableStringify(normalizeVariables(variables));
+		return `${String(endpoint ?? "")}\u0001${auth ? hashString(auth) : ""}\u0001${normQuery}\u0001${normVars}`;
+	}
+	function isRpcBlocked(query, variables) {
+		const queryStr = typeof query === "string" ? query : query == null ? "" : String(query);
+		if (coreHooks?.isRpcBlocked(queryStr, variables)) return true;
+		const blocker = win.__ALFL_RPC_BLOCK__;
+		if (typeof blocker === "function") try {
+			return Boolean(blocker(queryStr, variables));
+		} catch {
+			return false;
+		}
+		return false;
+	}
 	var workerPending = new WeakMap();
 	var watched = new WeakSet();
 	var workerUrl = null;
 	var workerOpts;
 	var WorkerCtor = null;
-	var lastAuth = "";
-	function clearLastAuth() {
-		lastAuth = "";
-	}
+	var workerDisposed = false;
+	var activeYielded = null;
+	var activePrefetchCleanups = new Set();
+	var isWorkerInactive = (yielded) => workerDisposed || Boolean(yielded?.()) || Boolean(activeYielded?.());
 	var RPC_MAX_ENTRIES = 32;
+	var PREFETCH_COOLDOWN_MS = 6e4;
+	var PREFETCH_KEYS_MAX = 200;
 	var clone = (v) => {
 		try {
 			return (win.structuredClone || structuredClone)(v);
@@ -7061,23 +8984,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	var isRpcFetch = (d) => !!d && d.type === "RPC" && d.method === "fetch" && Array.isArray(d.params) && typeof d.params[1] === "string";
 	var rpcKey = (params) => {
 		const [endpoint, query, variables, headers] = params;
-		const q = {
-			query,
-			variables
-		};
-		if (isMediaListQuery(q)) {
-			const { type = "ANIME", userId, userName, ...rest } = normalizeVariables(variables);
-			let resolvedId = userId;
-			if (!resolvedId && userName) resolvedId = userMap.get(String(userName).toLowerCase());
-			const who = resolvedId || (userName ? String(userName).toLowerCase() : "me");
-			return `rpc:MediaListCollection:${String(type).toUpperCase()}:${who}:${stableStringify(rest)}`;
-		}
-		if (isTaxonomyQuery(q)) return "rpc:Taxonomy";
-		if (isViewerQuery(q)) return "rpc:Viewer";
-		const normQuery = normalizeGqlQuery(query);
-		const normVars = stableStringify(normalizeVariables(variables));
-		return `${endpoint}\u0001${String(headers?.Authorization ?? headers?.authorization ?? "").slice(-16)}\u0001${normQuery}\u0001${normVars}`;
+		return buildQueryCacheKey("rpc", endpoint, query, variables, String(headers?.Authorization ?? headers?.authorization ?? ""));
 	};
+	function hasMediaListNextChunk(res) {
+		if (!res || typeof res !== "object") return false;
+		return res.hasNextChunk === true || res.MediaListCollection?.hasNextChunk === true || res.data?.MediaListCollection?.hasNextChunk === true;
+	}
 	function extractUsersFromRpcResult(res) {
 		if (!res || typeof res !== "object") return;
 		attempt(() => {
@@ -7100,6 +9012,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		});
 	}
 	var onIn = function(ev) {
+		if (isWorkerInactive()) return;
 		const d = ev.data;
 		if (!d || d.type !== "RPC") return;
 		const id = String(d.id);
@@ -7120,11 +9033,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				operationName: p.operationName,
 				status: d.error == null ? 200 : 500,
 				ok: d.error == null,
-				data: d.result?.data ?? d.result
+				data: d.result?.data ?? d.result,
+				errors: d.error != null ? [{ message: String(d.error) }] : Array.isArray(d.result?.errors) ? d.result.errors : void 0
 			});
 			return clearGlobalCache();
 		}
 		if (p.key && d.error == null && p.epoch === rpcEpoch) attempt(() => {
+			const hasNextChunk = hasMediaListNextChunk(d.result);
+			const unfilteredMlcMatch = p.key?.match(/^rpc:MediaListCollection:([A-Z]+):([^:]+):\{\}$/i);
+			if (unfilteredMlcMatch && hasNextChunk) return;
 			const cached = {
 				time: Date.now(),
 				msg: clone(d)
@@ -7134,19 +9051,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const uid = mlcUser?.id ? Number(mlcUser.id) : void 0;
 			const uname = mlcUser?.name ? String(mlcUser.name) : void 0;
 			if (uid && uname) rememberUser(uname, uid);
-			const m = p.key?.match(/^rpc:MediaListCollection:([A-Z]+):([^:]+):/i);
-			if (m) {
-				const type = m[1];
-				const target = m[2];
+			if (unfilteredMlcMatch && !hasNextChunk) {
+				const type = unfilteredMlcMatch[1];
+				const target = unfilteredMlcMatch[2];
 				const isNumeric = /^\d+$/.test(target);
 				const resolvedUserId = isNumeric ? Number(target) : uid || userMap.get(target.toLowerCase());
 				moreKeys = getMediaListKeys(type, resolvedUserId, !isNumeric ? target : uname || (resolvedUserId ? idToUserMap.get(resolvedUserId) : void 0));
 			}
-			const keysToSet = [
+			const keysToSet = [...new Set([
 				p.key,
 				...p.extraKeys || [],
 				...moreKeys
-			];
+			])];
 			for (const k of keysToSet) {
 				rpcCache.delete(k);
 				rpcCache.set(k, cached);
@@ -7171,7 +9087,28 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return [...keys];
 	};
 	var prefetchedWorkerKeys = new Map();
-	function prefetchWorkerList(type, userId, userName) {
+	onRpcClear(() => prefetchedWorkerKeys.clear());
+	function recordPrefetchedWorkerKeys(keys, now) {
+		if (prefetchedWorkerKeys.size >= PREFETCH_KEYS_MAX) {
+			for (const [k, t] of prefetchedWorkerKeys) if (now - t >= PREFETCH_COOLDOWN_MS) prefetchedWorkerKeys.delete(k);
+			while (prefetchedWorkerKeys.size >= PREFETCH_KEYS_MAX) {
+				const oldest = prefetchedWorkerKeys.keys().next().value;
+				if (oldest === void 0) break;
+				prefetchedWorkerKeys.delete(oldest);
+			}
+		}
+		for (const k of keys) {
+			prefetchedWorkerKeys.delete(k);
+			prefetchedWorkerKeys.set(k, now);
+		}
+		while (prefetchedWorkerKeys.size > PREFETCH_KEYS_MAX) {
+			const oldest = prefetchedWorkerKeys.keys().next().value;
+			if (oldest === void 0) break;
+			prefetchedWorkerKeys.delete(oldest);
+		}
+	}
+	function prefetchWorkerList(type, userId, userName, yielded) {
+		if (isWorkerInactive(yielded) || coreHooks?.isPrefetchSuppressed()) return;
 		const url = findWorkerUrl();
 		if (!url || !WorkerCtor) {
 			fastLoadRpcLog?.debug("Prefetch skipped: worker script unknown");
@@ -7184,7 +9121,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (raw) try {
 			tpl = typeof raw === "string" ? JSON.parse(raw) : raw;
 		} catch {}
-		if (!tpl) {
+		if (!tpl || typeof tpl.query !== "string" || !isUnfilteredMediaListQuery({
+			query: tpl.query,
+			variables: tpl.vars
+		})) {
 			fastLoadRpcLog?.debug("Prefetch skipped: no list template yet");
 			return;
 		}
@@ -7219,14 +9159,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const key = rpcKey(params);
 		const now = Date.now();
 		const possibleKeys = getMediaListKeys(type, userId, userName);
+		if (rpcInflight.has(key)) return;
 		for (const k of possibleKeys) {
 			const hit = rpcCache.get(k);
 			if (hit && hit.time >= freshFloor && now - hit.time < 3e5) return;
 			if (rpcInflight.has(k)) return;
 		}
-		if (now - (prefetchedWorkerKeys.get(key) || 0) < 6e4) return;
-		prefetchedWorkerKeys.set(key, now);
-		for (const k of possibleKeys) prefetchedWorkerKeys.set(k, now);
+		if (now - (prefetchedWorkerKeys.get(key) || 0) < PREFETCH_COOLDOWN_MS) return;
+		recordPrefetchedWorkerKeys([key, ...possibleKeys], now);
 		let w;
 		try {
 			w = new WorkerCtor(url, workerOpts);
@@ -7247,131 +9187,149 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			resolve: resolver,
 			reject: rejecter
 		};
+		const allFlightKeys = [...new Set([key, ...possibleKeys])];
 		rpcInflight.set(key, flight);
 		for (const k of possibleKeys) if (!rpcInflight.has(k)) rpcInflight.set(k, flight);
-		const finish = () => {
-			clearTimeout(timer);
-			for (const k of [key, ...possibleKeys]) {
-				const f = rpcInflight.get(k);
-				if (f) {
-					f.reject(new Error("finished"));
-					rpcInflight.delete(k);
-				}
-			}
+		const clearOwnInflight = () => {
+			for (const k of allFlightKeys) if (rpcInflight.get(k) === flight) rpcInflight.delete(k);
+		};
+		let finished = false;
+		let timer;
+		const finish = (reason = "finished") => {
+			if (finished) return;
+			finished = true;
+			activePrefetchCleanups.delete(finish);
+			if (timer !== void 0) clearTimeout(timer);
+			clearOwnInflight();
+			flight.reject(new Error(reason));
 			attempt(() => w.terminate());
 		};
-		const timer = setTimeout(() => {
+		timer = setTimeout(() => {
 			fastLoadRpcLog?.debug("Prefetch timed out", type);
-			finish();
+			finish("finished");
 		}, 3e4);
+		activePrefetchCleanups.add(finish);
 		const startEpoch = rpcEpoch;
 		w.addEventListener("message", (ev) => {
 			const d = ev.data;
 			if (!d || d.type !== "RPC" || String(d.id) !== id) return;
-			if (startEpoch !== rpcEpoch) {
-				flight.reject(new Error("stale"));
-				clearTimeout(timer);
-				attempt(() => w.terminate());
+			if (startEpoch !== rpcEpoch || isWorkerInactive(yielded)) {
+				finish("stale");
 				return;
 			}
+			if (finished) return;
+			finished = true;
+			activePrefetchCleanups.delete(finish);
+			if (timer !== void 0) clearTimeout(timer);
 			if (d.error == null) {
-				attempt(() => {
-					extractUsersFromRpcResult(d.result);
-					const mlcUser = d.result?.MediaListCollection?.user || d.result?.data?.MediaListCollection?.user;
-					const extractedUserId = mlcUser?.id ? Number(mlcUser.id) : 0;
-					const resolvedUserId = userId || extractedUserId || (userName ? userMap.get(userName.toLowerCase()) : 0) || 0;
-					if (userName && resolvedUserId) rememberUser(userName, resolvedUserId);
-					const resolvedUserName = userName || (resolvedUserId ? idToUserMap.get(resolvedUserId) : void 0);
-					const cached = {
-						time: Date.now(),
-						msg: clone(d)
-					};
-					const allKeys = [...new Set([
-						key,
-						...possibleKeys,
-						...getMediaListKeys(type, resolvedUserId, resolvedUserName)
-					])];
-					for (const k of allKeys) {
-						rpcCache.delete(k);
-						rpcCache.set(k, cached);
-					}
-					while (rpcCache.size > RPC_MAX_ENTRIES) rpcCache.delete(rpcCache.keys().next().value);
-				});
-				fastLoadRpcLog?.debug("Prefetch cached", type, Object.keys(d));
-				for (const k of [key, ...possibleKeys]) {
-					const f = rpcInflight.get(k);
-					if (f) {
-						f.resolve(d);
-						rpcInflight.delete(k);
-					}
+				if (!hasMediaListNextChunk(d.result)) {
+					attempt(() => {
+						extractUsersFromRpcResult(d.result);
+						const mlcUser = d.result?.MediaListCollection?.user || d.result?.data?.MediaListCollection?.user;
+						const extractedUserId = mlcUser?.id ? Number(mlcUser.id) : 0;
+						const resolvedUserId = userId || extractedUserId || (userName ? userMap.get(userName.toLowerCase()) : 0) || 0;
+						if (userName && resolvedUserId) rememberUser(userName, resolvedUserId);
+						const resolvedUserName = userName || (resolvedUserId ? idToUserMap.get(resolvedUserId) : void 0);
+						const cached = {
+							time: Date.now(),
+							msg: clone(d)
+						};
+						const allKeys = [...new Set([
+							key,
+							...possibleKeys,
+							...getMediaListKeys(type, resolvedUserId, resolvedUserName)
+						])];
+						for (const k of allKeys) {
+							rpcCache.delete(k);
+							rpcCache.set(k, cached);
+						}
+						while (rpcCache.size > RPC_MAX_ENTRIES) rpcCache.delete(rpcCache.keys().next().value);
+					});
+					fastLoadRpcLog?.debug("Prefetch cached", type, Object.keys(d));
 				}
+				clearOwnInflight();
+				flight.resolve(d);
 			} else {
 				fastLoadRpcLog?.debug("Prefetch failed", d.error);
-				for (const k of [key, ...possibleKeys]) {
-					const f = rpcInflight.get(k);
-					if (f) {
-						f.reject(d.error);
-						rpcInflight.delete(k);
-					}
-				}
+				clearOwnInflight();
+				flight.reject(d.error);
 			}
-			clearTimeout(timer);
 			attempt(() => w.terminate());
 		});
 		w.addEventListener("error", (e) => {
 			fastLoadRpcLog?.debug("Prefetch worker error", e?.message);
-			attempt(() => {
-				coreStorage?.del("workerUrl");
-			});
-			workerUrl = null;
-			finish();
+			if (!isWorkerInactive(yielded) && startEpoch === rpcEpoch) {
+				attempt(() => {
+					coreStorage?.del("workerUrl");
+				});
+				workerUrl = null;
+			}
+			finish("error");
 		});
 		fastLoadRpcLog?.debug("Prefetch dispatching", type, vars);
-		w.postMessage({
-			type: "RPC",
-			id,
-			method: "fetch",
-			params
-		});
+		try {
+			w.postMessage({
+				type: "RPC",
+				id,
+				method: "fetch",
+				params
+			});
+		} catch {
+			finish("post-error");
+		}
 	}
 	function hookWorker(yielded) {
+		workerDisposed = false;
+		activeYielded = yielded;
+		let hookDisposed = false;
+		const isInactive = () => hookDisposed || workerDisposed || yielded();
+		let pageWin = null;
+		let origCtor = null;
+		let ProxiedWorker = null;
+		let hookedProto = null;
+		let origPost = null;
+		let wrappedPost = null;
 		attempt(() => {
-			const pageWin = win;
-			const origCtor = pageWin.Worker;
+			pageWin = win;
+			origCtor = pageWin.Worker;
 			WorkerCtor = origCtor;
 			if (origCtor && !origCtor.__alfl_ctor_hooked) try {
-				const ProxiedWorker = function(scriptURL, options) {
+				ProxiedWorker = function(scriptURL, options) {
 					const instance = Reflect.construct(origCtor, [scriptURL, options], new.target || ProxiedWorker);
-					const urlStr = String(scriptURL || "");
-					if (urlStr.includes("worker.js") && !urlStr.includes("cloudflare")) {
-						attempt(() => {
-							workerUrl = new URL(urlStr, win.location.href).href;
-							coreStorage?.set("workerUrl", workerUrl);
-						});
-						workerOpts = options;
-						fastLoadRpcLog?.debug("Page worker created:", urlStr);
-					}
-					if (!watched.has(instance)) {
-						watched.add(instance);
-						instance.addEventListener("message", onIn);
+					if (!isInactive()) {
+						const urlStr = String(scriptURL || "");
+						if (urlStr.includes("worker.js") && !urlStr.includes("cloudflare")) {
+							attempt(() => {
+								workerUrl = new URL(urlStr, win.location.href).href;
+								coreStorage?.set("workerUrl", workerUrl);
+							});
+							workerOpts = options;
+							fastLoadRpcLog?.debug("Page worker created:", urlStr);
+						}
+						if (!watched.has(instance)) {
+							watched.add(instance);
+							instance.addEventListener("message", onIn);
+						}
 					}
 					return instance;
 				};
 				ProxiedWorker.prototype = origCtor.prototype;
 				ProxiedWorker.__alfl_ctor_hooked = true;
 				pageWin.Worker = ProxiedWorker;
-			} catch {}
+			} catch {
+				ProxiedWorker = null;
+			}
 			const W = pageWin.Worker;
 			if (!W?.prototype || W.prototype.__alfl_hooked) return;
-			W.prototype.__alfl_hooked = true;
-			const origPost = W.prototype.postMessage;
-			W.prototype.postMessage = function(data, ...rest) {
+			hookedProto = W.prototype;
+			hookedProto.__alfl_hooked = true;
+			origPost = hookedProto.postMessage;
+			wrappedPost = function(data, ...rest) {
 				try {
-					if (!yielded() && isRpcFetch(data)) {
+					if (!isInactive() && isRpcFetch(data)) {
 						const id = String(data.id || "");
 						if (id.startsWith("alfl_prefetch_")) return origPost.apply(this, [data, ...rest]);
-						const blocker = win.__ALFL_RPC_BLOCK__;
-						if (coreHooks?.isRpcBlocked(String(data.params[1]), data.params[2]) || typeof blocker === "function" && blocker(String(data.params[1]), data.params[2])) {
+						if (isRpcBlocked(String(data.params[1]), data.params[2])) {
 							fastLoadRpcLog?.debug("Blocked request:", JSON.stringify(data.params[2]).slice(0, 60));
 							const targetId = data.params[2]?.id || data.params[2]?.userId;
 							const pageId = data.params[4]?.page?.id || (targetId ? `listComparison-${targetId}` : "listComparison");
@@ -7400,6 +9358,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 								} }
 							};
 							setTimeout(() => {
+								if (isInactive()) return;
 								try {
 									this.dispatchEvent(new MessageEvent("message", { data: {
 										type: "RPC",
@@ -7426,14 +9385,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						const h = data.params[3] || {};
 						const a = h.Authorization ?? h.authorization;
 						if (a && /^Bearer\s+/i.test(String(a)) && !coreHooks?.isSessionClearing()) {
-							lastAuth = String(a);
+							setLastAuth(String(a));
 							coreHooks?.setAuthHeader(lastAuth);
 						}
 						const q = {
 							query: data.params[1],
 							variables: data.params[2]
 						};
-						if (isMediaListQuery(q)) attempt(() => {
+						const mlcInfo = resolveMediaListQuery(q);
+						const unfilteredMediaList = mlcInfo.canonical;
+						if (unfilteredMediaList && !mlcInfo.hasInlineLiterals) attempt(() => {
 							const headers = { ...h };
 							delete headers.Authorization;
 							delete headers.authorization;
@@ -7479,11 +9440,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							let hit = null;
 							let flying = null;
 							let extraKeys;
-							if (isMediaListQuery(q)) {
-								let { type = "ANIME", userId, userName } = normalizeVariables(q.variables);
+							if (unfilteredMediaList) {
+								let { type = "ANIME", userId, userName } = mlcInfo.vars;
 								if (!userName && userId) userName = idToUserMap.get(userId);
 								if (!userId && userName) userId = userMap.get(userName.toLowerCase());
-								extraKeys = [key, ...getMediaListKeys(type || "ANIME", userId, userName)];
+								extraKeys = [...new Set([key, ...getMediaListKeys(type || "ANIME", userId, userName)])];
 								for (const k of extraKeys) {
 									if (!hit) {
 										const h = rpcCache.get(k);
@@ -7495,7 +9456,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 									}
 								}
 							} else {
-								const rpcTtl = isViewerQuery(q) || isTaxonomyQuery(q) ? 3e5 : isUserQuery(q) ? 6e4 : 15e3;
+								const rpcTtl = isMediaListQuery(q) || isViewerQuery(q) || isTaxonomyQuery(q) ? 3e5 : isUserQuery(q) ? 6e4 : 15e3;
 								const h = rpcCache.get(key);
 								if (h && h.time >= freshFloor && Date.now() - h.time < rpcTtl) hit = h;
 								flying = rpcInflight.get(key);
@@ -7509,7 +9470,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 									id: data.id
 								};
 								const MessageEventCtor = win.MessageEvent || MessageEvent;
-								setTimeout(() => worker.dispatchEvent(new MessageEventCtor("message", { data: reply })), 0);
+								let dispatched = false;
+								setTimeout(() => {
+									if (dispatched) return;
+									dispatched = true;
+									if (isInactive()) {
+										origPost.apply(worker, [data, ...rest]);
+										return;
+									}
+									worker.dispatchEvent(new MessageEventCtor("message", { data: reply }));
+								}, 0);
 								return;
 							}
 							if (flying) {
@@ -7517,16 +9487,35 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 								fastLoadRpcLog?.debug("Attached to in-flight prefetch:", label);
 								const worker = this;
 								const replyId = data.id;
+								let dispatched = false;
+								const forwardOriginal = () => {
+									if (dispatched) return;
+									dispatched = true;
+									origPost.apply(worker, [data, ...rest]);
+								};
 								flying.promise.then((msg) => {
+									if (dispatched) return;
+									if (isInactive()) {
+										forwardOriginal();
+										return;
+									}
 									fastLoadRpcLog?.debug("In-flight prefetch delivered to page:", label);
 									const reply = {
 										...clone(msg),
 										id: replyId
 									};
 									const MessageEventCtor = win.MessageEvent || MessageEvent;
-									setTimeout(() => worker.dispatchEvent(new MessageEventCtor("message", { data: reply })), 0);
+									setTimeout(() => {
+										if (dispatched) return;
+										if (isInactive()) {
+											forwardOriginal();
+											return;
+										}
+										dispatched = true;
+										worker.dispatchEvent(new MessageEventCtor("message", { data: reply }));
+									}, 0);
 								}, () => {
-									origPost.apply(worker, [data, ...rest]);
+									forwardOriginal();
 								});
 								return;
 							}
@@ -7547,7 +9536,25 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				} catch {}
 				return origPost.apply(this, [data, ...rest]);
 			};
+			hookedProto.postMessage = wrappedPost;
 		});
+		return () => {
+			hookDisposed = true;
+			workerDisposed = true;
+			for (const cleanup of [...activePrefetchCleanups]) attempt(cleanup);
+			activePrefetchCleanups.clear();
+			prefetchedWorkerKeys.clear();
+			if (activeYielded === yielded) activeYielded = null;
+			if (ProxiedWorker) {
+				if (pageWin && pageWin.Worker === ProxiedWorker) pageWin.Worker = origCtor;
+				delete ProxiedWorker.__alfl_ctor_hooked;
+			}
+			if (hookedProto) {
+				if (hookedProto.postMessage === wrappedPost) hookedProto.postMessage = origPost;
+				if (hookedProto.__alfl_hooked) delete hookedProto.__alfl_hooked;
+			}
+			if (WorkerCtor === origCtor) WorkerCtor = null;
+		};
 	}
 	var isGraphQL = (u) => {
 		try {
@@ -7567,8 +9574,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (live) {
 			for (const [k, v] of live.headers.entries()) if (RATE_HEADERS.test(k)) headers.set(k, v);
 		}
-		return new ResponseCtor(snap.buf, {
-			status: snap.status || 200,
+		const status = snap.status || 200;
+		return new ResponseCtor(status === 204 || status === 304 ? null : snap.buf, {
+			status,
 			statusText: snap.statusText || "OK",
 			headers
 		});
@@ -7618,50 +9626,45 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		evict();
 	}
 	var decoder = new TextDecoder();
-	var ERROR_SCAN_BYTES = 2048;
 	function hasGraphQLErrors(buf) {
 		try {
-			const view = new Uint8Array(buf);
-			const head = decoder.decode(view.subarray(0, ERROR_SCAN_BYTES));
-			return /^\s*\{\s*"errors"\s*:/.test(head);
+			const json = JSON.parse(decoder.decode(buf));
+			if (!json || typeof json !== "object") return true;
+			return Array.isArray(json.errors) && json.errors.length > 0;
 		} catch {
-			return false;
+			return true;
 		}
 	}
 	function makeKey(d, parsed) {
-		if (isMediaListQuery(parsed)) {
-			const { type = "ANIME", userId, userName, ...rest } = normalizeVariables(parsed?.variables);
-			const who = userId || (userName ? String(userName).toLowerCase() : getViewerFromWindow().id || "me");
-			return `gql:MediaListCollection:${String(type).toUpperCase()}:${who}:${stableStringify(rest)}`;
-		}
-		if (isTaxonomyQuery(parsed)) return "gql:Taxonomy";
-		if (isViewerQuery(parsed)) return "gql:Viewer";
-		const normQuery = normalizeGqlQuery(parsed?.query || "");
-		const normVars = stableStringify(normalizeVariables(parsed?.variables));
-		const auth = d.headers?.get?.("authorization") ? "a" : "";
-		return `${d.url}\u0001${auth}\u0001${normQuery}\u0001${normVars}`;
+		const authHeader = String(d.headers?.get?.("authorization") || "");
+		return buildQueryCacheKey("gql", d.url, parsed?.query || "", parsed?.variables, authHeader);
 	}
-	var TAXONOMY_STORAGE_KEY = "taxonomy:v1";
 	var TAXONOMY_TTL = 864e5;
+	function getTaxonomyStorageKey(parsed) {
+		const taxKind = getTaxonomyKind(parsed);
+		if (!taxKind) return null;
+		if (stableStringify(normalizeVariables(parsed?.variables)) !== "{}") return null;
+		return `taxonomy:v2:${taxKind}:${hashGqlQuery(parsed?.query || "")}`;
+	}
 	function getQueryTtl(parsed) {
 		if (isTaxonomyQuery(parsed)) return TAXONOMY_TTL;
 		if (isMediaListQuery(parsed)) return 3e5;
 		if (isViewerQuery(parsed)) return 3e5;
 		return CFG.gqlTtl;
 	}
-	function loadStoredTaxonomy() {
+	function loadStoredTaxonomy(storageKey) {
 		try {
-			const raw = coreStorage?.get(TAXONOMY_STORAGE_KEY, null);
+			const raw = coreStorage?.get(storageKey, null);
 			if (!raw) return null;
 			const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
 			if (parsed && typeof parsed.time === "number" && typeof parsed.text === "string") return parsed;
 		} catch {}
 		return null;
 	}
-	function persistStoredTaxonomy(snap) {
+	function persistStoredTaxonomy(storageKey, snap) {
 		attempt(() => {
 			const text = decoder.decode(snap.buf);
-			coreStorage?.set(TAXONOMY_STORAGE_KEY, {
+			coreStorage?.set(storageKey, {
 				time: Date.now(),
 				text,
 				status: snap.status,
@@ -7716,8 +9719,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const { desc, parsed } = job;
 		if (init?.signal?.aborted) return nativeFetch(input, init);
 		if (!(alflMode === true || alflMode === "replay" || alflMode === "internal")) attempt(() => rememberQuery(desc, parsed));
-		const blocker = win.__ALFL_RPC_BLOCK__;
-		if (coreHooks?.isRpcBlocked(parsed?.query, parsed?.variables) || typeof blocker === "function" && blocker(parsed?.query, parsed?.variables)) {
+		if (isRpcBlocked(parsed?.query, parsed?.variables)) {
 			fastLoadLog?.debug("Blocked GQL fetch:", JSON.stringify(parsed?.variables));
 			const dummy = { data: { Page: {
 				pageInfo: {
@@ -7745,11 +9747,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		const now = Date.now();
 		const cached = store.get(key);
-		if (isTaxonomyQuery(parsed)) {
-			const storedTax = loadStoredTaxonomy();
+		const taxStorageKey = getTaxonomyStorageKey(parsed);
+		if (taxStorageKey) {
+			const storedTax = loadStoredTaxonomy(taxStorageKey);
 			if (storedTax && now - storedTax.time < TAXONOMY_TTL) {
 				stats.cacheHits++;
-				fastLoadLog?.debug("Cache HIT (24h storage): GenreCollection & MediaTagCollection");
+				fastLoadLog?.debug("Cache HIT (24h storage):", getTaxonomyKind(parsed));
 				const HeadersCtor = win.Headers || Headers;
 				const ResponseCtor = win.Response || Response;
 				return Promise.resolve(new ResponseCtor(storedTax.text, {
@@ -7768,7 +9771,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (flying) {
 			stats.deduped++;
 			fastLoadLog?.debug("Attached to in-flight request:", isMediaListQuery(parsed) ? "MediaListCollection" : "GraphQL query");
-			return abortable(flying.then((snap) => toResponse(snap), () => nativeFetch(input, init)), init?.signal);
+			return abortable(flying.then((result) => {
+				if (result) return toResponse(result.snap);
+				if (init?.signal?.aborted) throw init.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+				if (Date.now() < pausedUntil) throw new Error("FastLoad paused due to rate limit");
+				return nativeFetch(input, init);
+			}, (err) => {
+				if (init?.signal?.aborted) throw init.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+				if (Date.now() < pausedUntil) throw err;
+				return nativeFetch(input, init);
+			}), init?.signal);
 		}
 		const myEpoch = epoch;
 		const stale = cached && now - cached.time < CFG.gqlStaleTtl ? cached.snap : null;
@@ -7777,25 +9789,29 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const original = trackedNativeFetch(nativeFetch, job, input, init);
 		const snapshot = original.then(async (res) => {
 			note429(res);
-			if (res.status !== 200 || res.bodyUsed || typeof res.clone !== "function") {
+			if (res.bodyUsed || typeof res.clone !== "function") {
 				fastLoadLog?.debug("Response not cacheable:", res.status, opName);
-				throw new Error("not cacheable");
+				return null;
 			}
 			const buf = await res.clone().arrayBuffer();
-			if (hasGraphQLErrors(buf)) {
-				fastLoadLog?.debug("Response had GraphQL errors:", opName);
-				throw new Error("graphql errors");
-			}
+			const hasErrors = res.status === 200 ? hasGraphQLErrors(buf) : false;
+			const cacheable = res.status === 200 && !hasErrors;
+			if (!cacheable) fastLoadLog?.debug(res.status !== 200 ? "Response not cacheable:" : "Response had GraphQL errors:", res.status, opName);
 			return {
-				buf,
-				status: res.status,
-				statusText: res.statusText,
-				headers: [...res.headers.entries()].filter(([k]) => !SKIP_HEADERS.test(k) && !RATE_HEADERS.test(k))
+				snap: {
+					buf,
+					status: res.status,
+					statusText: res.statusText,
+					headers: [...res.headers.entries()].filter(([k]) => !SKIP_HEADERS.test(k) && (!cacheable || !RATE_HEADERS.test(k)))
+				},
+				cacheable
 			};
 		});
 		inflight.set(key, snapshot);
-		snapshot.then((snap) => {
+		snapshot.then((result) => {
 			if (inflight.get(key) === snapshot) inflight.delete(key);
+			if (!result || !result.cacheable) return;
+			const { snap } = result;
 			if (epoch === myEpoch) {
 				put(key, snap);
 				fastLoadLog?.debug("Cached in RAM:", opName, `${Math.round(snap.buf.byteLength / 1024)} KB`);
@@ -7803,7 +9819,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			attempt(() => {
 				if (isViewerQuery(parsed)) extractUsersFromRpcResult(JSON.parse(decoder.decode(snap.buf))?.data);
 			});
-			if (isTaxonomyQuery(parsed) && snap.status === 200) persistStoredTaxonomy(snap);
+			if (taxStorageKey && snap.status === 200) persistStoredTaxonomy(taxStorageKey, snap);
 		}, () => {
 			if (inflight.get(key) === snapshot) inflight.delete(key);
 		});
@@ -7837,8 +9853,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const p = nativeFetch(input, init);
 		if (subscribeActive && query) p.then(async (res) => {
 			let data = void 0;
+			let errors = void 0;
 			if (res && !res.bodyUsed && typeof res.clone === "function") try {
-				data = (await res.clone().json())?.data;
+				const json = await res.clone().json();
+				data = json?.data;
+				errors = Array.isArray(json?.errors) ? json.errors : void 0;
 			} catch {}
 			coreHooks?.emitGqlFetch({
 				phase: "response",
@@ -7848,7 +9867,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				operationName,
 				status: res.status,
 				ok: res.ok,
-				data
+				data,
+				errors
 			});
 		}, () => {});
 		return p;
@@ -7887,14 +9907,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	var sameId = (a, b) => a === b || typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 	var isIdKey = (key) => /^(?:id|name|userName|username|userId)$|Id$/.test(key);
 	var STATIC_ROUTE = /^\/(?:home|search\/(?:anime|manga))\/?$/;
+	function safeDecodeURIComponent(raw) {
+		try {
+			return decodeURIComponent(raw);
+		} catch {
+			return raw;
+		}
+	}
 	function parseRoute(path, search = "") {
-		const parts = path.split("/").filter(Boolean).map((x) => {
-			try {
-				return decodeURIComponent(x);
-			} catch {
-				return x;
-			}
-		});
+		const parts = path.split("/").filter(Boolean).map(safeDecodeURIComponent);
 		if ([
 			"anime",
 			"manga",
@@ -7960,10 +9981,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	var learned = new Map();
 	var ROUTES_KEY = "routes:v4";
 	var ROUTES_TTL = 2592e6;
-	var persistTimer = 0;
-	var persistRoutes = () => {
-		clearTimeout(persistTimer);
-		persistTimer = setTimeout(() => attempt(() => {
+	var routesDisposed = false;
+	var routeTimers = null;
+	var persistDebounced = null;
+	var autoPrefetchCancel = null;
+	var dwellCancel = null;
+	var pendingAutoPrefetchCancels = new Set();
+	function writeLearnedRoutes() {
+		if (routesDisposed) return;
+		attempt(() => {
 			const out = {};
 			for (const [shape, v] of [...learned].slice(-40)) out[shape] = {
 				t: v.t,
@@ -7972,7 +9998,45 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				reqs: v.reqs
 			};
 			coreStorage?.set(ROUTES_KEY, out);
-		}), 1e3);
+		});
+	}
+	function clearPendingAutoPrefetchTimers() {
+		for (const cancel of pendingAutoPrefetchCancels) cancel();
+		pendingAutoPrefetchCancels.clear();
+	}
+	function initRoutes(timers) {
+		routesDisposed = false;
+		if (timers) {
+			persistDebounced?.cancel();
+			routeTimers = timers;
+			persistDebounced = timers.debounce(writeLearnedRoutes, 1e3);
+		}
+	}
+	function cleanupRoutes(disposeTimers = false) {
+		routesDisposed = true;
+		persistDebounced?.cancel();
+		autoPrefetchCancel?.();
+		autoPrefetchCancel = null;
+		dwellCancel?.();
+		dwellCancel = null;
+		clearPendingAutoPrefetchTimers();
+		if (disposeTimers) {
+			routeTimers = null;
+			persistDebounced = null;
+			learned.clear();
+			prefetched.clear();
+			stamps.length = 0;
+			learning = {
+				key: "",
+				started: 0,
+				route: null,
+				reqs: []
+			};
+		}
+	}
+	var persistRoutes = () => {
+		if (routesDisposed) return;
+		persistDebounced?.();
 	};
 	function loadRoutes() {
 		attempt(() => {
@@ -8081,7 +10145,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	var stamps = [];
 	function replayRoute(known, route, yielded) {
-		if (yielded()) return 0;
+		if (routesDisposed || yielded()) return 0;
 		let sent = 0;
 		for (const request of known.reqs) {
 			let parsed;
@@ -8119,16 +10183,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	var triggerEarlyStart = (yielded) => {
 		attempt(() => {
-			if (navigator.connection?.saveData) return;
+			if (routesDisposed || navigator.connection?.saveData) return;
 			const route = here();
 			const known = route && learned.get(route.shape);
 			if (known) stats.earlyStarts += replayRoute(known, route, yielded);
 		});
 	};
 	var prefetched = new Map();
-	var dwellTimer = 0;
+	onCacheClear(() => prefetched.clear());
 	function prefetchFor(anchor, yielded) {
-		if (yielded() || coreHooks?.isPrefetchSuppressed()) return;
+		if (routesDisposed || yielded() || coreHooks?.isPrefetchSuppressed()) return;
 		const now = Date.now();
 		if (doc.hidden || now < pausedUntil || navigator.connection?.saveData) return;
 		let url;
@@ -8140,11 +10204,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (url.origin !== win.location.origin) return;
 		const listMatch = url.pathname.match(/^\/(?:user\/([^/]+)\/)?(animelist|mangalist)/i);
 		if (listMatch) {
-			const targetUser = listMatch[1] || getLocalUsername();
+			const targetUser = (listMatch[1] ? safeDecodeURIComponent(listMatch[1]) : "") || getLocalUsername();
 			const listType = listMatch[2].toLowerCase() === "mangalist" ? "MANGA" : "ANIME";
 			const myId = coreSession?.peek().userId || 0;
 			const userId = targetUser ? userMap.get(targetUser.toLowerCase()) || (targetUser.toLowerCase() === getLocalUsername()?.toLowerCase() ? myId : 0) : 0;
-			if (userId || targetUser) prefetchWorkerList(listType, userId, targetUser || void 0);
+			if (userId || targetUser) prefetchWorkerList(listType, userId, targetUser || void 0, yielded);
 			return;
 		}
 		const route = parseRoute(url.pathname, url.search);
@@ -8166,6 +10230,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		while (stamps.length && now - stamps[0] > 6e4) stamps.shift();
 		if (prefetched.size > 200) {
 			for (const [k, t] of prefetched) if (now - t > cooldown) prefetched.delete(k);
+			while (prefetched.size > 200) {
+				const oldest = prefetched.keys().next().value;
+				if (oldest === void 0) break;
+				prefetched.delete(oldest);
+			}
 		}
 		if (stamps.length + known.reqs.length > CFG.prefetchMaxPerMin) return;
 		const sent = replayRoute(known, route, yielded);
@@ -8175,19 +10244,29 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			fastLoadLog?.debug("Prefetch sent for:", route.shape, route.id);
 		}
 	}
-	var autoPrefetchTimer = 0;
+	function canRunAutoPrefetch(yielded) {
+		if (routesDisposed || !CFG.prefetch || yielded() || coreHooks?.isPrefetchSuppressed()) return false;
+		const now = Date.now();
+		if (doc.hidden || now < pausedUntil || navigator.connection?.saveData) return false;
+		if (win.location.pathname.toLowerCase().includes("/compare")) return false;
+		return true;
+	}
 	function scheduleAutoPrefetch(yielded, delay = 600) {
-		clearTimeout(autoPrefetchTimer);
-		autoPrefetchTimer = setTimeout(() => {
+		autoPrefetchCancel?.();
+		autoPrefetchCancel = null;
+		clearPendingAutoPrefetchTimers();
+		if (routesDisposed || !routeTimers) return;
+		autoPrefetchCancel = routeTimers.timeout(() => {
+			autoPrefetchCancel = null;
+			if (routesDisposed) return;
 			attempt(() => autoPrefetchListsForCurrentRoute(yielded));
 		}, delay);
 	}
 	function autoPrefetchListsForCurrentRoute(yielded) {
-		if (!CFG.prefetch || yielded() || coreHooks?.isPrefetchSuppressed()) return;
-		const now = Date.now();
-		if (doc.hidden || now < pausedUntil || navigator.connection?.saveData) return;
+		clearPendingAutoPrefetchTimers();
+		if (!canRunAutoPrefetch(yielded)) return;
 		const path = win.location.pathname;
-		if (path.toLowerCase().includes("/compare")) return;
+		const scheduledPath = path;
 		const viewer = getViewerFromWindow();
 		const myId = viewer.id;
 		const myName = viewer.name || null;
@@ -8197,7 +10276,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		let otherUserId = 0;
 		let subRoute = "";
 		if (userMatch) {
-			const targetUser = decodeURIComponent(userMatch[1]);
+			const targetUser = safeDecodeURIComponent(userMatch[1]);
 			subRoute = (userMatch[2] || "").toLowerCase();
 			if (!(myName && targetUser.toLowerCase() === myName.toLowerCase() || myId > 0 && userMap.get(targetUser.toLowerCase()) === myId)) {
 				isAnotherUserPage = true;
@@ -8205,47 +10284,56 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				otherUserId = userMap.get(targetUser.toLowerCase()) || 0;
 			}
 		}
+		const scheduleWorkerPrefetch = (type, userId, userName, delay) => {
+			if (routesDisposed || !routeTimers) return;
+			let settled = false;
+			let cancel = () => {};
+			cancel = routeTimers.timeout(() => {
+				settled = true;
+				pendingAutoPrefetchCancels.delete(cancel);
+				if (routesDisposed || win.location.pathname !== scheduledPath || !canRunAutoPrefetch(yielded)) return;
+				attempt(() => prefetchWorkerList(type, userId, userName, yielded));
+			}, delay);
+			if (!settled) pendingAutoPrefetchCancels.add(cancel);
+		};
 		if (isAnotherUserPage) {
 			fastLoadRpcLog?.debug("Auto-prefetching for target user:", otherUser, "subRoute:", subRoute);
-			if (subRoute !== "animelist") setTimeout(() => {
-				prefetchWorkerList("ANIME", otherUserId, otherUser);
-			}, 100);
-			if (subRoute !== "mangalist") setTimeout(() => {
-				prefetchWorkerList("MANGA", otherUserId, otherUser);
-			}, 300);
+			if (subRoute !== "animelist") scheduleWorkerPrefetch("ANIME", otherUserId, otherUser, 100);
+			if (subRoute !== "mangalist") scheduleWorkerPrefetch("MANGA", otherUserId, otherUser, 300);
 			if (myId || myName) {
-				setTimeout(() => {
-					prefetchWorkerList("ANIME", myId, myName || void 0);
-				}, 500);
-				setTimeout(() => {
-					prefetchWorkerList("MANGA", myId, myName || void 0);
-				}, 800);
+				scheduleWorkerPrefetch("ANIME", myId, myName || void 0, 500);
+				scheduleWorkerPrefetch("MANGA", myId, myName || void 0, 800);
 			}
 		} else if (myId || myName) {
 			const isMyAnimePage = path.includes("/animelist") && (myName ? path.toLowerCase().includes(myName.toLowerCase()) : true);
 			const isMyMangaPage = path.includes("/mangalist") && (myName ? path.toLowerCase().includes(myName.toLowerCase()) : true);
-			if (!isMyAnimePage) setTimeout(() => {
-				prefetchWorkerList("ANIME", myId, myName || void 0);
-			}, 100);
-			if (!isMyMangaPage) setTimeout(() => {
-				prefetchWorkerList("MANGA", myId, myName || void 0);
-			}, 300);
+			if (!isMyAnimePage) scheduleWorkerPrefetch("ANIME", myId, myName || void 0, 100);
+			if (!isMyMangaPage) scheduleWorkerPrefetch("MANGA", myId, myName || void 0, 300);
 		}
 	}
-	function installPointerPrefetch(yielded, listen = (t, type, fn, opts) => t.addEventListener(type, fn, opts)) {
+	function installPointerPrefetch(yielded, listen = (t, type, fn, opts) => t.addEventListener(type, fn, opts), timeout = routeTimers?.timeout) {
 		const linkOf = (event) => event.target?.closest?.("a[href]") || null;
 		const opts = {
 			capture: true,
 			passive: true
 		};
 		listen(doc, "pointerover", (event) => {
+			if (routesDisposed) return;
 			if (event.pointerType && event.pointerType !== "mouse") return;
 			const anchor = linkOf(event);
-			clearTimeout(dwellTimer);
-			if (anchor) dwellTimer = setTimeout(() => prefetchFor(anchor, yielded), CFG.prefetchDwellMs);
+			dwellCancel?.();
+			dwellCancel = null;
+			if (anchor && timeout) dwellCancel = timeout(() => {
+				dwellCancel = null;
+				if (!routesDisposed) prefetchFor(anchor, yielded);
+			}, CFG.prefetchDwellMs);
 		}, opts);
-		listen(doc, "pointerout", () => clearTimeout(dwellTimer), opts);
+		listen(doc, "pointerout", () => {
+			dwellCancel?.();
+			dwellCancel = null;
+		}, opts);
 		listen(doc, "pointerdown", (event) => {
+			if (routesDisposed) return;
 			const anchor = linkOf(event);
 			if (anchor) prefetchFor(anchor, yielded);
 		}, opts);
@@ -8305,6 +10393,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			setCoreSession(ctx.session);
 			setCoreStorage(ctx.storage);
 			setFastLoadLogs(ctx.log, ctx.log.channel("rpc"));
+			initRoutes({
+				timeout: ctx.timeout,
+				debounce: ctx.debounce
+			});
 			ctx.hooks.registerCacheBridge({
 				getGqlStore: () => store,
 				getRpcCache: () => rpcCache,
@@ -8315,11 +10407,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				clearAuth: () => clearLastAuth()
 			});
 			let yieldedToStandalone = false;
+			let uninstallFetch = null;
+			let releaseFetchOwner = null;
 			const yielded = () => {
 				if (yieldedToStandalone) return true;
 				if (win.__ANILIST_FAST_LOAD__ || win.__ANILIST_FAST_LOAD_V4__) {
 					yieldedToStandalone = true;
-					ctx.hooks.markFetchOwner(false);
+					uninstallFetch?.();
+					uninstallFetch = null;
+					releaseFetchOwner?.();
+					releaseFetchOwner = null;
 					ctx.setStandalonePaused(true);
 					ctx.log.warn("Built-in Fast Load paused: the standalone AniList Fast Load script is installed. Uninstall it to use the built-in version.");
 				}
@@ -8368,17 +10465,32 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				inflight.clear();
 			});
 			if (CFG.gqlTtl > 0 && typeof win.fetch === "function") {
-				const uninstallFetch = installGraphQLLayer(yielded);
-				ctx.hooks.markFetchOwner(true);
+				uninstallFetch = installGraphQLLayer(yielded);
+				releaseFetchOwner = ctx.hooks.markFetchOwner(true);
 				ctx.onCleanup(() => {
-					ctx.hooks.markFetchOwner(false);
-					uninstallFetch();
+					uninstallFetch?.();
+					uninstallFetch = null;
+					releaseFetchOwner?.();
+					releaseFetchOwner = null;
 				});
-				hookWorker(yielded);
+				const unhookWorker = attempt(() => hookWorker(yielded));
+				if (unhookWorker) ctx.onCleanup(unhookWorker);
 			}
-			if (CFG.coalesceObservers) attempt(installObserverCoalescing);
-			if (CFG.lazyMedia) attempt(installLazyMedia);
-			if (CFG.rowSkipping) attempt(installRowSkipping);
+			if (CFG.coalesceObservers) {
+				const undoObservers = attempt(installObserverCoalescing);
+				if (undoObservers) ctx.onCleanup(undoObservers);
+			}
+			if (CFG.lazyMedia) {
+				const undoLazyMedia = attempt(installLazyMedia);
+				if (undoLazyMedia) ctx.onCleanup(undoLazyMedia);
+			}
+			if (CFG.rowSkipping) {
+				const undoRowSkipping = attempt(() => installRowSkipping({
+					addStyle: ctx.addStyle,
+					listen: ctx.listen
+				}));
+				if (undoRowSkipping) ctx.onCleanup(undoRowSkipping);
+			}
 			if (CFG.earlyStart) {
 				loadRoutes();
 				triggerEarlyStart(yielded);
@@ -8387,10 +10499,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (CFG.prefetch) {
 				navListeners.push(() => scheduleAutoPrefetch(yielded, 500));
 				ctx.ready(() => scheduleAutoPrefetch(yielded, 1e3));
-				installPointerPrefetch(yielded, ctx.listen);
+				installPointerPrefetch(yielded, ctx.listen, ctx.timeout);
 			}
 			ctx.onCleanup(() => {
+				cleanupRoutes(true);
 				navListeners.length = 0;
+				resetRuntimeState();
+				unregisterGlobalBridges();
+				if (win.__ALA_FAST_LOAD__ === "0.4.3") delete win.__ALA_FAST_LOAD__;
+				builtInRunning = false;
 				setFastLoadLogs(null, null);
 				setCoreStorage(null);
 				setCoreSession(null);
@@ -8446,6 +10563,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					id: "link",
 					anchor: SLOT,
 					position: "afterbegin",
+					ownUi: true,
 					style: (sel) => `
           ${sel}{flex:0 0 auto;margin-right:12px;text-decoration:none;color:inherit;cursor:pointer;white-space:nowrap}
           ${sel}.ala-kf-plain{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:0 12px;border-radius:4px;background:rgb(var(--color-foreground));font-size:1.2rem;font-weight:500;line-height:1;transition:background .15s,color .15s}
@@ -8460,15 +10578,135 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						a.title = `Open on ${LABEL}`;
 						a.setAttribute("aria-label", `Open on ${LABEL}`);
 						a.innerHTML = `${icon("external", 14)}<span>${LABEL}</span>`;
-						rc.listen(a, "click", (e) => e.stopPropagation());
-						skin(a, document.querySelector(SLOT));
+						a.addEventListener("click", (e) => e.stopPropagation());
 						return a;
-					}
+					},
+					onMount: (a) => skin(a)
 				});
-				rc.onCleanup(ctx.onBodyMutation(() => skin(link.el())));
+				rc.onBodyMutation(() => skin(link.el()));
 			});
 		}
 	});
+	var RateLimiter = class {
+		rate;
+		min;
+		max;
+		burst;
+		adaptive;
+		jitter;
+		persistKey;
+		tokens;
+		last;
+		until;
+		okStreak;
+		queue;
+		constructor({ rate, min = 1, max = rate, burst = 1, adaptive = false, jitter = false, persistKey = null }) {
+			const safeMin = Number.isFinite(min) && min > 0 ? min : 1;
+			const fallbackMax = Number.isFinite(rate) && rate > safeMin ? rate : safeMin;
+			const safeMax = Number.isFinite(max) ? Math.max(safeMin, max) : fallbackMax;
+			const safeBurst = Number.isFinite(burst) && burst >= 1 ? burst : 1;
+			this.min = safeMin;
+			this.max = safeMax;
+			this.burst = safeBurst;
+			this.adaptive = Boolean(adaptive);
+			this.jitter = Boolean(jitter);
+			this.persistKey = persistKey ?? null;
+			this.rate = Number.isFinite(rate) ? Math.min(this.max, Math.max(this.min, rate)) : this.min;
+			this.tokens = this.burst;
+			this.last = Date.now();
+			this.until = 0;
+			this.okStreak = 0;
+			this.queue = Promise.resolve();
+		}
+		readStoredUntil() {
+			if (!this.persistKey) return 0;
+			try {
+				const raw = store$1.get(this.persistKey, 0);
+				const stored = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+				return Number.isFinite(stored) && stored > 0 ? stored : 0;
+			} catch {
+				return 0;
+			}
+		}
+		get resumeAt() {
+			const stored = this.readStoredUntil();
+			const at = Math.max(this.until, stored);
+			return at > Date.now() ? at : 0;
+		}
+		setRate(n) {
+			if (!Number.isFinite(n)) return;
+			this.rate = Math.min(this.max, Math.max(this.min, n));
+		}
+		acquire(checkOrOpts) {
+			const opts = typeof checkOrOpts === "function" ? { check: checkOrOpts } : checkOrOpts ?? {};
+			if (opts.signal?.aborted) return Promise.reject(createAbortError(opts.signal));
+			const run = this.queue.then(() => this._take(opts));
+			this.queue = run.catch(() => {});
+			return raceWithSignal(run, opts.signal);
+		}
+		async _take({ check, signal } = {}) {
+			for (;;) {
+				check?.();
+				if (signal?.aborted) throw createAbortError(signal);
+				const now = Date.now();
+				const resume = this.resumeAt;
+				if (resume) {
+					this.tokens = 0;
+					this.last = resume;
+					await sleep(Math.min(1e3, Math.max(0, resume - now)), signal);
+					continue;
+				}
+				const elapsed = Math.max(0, now - this.last);
+				this.tokens = Math.min(this.burst, this.tokens + elapsed / 6e4 * this.rate);
+				this.last = now;
+				if (this.tokens >= 1) {
+					this.tokens -= 1;
+					return;
+				}
+				await sleep(Math.min(1e3, Math.max(15, (1 - this.tokens) / this.rate * 6e4)), signal);
+			}
+		}
+		success() {
+			if (this.adaptive && ++this.okStreak >= 25 && this.rate < this.max) {
+				this.setRate(this.rate + Math.max(1, Math.round(this.rate * .1)));
+				this.okStreak = 0;
+			}
+		}
+		limit(ms) {
+			this.okStreak = 0;
+			this.tokens = 0;
+			if (this.adaptive) this.setRate(Math.floor(this.rate / 2));
+			if (!Number.isFinite(ms) || !(ms > 0)) return;
+			const next = Date.now() + ms * (this.jitter ? .9 + Math.random() * .3 : 1);
+			if (!Number.isFinite(next)) return;
+			const stored = this.readStoredUntil();
+			this.until = Math.max(this.until, stored, next);
+			if (this.persistKey && this.until > stored) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
+		}
+	};
+	var muLimiter = new RateLimiter({
+		rate: 30,
+		min: 5,
+		max: 60,
+		burst: 3
+	});
+	var nuLimiter = new RateLimiter({
+		rate: 30,
+		min: 5,
+		max: 60,
+		burst: 3
+	});
+	function throwIfAborted$1(signal) {
+		if (signal?.aborted) throw createAbortError(signal);
+	}
+	async function tryScraperOrAbort(fn, signal) {
+		try {
+			return await fn();
+		} catch (err) {
+			if (signal?.aborted || isAbortError(err)) throw signal?.aborted ? createAbortError(signal) : err;
+			return null;
+		}
+	}
 	var normTitle = (s) => String(s || "").toLowerCase().normalize("NFKC").replace(/[’‘'`]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(the|a|an)\b/g, " ").replace(/\s+/g, " ").trim();
 	function titleScore(a, b) {
 		const x = normTitle(a);
@@ -8508,12 +10746,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (value == null) return null;
 		const s = String(value).trim();
 		if (!s || /^(n\/a|unknown|none)$/i.test(s)) return null;
-		const nums = [...s.matchAll(/(?:^|[^\d])(?:v\d+[ ._-]*)?c?\s*(\d+(?:\.\d+)?)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+		const normalized = s.replace(/(?<=\d),(?=\d{3}(?!\d))/g, "");
+		const nums = [...normalized.matchAll(/(?:^|[^\d])(?:v\d+[ ._-]*)?c?\s*(\d+(?:\.\d+)?)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
 		if (nums.length) return Math.max(...nums);
-		return Number(s.replace(/,/g, "").match(/\d+(?:\.\d+)?/)?.[0]) || null;
+		return Number(normalized.replace(/,/g, "").match(/\d+(?:\.\d+)?/)?.[0]) || null;
 	}
-	async function mangaUpdates(title) {
-		const search = await gm.json("https://api.mangaupdates.com/v1/series/search", {
+	async function mangaUpdates(title, opts = {}) {
+		const { http = gm, signal } = opts;
+		throwIfAborted$1(signal);
+		await muLimiter.acquire({ signal });
+		throwIfAborted$1(signal);
+		const search = await raceWithSignal(http.json("https://api.mangaupdates.com/v1/series/search", {
 			method: "POST",
 			anonymous: true,
 			headers: {
@@ -8524,33 +10767,61 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				search: title,
 				stype: "title",
 				perpage: 8
-			})
-		});
+			}),
+			signal
+		}), signal);
+		throwIfAborted$1(signal);
 		const best = bestMatch(Array.isArray(search?.results) ? search.results : [], title, (r) => r?.hit_title || r?.record?.title);
 		if (!best) return null;
 		const rec = best.record || {};
 		let latest = parseLatest(rec.latest_chapter);
 		const id = rec.series_id || rec.id || rec.seriesId || String(rec.url || "").match(/\/series\/(\d+)/)?.[1];
-		if (latest == null && id) latest = await tryOr(async () => {
-			const d = await gm.json(`https://api.mangaupdates.com/v1/series/${encodeURIComponent(id)}`, {
+		if (latest == null && id) latest = await tryScraperOrAbort(async () => {
+			await muLimiter.acquire({ signal });
+			throwIfAborted$1(signal);
+			const d = await raceWithSignal(http.json(`https://api.mangaupdates.com/v1/series/${encodeURIComponent(id)}`, {
 				anonymous: true,
-				headers: { Accept: "application/json" }
-			});
+				headers: { Accept: "application/json" },
+				signal
+			}), signal);
+			throwIfAborted$1(signal);
 			return parseLatest(d?.latest_chapter ?? d?.record?.latest_chapter);
-		});
-		if (latest == null && rec.url) latest = await tryOr(async () => {
-			const m = (await gm.text(rec.url, { anonymous: true })).match(/Latest\s+Chapter[\s\S]{0,500}?\b(?:c\s*)?(\d+(?:\.\d+)?)/i);
+		}, signal);
+		if (latest == null && rec.url) latest = await tryScraperOrAbort(async () => {
+			await muLimiter.acquire({ signal });
+			throwIfAborted$1(signal);
+			const text = await raceWithSignal(http.text(rec.url, {
+				anonymous: true,
+				signal
+			}), signal);
+			throwIfAborted$1(signal);
+			const m = text.match(/Latest\s+Chapter[\s\S]{0,500}?\b(?:c\s*)?(\d+(?:\.\d+)?)/i);
 			return m ? Number(m[1]) : null;
-		});
+		}, signal);
 		return latest == null ? null : Math.floor(latest);
 	}
-	async function novelUpdates(title) {
-		const html = await gm.text(`https://www.novelupdates.com/?s=${encodeURIComponent(title)}&post_type=series`, { anonymous: true });
+	async function novelUpdates(title, opts = {}) {
+		const { http = gm, signal } = opts;
+		throwIfAborted$1(signal);
+		await nuLimiter.acquire({ signal });
+		throwIfAborted$1(signal);
+		const html = await raceWithSignal(http.text(`https://www.novelupdates.com/?s=${encodeURIComponent(title)}&post_type=series`, {
+			anonymous: true,
+			signal
+		}), signal);
+		throwIfAborted$1(signal);
 		const doc = new DOMParser().parseFromString(html, "text/html");
 		const seen = new Set();
 		const cands = [];
 		for (const a of doc.querySelectorAll("a[href*=\"/series/\"]")) {
-			const href = new URL(a.getAttribute("href") || "", "https://www.novelupdates.com/").href;
+			let url;
+			try {
+				url = new URL(a.getAttribute("href") || "", "https://www.novelupdates.com/");
+			} catch {
+				continue;
+			}
+			if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+			const href = url.href;
 			const text = clean(a.textContent);
 			if (text && !seen.has(href)) {
 				seen.add(href);
@@ -8562,7 +10833,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		const best = bestMatch(cands, title, (c) => c.text);
 		if (!best) return null;
-		const body = new DOMParser().parseFromString(await gm.text(best.href, { anonymous: true }), "text/html").body?.textContent || "";
+		await nuLimiter.acquire({ signal });
+		throwIfAborted$1(signal);
+		const pageHtml = await raceWithSignal(http.text(best.href, {
+			anonymous: true,
+			signal
+		}), signal);
+		throwIfAborted$1(signal);
+		const body = new DOMParser().parseFromString(pageHtml, "text/html").body?.textContent || "";
 		let latest = null;
 		const at = body.search(/Latest\s+Release/i);
 		if (at >= 0) {
@@ -8575,8 +10853,64 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		return latest != null && Number.isFinite(latest) ? Math.floor(latest) : null;
 	}
-	var lookup = memo((kind, title) => kind === "NU" ? novelUpdates(title) : mangaUpdates(title), { ttl: 18e5 });
-	async function externalReleased(info) {
+	var LOOKUP_TTL = 18e5;
+	var LOOKUP_MAX_ENTRIES = 1e3;
+	var lookupCache = new Map();
+	var lookupFlights = new Map();
+	var transportIds = new WeakMap();
+	var nextTransportId = 1;
+	function getTransportId(http) {
+		let id = transportIds.get(http);
+		if (!id) {
+			id = nextTransportId++;
+			transportIds.set(http, id);
+		}
+		return id;
+	}
+	function setLookupCache(key, value) {
+		const now = Date.now();
+		if (lookupCache.size >= LOOKUP_MAX_ENTRIES) {
+			for (const [k, v] of lookupCache) if (now - v.at >= LOOKUP_TTL) lookupCache.delete(k);
+			while (lookupCache.size >= LOOKUP_MAX_ENTRIES) lookupCache.delete(lookupCache.keys().next().value);
+		}
+		lookupCache.delete(key);
+		lookupCache.set(key, {
+			at: now,
+			value
+		});
+	}
+	function lookupRelease(key, kind, title, opts = {}) {
+		throwIfAborted$1(opts.signal);
+		const now = Date.now();
+		const cached = lookupCache.get(key);
+		if (cached && now - cached.at < LOOKUP_TTL) return Promise.resolve(cached.value);
+		if (cached) lookupCache.delete(key);
+		const flightKey = `${getTransportId(opts.http ?? gm)}:${key}`;
+		let flight = lookupFlights.get(flightKey);
+		if (!flight || flight.controller.signal.aborted) {
+			const run = kind === "NU" ? novelUpdates : mangaUpdates;
+			flight = createSharedFlight({
+				start: (sharedSignal) => run(title, {
+					http: opts.http,
+					signal: sharedSignal
+				}).then((v) => {
+					if (!sharedSignal.aborted) setLookupCache(key, v);
+					return v;
+				}),
+				onEvict: (evicted) => {
+					if (lookupFlights.get(flightKey) === evicted) lookupFlights.delete(flightKey);
+				},
+				onSettled: (doneFlight) => {
+					if (lookupFlights.get(flightKey) === doneFlight) lookupFlights.delete(flightKey);
+				},
+				createAbortError
+			});
+			lookupFlights.set(flightKey, flight);
+		}
+		return flight.wait({ signal: opts.signal });
+	}
+	async function externalReleased(info, opts = {}) {
+		throwIfAborted$1(opts.signal);
 		const kind = info?.format === "NOVEL" ? "NU" : "MU";
 		const titles = [...new Set([
 			info?.title?.userPreferred,
@@ -8584,8 +10918,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			info?.title?.english
 		].filter(Boolean))];
 		for (const t of titles) {
-			const n = await tryOr(() => lookup(`${kind}:${normTitle(t)}`, kind, t));
-			if (n != null) return n;
+			throwIfAborted$1(opts.signal);
+			const keyTitle = normTitle(t) || clean(t).toLowerCase();
+			if (!keyTitle) continue;
+			try {
+				const n = await lookupRelease(`${kind}:${keyTitle}`, kind, t, opts);
+				if (n != null) return n;
+			} catch (err) {
+				if (opts.signal?.aborted || isAbortError(err)) throw opts.signal?.aborted ? createAbortError(opts.signal) : err;
+			}
 		}
 		return null;
 	}
@@ -8673,8 +11014,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					day: d.getDate()
 				};
 			};
-			const scoreFormat = async () => (await tryOr(() => ctx.api.viewer()))?.scoreFormat || null;
+			const scoreFormat = async (rc = currentRc) => (await tryOr(() => (rc?.api ?? ctx.api).viewer()))?.scoreFormat || null;
 			let currentRoute = null;
+			let currentRc = null;
+			let disposed = false;
 			let shown = null;
 			let gen = 0;
 			let rendering = false;
@@ -8691,12 +11034,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const panel = () => document.getElementById(ID);
 			const schedule = (ms = 300) => {
 				cancelSchedule?.();
-				cancelSchedule = ctx.timeout(() => {
+				const rc = currentRc;
+				if (disposed || !rc || rc.signal.aborted) {
+					cancelSchedule = null;
+					return;
+				}
+				cancelSchedule = rc.timeout(() => {
 					cancelSchedule = null;
 					render();
 				}, ms);
 			};
-			function renderConnect(key, reason = "none") {
+			function renderConnect(key, reason = "none", rc = currentRc) {
 				const spot = findSpot();
 				if (!spot) return void schedule(800);
 				const box = document.createElement("div");
@@ -8706,26 +11054,31 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				panel()?.remove();
 				spot.parent.insertBefore(box, spot.before);
 				shown = key;
-				if (reason === "none") ctx.timeout(() => {
-					if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
+				if (reason === "none" && rc && !rc.signal.aborted) rc.timeout(() => {
+					if (!rc.signal.aborted && panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
 				}, 3e3);
 			}
 			function changeProgress(delta, input, limit) {
 				const next = Number(input.value) + delta;
-				if (!Number.isInteger(next) || next < 0 || limit !== null && next > limit) return;
+				if (!Number.isInteger(next) || next < 0 || delta > 0 && limit !== null && next > limit) return;
 				input.value = String(next);
 			}
-			async function save(media, info, scoreInput, progressInput) {
+			async function save(media, info, scoreInput, progressInput, fallbackFmt = null, rc = currentRc) {
 				if (saving) return null;
-				const fmt = await scoreFormat();
+				const fmt = await scoreFormat(rc) ?? fallbackFmt;
 				const max = maxOf(info, media.type);
 				const scoreText = scoreInput.value.trim();
 				const score = scoreText === "" ? 0 : Number(scoreText);
-				let progress = Number(progressInput.value);
 				if (!Number.isFinite(score) || score < 0 || score > scoreMax(fmt)) {
 					scoreInput.focus();
 					return null;
 				}
+				const progressText = progressInput.value.trim();
+				if (progressText === "") {
+					progressInput.focus();
+					return null;
+				}
+				let progress = Number(progressText);
 				if (!Number.isInteger(progress) || progress < 0) {
 					progressInput.focus();
 					return null;
@@ -8733,7 +11086,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				if (max !== null) progress = Math.min(progress, max);
 				progressInput.value = String(progress);
 				const prev = info.mediaListEntry || {};
-				const finishNow = max !== null && progress >= max && (prev.status !== "COMPLETED" || !prev.completedAt?.year);
+				const prevProgress = Number.isFinite(Number(prev.progress)) ? Number(prev.progress) : 0;
+				const finishNow = progress !== prevProgress && max !== null && progress >= max && prev.status !== "REPEATING" && (prev.status !== "COMPLETED" || !prev.completedAt?.year);
 				const isStarting = (!prev.status || prev.status === "PLANNING") && progress > 0;
 				const status = finishNow ? "COMPLETED" : isStarting ? "CURRENT" : void 0;
 				saving = true;
@@ -8763,7 +11117,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			async function render(force = false) {
 				const route = currentRoute;
-				if (!route) {
+				const rc = currentRc;
+				if (disposed || !route || !rc || rc.signal.aborted) {
 					shown = null;
 					panel()?.remove();
 					return;
@@ -8773,33 +11128,39 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					if (force) rerender = true;
 					return;
 				}
-				if (saving && !force) return;
 				if (!force && shown === key && panel()) return;
+				if (saving && !force) {
+					rerender = true;
+					schedule(200);
+					return;
+				}
 				if (!force && retry.key === key && (retry.count >= MAX_FAILURES || Date.now() < retry.at)) return;
 				if (!findSpot()) {
 					if (Date.now() - routeAt < 15e3) schedule(800);
 					return;
 				}
-				if (!ctx.api.hasAuth()) return renderConnect(key, "none");
+				if (!ctx.api.hasAuth()) return renderConnect(key, "none", rc);
 				const g = gen;
-				const stale = () => g !== gen || currentRoute?.id !== route.id;
+				const stale = () => disposed || g !== gen || rc.signal.aborted || currentRoute?.id !== route.id;
+				cancelSchedule?.();
+				cancelSchedule = null;
 				rendering = true;
 				ctx.log.debug("Rendering media info panel for:", key);
 				try {
 					let info = null;
 					let fmt = null;
 					try {
-						info = await ctx.api.media.get(route.id, route.type, { throwAuth: true });
+						info = await rc.api.media.get(route.id, route.type, { throwAuth: true });
 						if (stale()) return;
-						if (info) fmt = (await ctx.api.viewer())?.scoreFormat || null;
+						if (info) fmt = (await rc.api.viewer())?.scoreFormat || null;
 					} catch (e) {
 						if (stale()) return;
-						if (e?.auth) return renderConnect(key, "rejected");
+						if (e?.auth) return renderConnect(key, "rejected", rc);
 						info = null;
 					}
 					if (stale()) return;
 					if (!info || !fmt) {
-						if (!ctx.api.hasAuth()) return renderConnect(key, "none");
+						if (!ctx.api.hasAuth()) return renderConnect(key, "none", rc);
 						retry = {
 							key,
 							at: Date.now() + 15e3,
@@ -8894,11 +11255,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						saveBtn.disabled = true;
 						let res = null;
 						try {
-							res = await save(route, info, scoreInput, progressInput);
+							res = await save(route, info, scoreInput, progressInput, fmt, rc);
 						} finally {
 							saveBtn.classList.remove("is-saving");
 						}
-						if (!box.isConnected) return;
+						if (!box.isConnected) {
+							if (!disposed && currentRoute && currentRc && !currentRc.signal.aborted && (rerender || !panel())) {
+								rerender = false;
+								safe(() => render(true), "media info refresh");
+							}
+							return;
+						}
 						if (res && res !== false) {
 							scoreInput.value = formatScore(res.score, fmt);
 							const nextProg = Number(res.progress);
@@ -8908,9 +11275,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							saveBtn.classList.add("is-saved");
 							saveBtn.textContent = "Saved";
 							saveBtn.disabled = true;
-							cancelSavedTimer = ctx.timeout(() => {
+							cancelSavedTimer = rc.timeout(() => {
 								cancelSavedTimer = null;
-								if (!box.isConnected) return;
+								if (rc.signal.aborted || !box.isConnected) return;
 								saveBtn.classList.remove("is-saved");
 								saveBtn.textContent = "Save";
 								paint();
@@ -8919,9 +11286,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						} else if (res === false) {
 							saveBtn.textContent = "Failed";
 							saveBtn.disabled = false;
-							cancelFailedTimer = ctx.timeout(() => {
+							cancelFailedTimer = rc.timeout(() => {
 								cancelFailedTimer = null;
-								if (box.isConnected && saveBtn.textContent === "Failed") {
+								if (!rc.signal.aborted && box.isConnected && saveBtn.textContent === "Failed") {
 									saveBtn.textContent = "Save";
 									paint();
 								}
@@ -8959,9 +11326,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					spot.parent.insertBefore(box, spot.before);
 					shown = key;
 					paint();
-					if (!anime) externalReleased(info).then((n) => {
+					if (!anime) externalReleased(info, {
+						http: ctx.http,
+						signal: rc.signal
+					}).then((n) => {
 						if (stale() || !box.isConnected) return;
 						released = n;
+						lookupPending = false;
+						paint();
+					}, () => {
+						if (stale() || !box.isConnected) return;
 						lookupPending = false;
 						paint();
 					});
@@ -8981,8 +11355,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					id: Number(rc.match[2])
 				};
 				currentRoute = r;
+				currentRc = rc;
 				gen++;
 				shown = null;
+				rerender = false;
 				routeAt = Date.now();
 				retry = {
 					key: null,
@@ -8990,34 +11366,34 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					count: 0
 				};
 				panel()?.remove();
-				const scheduleRoute = (ms = 300) => {
-					cancelSchedule?.();
-					cancelSchedule = rc.timeout(() => {
-						cancelSchedule = null;
-						render();
-					}, ms);
-				};
-				scheduleRoute(document.readyState === "complete" ? 500 : 1200);
-				rc.listen(window, "load", () => scheduleRoute(500), { once: true });
+				schedule(document.readyState === "complete" ? 500 : 1200);
+				rc.listen(window, "load", () => schedule(500), { once: true });
 				rc.listen(window, "focus", () => {
 					if (panel()?.dataset.mode === "connect" && ctx.api.hasAuth()) render(true);
 				});
-				rc.onCleanup(ctx.onBodyMutation(() => {
-					if (rc.signal.aborted || currentRoute !== r || panel() || rendering || saving) return;
+				rc.onBodyMutation(() => {
+					if (currentRoute !== r || panel() || rendering || saving) return;
 					if (retry.key === `${r.type}:${r.id}` && retry.count >= MAX_FAILURES) return;
-					scheduleRoute(500);
-				}));
+					schedule(500);
+				});
 				return () => {
 					cancelSchedule?.();
 					cancelSchedule = null;
-					if (currentRoute === r) currentRoute = null;
+					if (currentRoute === r) {
+						currentRoute = null;
+						currentRc = null;
+					}
+					rerender = false;
 					gen++;
 					shown = null;
 					panel()?.remove();
 				};
 			});
 			ctx.onCleanup(() => {
+				disposed = true;
 				currentRoute = null;
+				currentRc = null;
+				rerender = false;
 				gen++;
 				cancelSchedule?.();
 				cancelSchedule = null;
@@ -9025,100 +11401,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			});
 		}
 	});
-	var RateLimiter = class {
-		rate;
-		min;
-		max;
-		burst;
-		adaptive;
-		jitter;
-		persistKey;
-		tokens;
-		last;
-		until;
-		okStreak;
-		queue;
-		constructor({ rate, min = 1, max = rate, burst = 1, adaptive = false, jitter = false, persistKey = null }) {
-			const safeMin = Number.isFinite(min) && min > 0 ? min : 1;
-			const fallbackMax = Number.isFinite(rate) && rate > safeMin ? rate : safeMin;
-			const safeMax = Number.isFinite(max) ? Math.max(safeMin, max) : fallbackMax;
-			const safeBurst = Number.isFinite(burst) && burst >= 1 ? burst : 1;
-			this.min = safeMin;
-			this.max = safeMax;
-			this.burst = safeBurst;
-			this.adaptive = Boolean(adaptive);
-			this.jitter = Boolean(jitter);
-			this.persistKey = persistKey ?? null;
-			this.rate = Number.isFinite(rate) ? Math.min(this.max, Math.max(this.min, rate)) : this.min;
-			this.tokens = this.burst;
-			this.last = Date.now();
-			this.until = 0;
-			this.okStreak = 0;
-			this.queue = Promise.resolve();
-		}
-		readStoredUntil() {
-			if (!this.persistKey) return 0;
-			try {
-				const raw = store$1.get(this.persistKey, 0);
-				const stored = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
-				return Number.isFinite(stored) && stored > 0 ? stored : 0;
-			} catch {
-				return 0;
-			}
-		}
-		get resumeAt() {
-			const stored = this.readStoredUntil();
-			const at = Math.max(this.until, stored);
-			return at > Date.now() ? at : 0;
-		}
-		setRate(n) {
-			if (!Number.isFinite(n)) return;
-			this.rate = Math.min(this.max, Math.max(this.min, n));
-		}
-		acquire(check) {
-			const run = this.queue.then(() => this._take(check));
-			this.queue = run.catch(() => {});
-			return run;
-		}
-		async _take(check) {
-			for (;;) {
-				check?.();
-				const now = Date.now();
-				const resume = this.resumeAt;
-				if (resume) {
-					this.tokens = 0;
-					this.last = resume;
-					await sleep(Math.min(1e3, Math.max(0, resume - now)));
-					continue;
-				}
-				const elapsed = Math.max(0, now - this.last);
-				this.tokens = Math.min(this.burst, this.tokens + elapsed / 6e4 * this.rate);
-				this.last = now;
-				if (this.tokens >= 1) {
-					this.tokens -= 1;
-					return;
-				}
-				await sleep(Math.max(15, (1 - this.tokens) / this.rate * 6e4));
-			}
-		}
-		success() {
-			if (this.adaptive && ++this.okStreak >= 25 && this.rate < this.max) {
-				this.setRate(this.rate + Math.max(1, Math.round(this.rate * .1)));
-				this.okStreak = 0;
-			}
-		}
-		limit(ms) {
-			this.okStreak = 0;
-			this.tokens = 0;
-			if (this.adaptive) this.setRate(Math.floor(this.rate / 2));
-			if (!Number.isFinite(ms) || !(ms > 0)) return;
-			const next = Date.now() + ms * (this.jitter ? .9 + Math.random() * .3 : 1);
-			if (!Number.isFinite(next)) return;
-			const stored = this.readStoredUntil();
-			this.until = Math.max(this.until, stored, next);
-			if (this.persistKey && this.until > stored) safe(() => store$1.set(this.persistKey, this.until), "persist cooldown");
-		}
-	};
 	var anilistLog = createCoreLogger("anilist");
 	var NAV_SELECTORS = {
 		loginNav: "nav a[href=\"/login\"], .nav a[href=\"/login\"]",
@@ -9140,6 +11422,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		} catch {
 			return m[1];
 		}
+	}
+	function throwIfAborted(signal) {
+		if (signal?.aborted) throw createAbortError(signal);
 	}
 	function stripCommentsAndStrings(q) {
 		let out = "";
@@ -9187,9 +11472,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			i++;
 		}
 		return out;
-	}
-	function isGqlMutation(q) {
-		return /\bmutation\b/i.test(stripCommentsAndStrings(q));
 	}
 	function parseRootSelection(q) {
 		const stripped = stripCommentsAndStrings(q);
@@ -9314,6 +11596,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return result;
 	}
 	var UNRESOLVABLE_ARG = Symbol("unresolvable");
+	function parsePositiveId(raw) {
+		if (typeof raw === "number") return Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+		if (typeof raw === "string") {
+			const trimmed = raw.trim();
+			if (!/^\d+$/.test(trimmed)) return null;
+			const n = Number(trimmed);
+			return Number.isSafeInteger(n) && n > 0 ? n : null;
+		}
+		return null;
+	}
 	function extractSelectionPaths(inner) {
 		const paths = new Set();
 		const stack = [];
@@ -9399,11 +11691,26 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					mediaId = safeVars[varName];
 				} else if (/^\d+$/.test(argMap.id)) mediaId = Number(argMap.id);
 			}
-			if (argMap.type && argMap.type.startsWith("$")) boundVars.add(argMap.type.slice(1));
 			if (typeof mediaId !== "number" || !Number.isSafeInteger(mediaId) || mediaId <= 0) return null;
+			let resolvedType = "";
+			if (argMap.type !== void 0) {
+				let rawType;
+				if (argMap.type.startsWith("$")) {
+					const varName = argMap.type.slice(1);
+					boundVars.add(varName);
+					rawType = safeVars[varName];
+				} else if (/^(?:ANIME|MANGA)$/i.test(argMap.type)) rawType = argMap.type.toUpperCase();
+				else return null;
+				if (rawType !== void 0 && rawType !== null) {
+					if (typeof rawType !== "string") return null;
+					const norm = rawType.trim().toUpperCase();
+					if (norm !== "ANIME" && norm !== "MANGA") return null;
+					resolvedType = norm;
+				}
+			}
 			for (const k of Object.keys(safeVars)) if (!boundVars.has(k) && safeVars[k] !== void 0 && safeVars[k] !== null) return null;
 			return {
-				entityKey: `Media:${mediaId}`,
+				entityKey: `Media:${mediaId}:${resolvedType || "*"}`,
 				isSuperset: requiredFields.size > 10,
 				requiredFields
 			};
@@ -9423,6 +11730,40 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		for (const item of subset) if (!superset.has(item)) return false;
 		return true;
 	}
+	var MEDIA_LIST_SINGLE_QUERY = `query ($userId: Int, $userName: String, $type: MediaType) {
+      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
+        user { id name }
+        lists {
+          name
+          isCustomList
+          status
+          entries {
+            id
+            mediaId
+            status
+            score
+            progress
+            progressVolumes
+            repeat
+            priority
+            notes
+            customLists
+            startedAt { year month day }
+            completedAt { year month day }
+            media {
+              id
+              idMal
+              format
+              episodes
+              chapters
+              status
+              title { userPreferred english romaji native }
+            }
+          }
+        }
+      }
+    }`;
+	var MEDIA_LIST_REQUIRED_FIELDS = extractSelectionPaths(parseRootSelection(MEDIA_LIST_SINGLE_QUERY)?.innerSelection ?? "") ?? new Set();
 	var AniList = (() => {
 		const limiter = new RateLimiter({
 			rate: 25,
@@ -9462,9 +11803,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				inflightEntities.clear();
 				inflightExact.clear();
 			} else {
-				for (const k of entityCache.keys()) if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
-				for (const k of inflightEntities.keys()) if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
-				for (const [k, entry] of inflightExact.entries()) if (entry.entityKey?.startsWith(entityKeyPrefix)) inflightExact.delete(k);
+				const normPrefix = entityKeyPrefix.replace(/:+$/, "");
+				if (normPrefix) {
+					const matchesPrefix = (k) => !!k && (k === normPrefix || k.startsWith(`${normPrefix}:`));
+					for (const k of entityCache.keys()) if (matchesPrefix(k)) entityCache.delete(k);
+					for (const k of inflightEntities.keys()) if (matchesPrefix(k)) inflightEntities.delete(k);
+					for (const [k, entry] of inflightExact.entries()) if (matchesPrefix(entry.entityKey)) inflightExact.delete(k);
+				}
 			}
 			maybeUnsubscribeMutationListener();
 		}
@@ -9521,19 +11866,19 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				username: null,
 				scoreFormat: null
 			};
-			const storedIdNum = Number(store$1.get("al_user_id", 0));
-			const storedId = storedIdNum > 0 ? storedIdNum : null;
+			const storedId = parsePositiveId(store$1.get("al_user_id", null));
 			const storedNameRaw = store$1.get("al_username", null);
 			const storedName = typeof storedNameRaw === "string" && storedNameRaw ? storedNameRaw : null;
 			const storedFmtRaw = store$1.get("al_score_format", null);
 			const storedFmt = typeof storedFmtRaw === "string" && storedFmtRaw ? storedFmtRaw : null;
 			const cachedViewer = entityCache.get("Viewer")?.data?.Viewer;
+			const cachedViewerId = parsePositiveId(cachedViewer?.id);
 			const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
+			const nuxtId = parsePositiveId(nuxtUser?.id);
 			const navName = doc ? navUserName(doc) || null : null;
-			if (nuxtUser?.id) {
-				const nuxtId = Number(nuxtUser.id);
+			if (nuxtId !== null) {
 				const storedMismatch = storedId !== null && storedId !== nuxtId || storedId === null && storedName !== null && typeof nuxtUser.name === "string" && storedName.toLowerCase() !== nuxtUser.name.toLowerCase();
-				const cachedMatches = !!(cachedViewer?.id && Number(cachedViewer.id) === nuxtId);
+				const cachedMatches = cachedViewerId !== null && cachedViewerId === nuxtId;
 				return {
 					userId: nuxtId,
 					username: (nuxtUser.name ? String(nuxtUser.name) : null) || (cachedMatches && cachedViewer?.name ? String(cachedViewer.name) : null) || (!storedMismatch ? storedName : null) || navName || null,
@@ -9544,13 +11889,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				const storedMatches = storedName === null || storedName.toLowerCase() === navName.toLowerCase();
 				const cachedMatches = !!(cachedViewer?.name && String(cachedViewer.name).toLowerCase() === navName.toLowerCase());
 				return {
-					userId: (storedMatches ? storedId : null) || (cachedMatches && cachedViewer?.id ? Number(cachedViewer.id) : null),
+					userId: (storedMatches ? storedId : null) || (cachedMatches ? cachedViewerId : null),
 					username: storedMatches && storedName || navName,
 					scoreFormat: (storedMatches ? storedFmt : null) || (cachedMatches ? cachedViewer?.mediaListOptions?.scoreFormat || null : null)
 				};
 			}
 			return {
-				userId: storedId || (cachedViewer?.id ? Number(cachedViewer.id) : null),
+				userId: storedId || cachedViewerId,
 				username: storedName || (cachedViewer?.name ? String(cachedViewer.name) : null),
 				scoreFormat: storedFmt || cachedViewer?.mediaListOptions?.scoreFormat || null
 			};
@@ -9562,26 +11907,28 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return;
 			}
 			const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
-			if (nuxtUser?.id) {
-				const nuxtId = Number(nuxtUser.id);
-				const storedId = Number(store$1.get("al_user_id", 0));
-				const cachedViewerId = Number(entityCache.get("Viewer")?.data?.Viewer?.id || 0);
-				if (storedId && storedId !== nuxtId || cachedViewerId && cachedViewerId !== nuxtId) clearViewer();
+			const nuxtId = parsePositiveId(nuxtUser?.id);
+			if (nuxtId !== null) {
+				const storedId = parsePositiveId(store$1.get("al_user_id", null));
+				const cachedViewerId = parsePositiveId(entityCache.get("Viewer")?.data?.Viewer?.id);
+				if (storedId !== null && storedId !== nuxtId || cachedViewerId !== null && cachedViewerId !== nuxtId) clearViewer();
 				return;
 			}
-			const navName = doc ? navUserName(doc) : "";
-			if (navName) {
+			const pageName = typeof nuxtUser?.name === "string" && nuxtUser.name.trim() || (doc ? navUserName(doc) : "");
+			if (pageName) {
 				const storedName = store$1.get("al_username", null);
 				const cachedViewerName = entityCache.get("Viewer")?.data?.Viewer?.name;
-				if (storedName && storedName.toLowerCase() !== navName.toLowerCase() || typeof cachedViewerName === "string" && cachedViewerName && cachedViewerName.toLowerCase() !== navName.toLowerCase()) clearViewer();
+				if (storedName && storedName.toLowerCase() !== pageName.toLowerCase() || typeof cachedViewerName === "string" && cachedViewerName && cachedViewerName.toLowerCase() !== pageName.toLowerCase()) clearViewer();
 			}
 		}
 		function isViewerMismatchedWithPage(v) {
 			const { win, doc } = readPageDoc();
 			if (doc && isLoggedOutNav(doc)) return true;
 			const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
-			if (nuxtUser?.id && v?.id != null && Number(v.id) > 0) {
-				if (Number(v.id) !== Number(nuxtUser.id)) return true;
+			const nuxtId = parsePositiveId(nuxtUser?.id);
+			const vId = parsePositiveId(v?.id);
+			if (nuxtId !== null && vId !== null) {
+				if (vId !== nuxtId) return true;
 			}
 			const pageName = (nuxtUser?.name ? String(nuxtUser.name).trim() : "") || (doc ? navUserName(doc) : "");
 			if (pageName && v?.name) {
@@ -9610,13 +11957,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			if (nextName !== null && store$1.get("al_username", null) !== nextName) store$1.set("al_username", nextName);
 		}
-		function isBrowserLoggedIn() {
+		function isBrowserLoggedIn(opts) {
+			if (opts?.reconcile !== false) syncFromPage();
 			const { win, doc } = readPageDoc();
-			syncFromPage();
 			if (doc && isLoggedOutNav(doc)) return false;
-			if ((win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user)?.id) return true;
+			if (parsePositiveId((win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user)?.id) !== null) return true;
 			if (doc && hasLoggedInNav(doc)) return true;
-			return Boolean(Number(store$1.get("al_user_id", 0)) > 0 && store$1.get("al_username", null));
+			return Boolean(parsePositiveId(store$1.get("al_user_id", null)) !== null && store$1.get("al_username", null));
 		}
 		const header = (res, name) => {
 			try {
@@ -9627,9 +11974,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		};
 		function resetDelay(res) {
 			const retry = Number(header(res, "Retry-After"));
-			if (retry > 0) return Math.min(retry * 1e3, 12e4);
+			if (Number.isFinite(retry) && retry > 0) return Math.max(0, Math.min(retry * 1e3, 12e4));
 			const reset = Number(header(res, "X-RateLimit-Reset"));
-			if (reset > 0) return Math.min((reset > 0xe8d4a51000 ? reset : reset * 1e3) - Date.now(), 12e4);
+			if (Number.isFinite(reset) && reset > 0) return Math.max(0, Math.min((reset > 0xe8d4a51000 ? reset : reset * 1e3) - Date.now(), 12e4));
 			return 0;
 		}
 		function handle(res) {
@@ -9639,11 +11986,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const remaining = header(res, "X-RateLimit-Remaining");
 			if (remaining != null && Number(remaining) <= 1) limiter.limit(resetDelay(res));
 		}
-		async function executeNetworkRequest(q, variables, retries, forceFresh = false) {
+		async function executeNetworkRequest(q, variables, retries, forceFresh = false, attempt = 0, signal) {
+			throwIfAborted(signal);
+			const safeRetries = Number.isFinite(retries) ? Math.max(0, Math.floor(retries)) : 3;
 			const csrfToken = getCsrfToken();
 			const win = pageWin();
 			const fetchFn = (typeof win.fetch === "function" ? win.fetch : fetch).bind(win);
-			const backoff = () => sleep(1500 * (4 - retries));
+			const backoff = () => sleep(Math.min(3e4, 1500 * (attempt + 1)), signal);
 			const endpoint = `${win.location?.origin || "https://anilist.co"}/graphql`;
 			const headers = {
 				"Content-Type": "application/json",
@@ -9653,7 +12002,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (csrfToken) headers["X-CSRF-TOKEN"] = csrfToken;
 			let res;
 			try {
-				await limiter.acquire();
+				await limiter.acquire({ signal });
+				throwIfAborted(signal);
 				res = await fetchFn(endpoint, {
 					method: "POST",
 					headers,
@@ -9663,25 +12013,32 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						query: q,
 						variables
 					}),
+					signal,
 					__alfl: "internal"
 				});
 			} catch (e) {
-				if (retries > 0) {
+				if (signal?.aborted || isAbortError(e)) throw signal?.aborted ? createAbortError(signal) : e;
+				if (safeRetries > 0) {
 					await backoff();
-					return executeNetworkRequest(q, variables, retries - 1, forceFresh);
+					return executeNetworkRequest(q, variables, safeRetries - 1, forceFresh, attempt + 1, signal);
 				}
 				throw new Error(`AniList network error: ${e?.message || e}`);
 			}
+			throwIfAborted(signal);
 			handle(res);
 			if (!res) throw new Error("AniList network error: empty response");
-			if ((res.status === 429 || res.status >= 500) && retries > 0) {
+			if ((res.status === 429 || res.status >= 500) && safeRetries > 0) {
 				if (res.status >= 500) await backoff();
-				return executeNetworkRequest(q, variables, retries - 1, forceFresh);
+				throwIfAborted(signal);
+				return executeNetworkRequest(q, variables, safeRetries - 1, forceFresh, attempt + 1, signal);
 			}
 			let json = null;
 			try {
 				json = await res.json();
-			} catch (_) {}
+			} catch (e) {
+				if (signal?.aborted || isAbortError(e)) throw signal?.aborted ? createAbortError(signal) : e;
+			}
+			throwIfAborted(signal);
 			const message = json?.errors?.length ? json.errors.map((e) => e.message).join("; ") : "";
 			if (res.status === 401 || /invalid token|unauthenticated|unauthorized/i.test(message)) {
 				clearViewer();
@@ -9693,11 +12050,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		async function query(q, variables = {}, optionsOrRetries) {
 			const opts = typeof optionsOrRetries === "number" ? { retries: optionsOrRetries } : optionsOrRetries || {};
-			const retries = opts.retries ?? 3;
+			throwIfAborted(opts.signal);
+			const rawRetries = opts.retries ?? 3;
+			const retries = Number.isFinite(rawRetries) ? Math.max(0, Math.floor(rawRetries)) : 3;
 			if (isGqlMutation(q)) {
 				invalidate();
-				return executeNetworkRequest(q, variables, retries).finally(() => {
-					invalidateLocal();
+				return executeNetworkRequest(q, variables, retries, false, 0, opts.signal).finally(() => {
+					invalidate();
 				});
 			}
 			ensureMutationListener();
@@ -9713,43 +12072,48 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			if (meta && !opts.forceFresh) {
 				const flyingEntity = inflightEntities.get(meta.entityKey);
-				if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
+				if (flyingEntity && !flyingEntity.flight.controller.signal.aborted && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
 					anilistLog.debug("🔗 Attached to in-flight Superset request:", meta.entityKey);
-					return flyingEntity.promise;
+					return flyingEntity.flight.wait({ signal: opts.signal });
 				}
 			}
 			const flyingExact = inflightExact.get(exactKey);
-			if (flyingExact && !opts.forceFresh) return flyingExact.promise;
+			if (flyingExact && !flyingExact.flight.controller.signal.aborted && !opts.forceFresh) return flyingExact.flight.wait({ signal: opts.signal });
 			const reqEpoch = cacheEpoch;
-			const networkPromise = executeNetworkRequest(q, variables, retries, opts.forceFresh).then((data) => {
-				if (meta && data && cacheEpoch === reqEpoch && data?.MediaListCollection?.hasNextChunk !== true) {
-					const existing = entityCache.get(meta.entityKey);
-					if (!(!opts.forceFresh && existing && Date.now() - existing.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, existing.fields) && !isSubsetOf(existing.fields, meta.requiredFields))) entityCache.set(meta.entityKey, {
-						time: Date.now(),
-						data,
-						isSuperset: meta.isSuperset,
-						fields: meta.requiredFields
-					});
-				}
-				return data;
-			}).finally(() => {
-				if (inflightExact.get(exactKey)?.promise === networkPromise) inflightExact.delete(exactKey);
-				if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) inflightEntities.delete(meta.entityKey);
+			const cleanupFlightRefs = (targetFlight) => {
+				if (inflightExact.get(exactKey)?.flight === targetFlight) inflightExact.delete(exactKey);
+				if (meta && inflightEntities.get(meta.entityKey)?.flight === targetFlight) inflightEntities.delete(meta.entityKey);
 				maybeUnsubscribeMutationListener();
+			};
+			const flight = createSharedFlight({
+				start: (sharedSignal) => executeNetworkRequest(q, variables, retries, opts.forceFresh, 0, sharedSignal).then((data) => {
+					if (meta && data && cacheEpoch === reqEpoch && data?.MediaListCollection?.hasNextChunk !== true) {
+						const existing = entityCache.get(meta.entityKey);
+						if (!(!opts.forceFresh && existing && Date.now() - existing.time < ENTITY_TTL && isSubsetOf(meta.requiredFields, existing.fields) && !isSubsetOf(existing.fields, meta.requiredFields))) entityCache.set(meta.entityKey, {
+							time: Date.now(),
+							data,
+							isSuperset: meta.isSuperset,
+							fields: meta.requiredFields
+						});
+					}
+					return data;
+				}),
+				onEvict: cleanupFlightRefs,
+				onSettled: cleanupFlightRefs
 			});
 			inflightExact.set(exactKey, {
-				promise: networkPromise,
+				flight,
 				entityKey: meta?.entityKey
 			});
 			if (meta) {
 				const existing = inflightEntities.get(meta.entityKey);
-				if (!existing || !existing.isSuperset && meta.isSuperset) inflightEntities.set(meta.entityKey, {
-					promise: networkPromise,
+				if (!existing || existing.flight.controller.signal.aborted || !existing.isSuperset && meta.isSuperset) inflightEntities.set(meta.entityKey, {
+					flight,
 					isSuperset: meta.isSuperset,
 					fields: meta.requiredFields
 				});
 			}
-			return networkPromise;
+			return flight.wait({ signal: opts.signal });
 		}
 		function formatMediaListResult(mlc) {
 			const rawLists = Array.isArray(mlc?.lists) ? mlc.lists : [];
@@ -9785,12 +12149,31 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				user: mergedCollection.user
 			};
 		}
+		function isValidFastLoadEntry(entry) {
+			if (!entry || typeof entry !== "object") return false;
+			if (typeof entry.mediaId !== "number" || !Number.isFinite(entry.mediaId) || entry.mediaId <= 0) return false;
+			if (!entry.media || typeof entry.media !== "object" || typeof entry.media.id !== "number") return false;
+			if (typeof entry.status !== "string" || !entry.status) return false;
+			return true;
+		}
+		function isValidFastLoadMediaList(mlc) {
+			if (!mlc || typeof mlc !== "object" || !Array.isArray(mlc.lists) || mlc.hasNextChunk === true) return false;
+			for (const list of mlc.lists) {
+				if (list === null) continue;
+				if (typeof list !== "object" || !Array.isArray(list.entries)) return false;
+				for (const entry of list.entries) {
+					if (entry === null) continue;
+					if (!isValidFastLoadEntry(entry)) return false;
+				}
+			}
+			return true;
+		}
 		function parseRpcMediaList(payload) {
 			if (!payload || typeof payload !== "object") return null;
 			if (payload.hasNextChunk === true) return null;
 			const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
 			if (mlc && Array.isArray(mlc.lists)) {
-				if (mlc.hasNextChunk === true) return null;
+				if (!isValidFastLoadMediaList(mlc)) return null;
 				return formatMediaListResult(mlc);
 			}
 			const entities = payload.entities || payload;
@@ -9798,16 +12181,23 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (entriesMap && typeof entriesMap === "object") {
 				const mediaMap = entities.media || entities.listEntryMedia || {};
 				const allEntries = [];
-				for (const rawEntry of Object.values(entriesMap)) {
+				const normalizedById = new Map();
+				for (const [entryKey, rawEntry] of Object.entries(entriesMap)) {
 					if (!rawEntry || typeof rawEntry !== "object") continue;
 					const mediaId = rawEntry.mediaId || (typeof rawEntry.media === "number" ? rawEntry.media : rawEntry.media?.id);
 					if (!mediaId) continue;
 					const mediaObj = typeof rawEntry.media === "object" && rawEntry.media !== null ? rawEntry.media : mediaMap[mediaId] || { id: mediaId };
-					allEntries.push({
+					const normalized = {
 						...rawEntry,
 						mediaId,
 						media: mediaObj
-					});
+					};
+					allEntries.push(normalized);
+					normalizedById.set(entryKey, normalized);
+					if (rawEntry.id != null) {
+						const idKey = String(rawEntry.id);
+						if (idKey !== entryKey) normalizedById.set(idKey, normalized);
+					}
 				}
 				if (allEntries.length === 0) return null;
 				const userObj = entities.user ? Object.values(entities.user)[0] : void 0;
@@ -9818,7 +12208,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						name: sec.name || "",
 						isCustomList: !!sec.isCustomList,
 						status: sec.status,
-						entries: Array.isArray(sec.entries) ? sec.entries.map((id) => entriesMap[id]).filter(Boolean) : []
+						entries: Array.isArray(sec.entries) ? sec.entries.map((id) => typeof id === "string" || typeof id === "number" ? normalizedById.get(String(id)) : void 0).filter((e) => Boolean(e)) : []
 					});
 				}
 				const user = userObj && userObj.id ? {
@@ -9865,12 +12255,31 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return typeof val === "string" ? val.trim().toLowerCase() || void 0 : void 0;
 			});
 		}
-		function tryGetCachedMediaList(target, type, userId, userName) {
+		function resolveMediaListTarget(target, options) {
+			const optUserName = typeof options?.userName === "string" && options.userName.trim() ? options.userName.trim() : void 0;
+			const optUserId = parsePositiveId(options?.userId);
+			const hasExplicitOptId = optUserId !== null;
+			const hasExplicitOptName = optUserName !== void 0;
+			let inferredId;
+			let inferredName;
+			if (!hasExplicitOptId && !hasExplicitOptName) {
+				if (typeof target === "number") inferredId = parsePositiveId(target) ?? void 0;
+				else if (typeof target === "string") {
+					const trimmed = target.trim();
+					if (/^\d+$/.test(trimmed)) inferredId = parsePositiveId(Number(trimmed)) ?? void 0;
+					else if (trimmed) inferredName = trimmed;
+				}
+			}
+			return {
+				userId: optUserId ?? inferredId,
+				userName: optUserName ?? inferredName
+			};
+		}
+		function tryGetCachedMediaList(type, userId, userName) {
 			const win = pageWin();
 			const t = type.toUpperCase();
-			const isId = typeof target === "number" || /^\d+$/.test(String(target));
-			const id = userId || (isId ? Number(target) : void 0);
-			const name = (userName || (!isId ? String(target) : "")).trim().toLowerCase() || void 0;
+			const id = userId;
+			const name = userName ? userName.toLowerCase() : void 0;
 			const bridge = safeBridge(() => CoreHooks.getCacheBridge()) ?? null;
 			const userMap = safeBridge(() => bridge ? bridge.getUserMap() : win.__ALFL_USER_MAP__);
 			const idMap = safeBridge(() => bridge ? bridge.getIdMap() : win.__ALFL_ID_MAP__);
@@ -9881,7 +12290,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (resolvedName) entityKeys.push(`MediaListCollection:${t}:${resolvedName}`);
 			for (const k of entityKeys) {
 				const cached = entityCache.get(k);
-				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection && cached.data.MediaListCollection.hasNextChunk !== true) {
+				if (cached && Date.now() - cached.time < ENTITY_TTL && cached.data?.MediaListCollection && cached.data.MediaListCollection.hasNextChunk !== true && cached.fields && isSubsetOf(MEDIA_LIST_REQUIRED_FIELDS, cached.fields)) {
 					anilistLog.debug("🎯 Cache HIT for MediaListCollection via entityCache:", k);
 					return formatMediaListResult(cached.data.MediaListCollection);
 				}
@@ -9894,7 +12303,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						const raw = new TextDecoder().decode(cached.snap.buf);
 						const json = JSON.parse(raw);
 						const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-						if (mlc && Array.isArray(mlc.lists) && mlc.hasNextChunk !== true) {
+						if (isValidFastLoadMediaList(mlc)) {
 							anilistLog.debug(viaScan ? "🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):" : "🎯 Cache HIT for MediaListCollection via FastLoad GQL store:", k);
 							return formatMediaListResult(mlc);
 						}
@@ -9951,11 +12360,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			return null;
 		}
 		async function getMediaList(target, type = "ANIME", options) {
-			const isId = typeof target === "number" || /^\d+$/.test(String(target));
-			const userId = options?.userId || (isId ? Number(target) : void 0);
-			const userName = (options?.userName || (!isId ? String(target) : "")).trim() || void 0;
+			throwIfAborted(options?.signal);
+			const { userId, userName } = resolveMediaListTarget(target, options);
+			if (!userId && !userName) throw new Error("Invalid AniList user target for getMediaList");
 			if (!options?.forceFresh) {
-				const cached = tryGetCachedMediaList(target, type, userId, userName);
+				const cached = tryGetCachedMediaList(type, userId, userName);
 				if (cached) return cached;
 			}
 			const win = pageWin();
@@ -9973,25 +12382,31 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				if (resolvedName) rpcKeys.push(`rpc:MediaListCollection:${t}:${resolvedName}:{}`);
 				const checkInflight = async (k, flight) => {
 					if (!flight?.promise) return null;
+					throwIfAborted(options?.signal);
 					let timer;
 					try {
 						anilistLog.debug("⏳ Awaiting in-flight FastLoad RPC prefetch:", k);
-						const msg = await Promise.race([flight.promise, new Promise((_, reject) => {
+						const msg = await raceWithSignal(Promise.race([flight.promise, new Promise((_, reject) => {
 							timer = setTimeout(() => reject(new Error("timeout")), 5e3);
-						})]);
+						})]), options?.signal);
+						throwIfAborted(options?.signal);
 						const parsed = parseRpcMediaList(msg?.result ?? msg);
 						if (parsed && parsed.allEntries.length > 0) {
 							anilistLog.debug("🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:", k);
 							return parsed;
 						}
-					} catch (_) {} finally {
+					} catch (err) {
+						if (options?.signal?.aborted) throw err;
+					} finally {
 						if (timer !== void 0) clearTimeout(timer);
 					}
 					return null;
 				};
+				const seenFlights = new Set();
 				for (const k of rpcKeys) {
 					const flight = safeBridge(() => rpcInflight.get(k));
-					if (flight) {
+					if (flight && !seenFlights.has(flight)) {
+						seenFlights.add(flight);
 						const res = await checkInflight(k, flight);
 						if (res) return res;
 					}
@@ -10002,58 +12417,32 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					return list;
 				}) || [];
 				for (const [k, flight] of matchingFlights) {
+					if (seenFlights.has(flight)) continue;
+					seenFlights.add(flight);
 					const res = await checkInflight(k, flight);
 					if (res) return res;
 				}
 			}
-			const mlc = (await query(`query ($userId: Int, $userName: String, $type: MediaType) {
-      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
-        user { id name }
-        lists {
-          name
-          isCustomList
-          status
-          entries {
-            id
-            mediaId
-            status
-            score
-            progress
-            progressVolumes
-            repeat
-            priority
-            notes
-            customLists
-            startedAt { year month day }
-            completedAt { year month day }
-            media {
-              id
-              idMal
-              format
-              episodes
-              chapters
-              status
-              title { userPreferred english romaji native }
-            }
-          }
-        }
-      }
-    }`, {
+			const mlc = (await query(MEDIA_LIST_SINGLE_QUERY, {
 				userId: userId || void 0,
 				userName: userId ? void 0 : userName || void 0,
 				type
-			}, { forceFresh: options?.forceFresh }))?.MediaListCollection;
+			}, {
+				forceFresh: options?.forceFresh,
+				signal: options?.signal
+			}))?.MediaListCollection;
 			if (!mlc || !Array.isArray(mlc.lists)) throw new Error("Unexpected MediaListCollection response shape");
 			return formatMediaListResult(mlc);
 		}
-		async function viewer(forceFresh = false) {
+		async function viewer(forceFresh = false, opts) {
+			throwIfAborted(opts?.signal);
 			const doc = pageWin().document || document;
 			syncFromPage();
 			if (isLoggedOutNav(doc)) return null;
 			if (!forceFresh) {
 				const name = store$1.get("al_username", null);
 				const fmt = store$1.get("al_score_format", null);
-				const id = Number(store$1.get("al_user_id", 0));
+				const id = parsePositiveId(store$1.get("al_user_id", null));
 				if (name && fmt && id) return {
 					id,
 					name,
@@ -10063,8 +12452,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (!hasAuth()) return null;
 			const myEpoch = viewerEpoch;
 			const VIEWER_QUERY = "query { Viewer { id name mediaListOptions { scoreFormat } } }";
-			const fetchViewer = (fresh) => query(VIEWER_QUERY, {}, { forceFresh: fresh }).catch((e) => {
-				if (e?.auth) throw e;
+			const fetchViewer = (fresh) => query(VIEWER_QUERY, {}, {
+				forceFresh: fresh,
+				signal: opts?.signal
+			}).catch((e) => {
+				if (e?.auth || isAbortError(e) || opts?.signal?.aborted) throw e;
 				return null;
 			});
 			const checkPostAwaitViewer = (res) => {
@@ -10077,10 +12469,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return false;
 			};
 			let d = await fetchViewer(forceFresh);
+			throwIfAborted(opts?.signal);
 			if (checkPostAwaitViewer(d)) return null;
 			if (d?.Viewer && !d.Viewer.mediaListOptions?.scoreFormat && !forceFresh) {
 				invalidateLocal("Viewer");
 				d = await fetchViewer(true);
+				throwIfAborted(opts?.signal);
 				if (checkPostAwaitViewer(d)) return null;
 			}
 			if (d?.Viewer) {
@@ -10105,12 +12499,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			});
 		};
 		const invalidateMediaList = (target, type) => {
-			if (!target) return invalidate("MediaListCollection");
+			const who = target ? String(target).trim().toLowerCase() : "";
+			if (!who) return invalidate("MediaListCollection");
 			const t = type ? type.toUpperCase() : "";
-			const prefix = t ? `MediaListCollection:${t}:${String(target).trim().toLowerCase()}` : `MediaListCollection:`;
-			invalidate(prefix);
+			if (t) {
+				invalidate(`MediaListCollection:${t}:${who}`);
+				return;
+			}
+			invalidate(`MediaListCollection:ANIME:${who}`);
+			invalidate(`MediaListCollection:MANGA:${who}`);
 		};
-		const hasAuth = () => isBrowserLoggedIn();
+		const hasAuth = (opts) => isBrowserLoggedIn(opts);
 		const resumeAt = () => limiter.resumeAt;
 		return {
 			query,
@@ -10149,14 +12548,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
         } }`, {
 					id: Number(id),
 					type
-				}))?.Media || null;
+				}, { signal: opts?.signal }))?.Media || null;
 			} catch (e) {
 				if (opts?.throwAuth && e?.auth) throw e;
 				anilistLog.debug("MediaData fetch failed:", e?.message || e);
 				return null;
 			}
 		}
-		async function save(id, _type, c) {
+		async function save(id, _type, c, opts) {
 			const entry = (await AniList.query(`mutation($mediaId:Int!,$score:Float,$progress:Int,$status:MediaListStatus,$completedAt:FuzzyDateInput){
         SaveMediaListEntry(mediaId:$mediaId,score:$score,progress:$progress,status:$status,completedAt:$completedAt){
           score progress status completedAt { year month day }
@@ -10166,7 +12565,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				progress: c.progress,
 				status: c.status,
 				completedAt: c.completedAt
-			}))?.SaveMediaListEntry || null;
+			}, { signal: opts?.signal }))?.SaveMediaListEntry || null;
 			AniList.invalidate(`Media:${id}`);
 			AniList.invalidateMediaList();
 			return entry;
@@ -10203,7 +12602,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			title: typeof o.title === "string" && o.title.trim() ? o.title.trim() : `Media #${id}`,
 			updatedAt: typeof o.updatedAt === "number" && Number.isFinite(o.updatedAt) && o.updatedAt >= 0 ? o.updatedAt : defaultUpdatedAt
 		};
-		if (typeof o.cover === "string" && o.cover.trim()) entry.cover = o.cover.trim();
+		if (typeof o.cover === "string") {
+			const cover = o.cover.trim();
+			if (/^https?:\/\//i.test(cover)) entry.cover = cover;
+		}
 		return {
 			id,
 			entry
@@ -10313,8 +12715,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	var STALE_MS = 864e5;
 	var refreshing = false;
-	async function refreshStaleOverrides() {
-		if (refreshing) return;
+	async function refreshStaleOverrides(opts) {
+		const signal = opts?.signal;
+		if (refreshing || signal?.aborted) return;
 		const initial = getManualOverrides();
 		const keys = Object.keys(initial);
 		if (!keys.length) return;
@@ -10323,6 +12726,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		refreshing = true;
 		try {
 			for (let i = 0; i < staleIds.length; i += 50) {
+				if (signal?.aborted) break;
 				const batch = staleIds.slice(i, i + 50);
 				const q = `query ($ids: [Int]) {
         Page(page: 1, perPage: 50) {
@@ -10335,7 +12739,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
         }
       }`;
 				try {
-					const res = await AniList.query(q, { ids: batch });
+					const res = await AniList.query(q, { ids: batch }, { signal });
+					if (signal?.aborted) break;
 					const list = Array.isArray(res?.Page?.media) ? res.Page.media : [];
 					const current = getManualOverrides();
 					let changed = false;
@@ -10346,7 +12751,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							const existing = current[idStr];
 							const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || existing.title;
 							const cover = m.coverImage?.medium || existing.cover;
-							const type = m.type === "MANGA" ? "MANGA" : "ANIME";
+							const type = m.type === "MANGA" || m.type === "ANIME" ? m.type : existing.type;
 							const nextEntry = {
 								...existing,
 								title: t,
@@ -10359,8 +12764,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							changed = true;
 						}
 					}
-					if (changed) saveManualOverrides(current);
+					if (changed && !signal?.aborted) saveManualOverrides(current);
 				} catch (e) {
+					if (signal?.aborted || isAbortError(e)) break;
 					malLog$1.warn("Failed to refresh stale overrides batch:", e);
 					break;
 				}
@@ -10368,6 +12774,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		} finally {
 			refreshing = false;
 		}
+	}
+	function buildNyaaUrl(title, providers = []) {
+		return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${title.normalize("NFC").trim().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(encodeURIComponent).join("+")}#:~:text=${providers.map(encodeURIComponent).join("&text=")}`;
 	}
 	defineModule({
 		id: "nyaa",
@@ -10395,51 +12804,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const LINK_ID = ctx.getId("find-on-nyaa");
 			const EDIT_ID = ctx.getId("edit-mal-id");
 			const H1_SEL = ".page-content .header .content > h1";
-			const nyaaUrl = (title) => {
-				const q = title.trim().replace(/[^a-zA-Z0-9]+/g, "+").replace(/^\++|\++$/g, "");
-				const frag = (ctx.get("nyaaProviders") || []).map(encodeURIComponent).join("&text=");
-				return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
-			};
+			const nyaaUrl = (title) => buildNyaaUrl(title, ctx.get("nyaaProviders") || []);
 			let activeLink = null;
-			let activeEdit = null;
 			let activeRoute = null;
-			let quickEditFn = ctx.services.get("manualOverrides:quickEdit") ?? null;
-			const ensureEditMount = () => {
-				if (!activeRoute || !quickEditFn) return;
-				if ((activeEdit?.el())?.isConnected) return;
-				const h1 = activeLink?.el()?.parentElement || document.querySelector(H1_SEL);
-				if (!h1 || !h1.isConnected) return;
-				if (activeEdit) activeEdit.unmount();
-				const route = activeRoute;
-				activeEdit = ctx.mount({
-					id: EDIT_ID,
-					anchor: () => activeLink?.el()?.parentElement || document.querySelector(H1_SEL),
-					position: "beforeend",
-					match: () => !!quickEditFn && activeRoute === route,
-					create: () => {
-						const editBtn = document.createElement("a");
-						editBtn.href = "#";
-						editBtn.title = "Set or edit MyAnimeList mapping";
-						editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
-						editBtn.innerHTML = icon("edit", 16);
-						editBtn.addEventListener("click", (e) => {
-							e.preventDefault();
-							e.stopPropagation();
-							quickEditFn?.(route.id, route.type);
-						});
-						return editBtn;
-					}
-				});
-			};
-			ctx.services.onAvailable("manualOverrides:quickEdit", (impl) => {
-				quickEditFn = impl;
-				ensureEditMount();
-				return () => {
-					if (quickEditFn === impl) quickEditFn = null;
-					activeEdit?.unmount();
-					activeEdit = null;
-				};
-			});
 			ctx.events.on("manualOverrides:changed", (changedId) => {
 				const linkEl = activeLink?.el();
 				if (!linkEl || !activeRoute) return;
@@ -10454,7 +12821,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					id: Number(rc.match[2])
 				};
 				activeRoute = route;
-				ctx.api.media.get(route.id, route.type);
+				const pendingPopups = new Set();
+				rc.api.media.get(route.id, route.type).catch(() => null);
 				let cancelTouchTimer = null;
 				let cancelResetTimer = null;
 				const clearTouchTimers = () => {
@@ -10467,6 +12835,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					id: LINK_ID,
 					anchor: H1_SEL,
 					position: "beforeend",
+					ownUi: true,
 					style: (sel) => `${sel},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}${sel}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}${sel}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`,
 					create: () => {
 						clearTouchTimers();
@@ -10488,7 +12857,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 							cancelTouchTimer?.();
 							cancelTouchTimer = null;
 						};
-						rc.listen(a, "touchstart", ((e) => {
+						a.addEventListener("touchstart", (e) => {
 							if (e.touches.length !== 1) return;
 							sx = e.touches[0].clientX;
 							sy = e.touches[0].clientY;
@@ -10504,40 +12873,54 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 									cancelResetTimer = null;
 								}, 800);
 							}, 550);
-						}), { passive: true });
-						rc.listen(a, "touchmove", ((e) => {
+						}, { passive: true });
+						a.addEventListener("touchmove", (e) => {
 							if (!cancelTouchTimer || !e.touches.length) return;
 							if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
-						}), { passive: true });
-						rc.listen(a, "touchend", cancel, { passive: true });
-						rc.listen(a, "touchcancel", cancel, { passive: true });
-						rc.listen(a, "contextmenu", (e) => {
+						}, { passive: true });
+						a.addEventListener("touchend", cancel, { passive: true });
+						a.addEventListener("touchcancel", cancel, { passive: true });
+						a.addEventListener("contextmenu", (e) => {
 							if (longPressed) e.preventDefault();
 						});
-						rc.listen(a, "click", (ev) => {
-							const e = ev;
+						a.addEventListener("click", (e) => {
+							e.preventDefault();
+							if (longPressed) {
+								longPressed = false;
+								e.stopPropagation();
+								return;
+							}
+							if (rc.signal.aborted) return;
+							const title = titleText();
+							const nyaa = nyaaUrl(title);
+							if (e.ctrlKey || e.metaKey || isIgnored(route.id)) {
+								openTab(nyaa);
+								return;
+							}
+							const w = window.open("about:blank", "_blank");
+							if (w) {
+								w.opener = null;
+								pendingPopups.add(w);
+							}
 							(async () => {
-								e.preventDefault();
-								if (longPressed) {
-									longPressed = false;
-									e.stopPropagation();
+								let media = null;
+								try {
+									media = await rc.api.media.get(route.id, route.type);
+								} catch {
+									media = null;
+								}
+								if (rc.signal.aborted) {
+									if (w && pendingPopups.delete(w) && !w.closed) w.close?.();
 									return;
 								}
-								const w = window.open("about:blank", "_blank");
-								const title = titleText();
-								const nyaa = nyaaUrl(title);
-								let target = nyaa;
-								if (!e.ctrlKey && !e.metaKey) {
-									if (isIgnored(route.id)) target = nyaa;
-									else {
-										const media = await ctx.api.media.get(route.id, route.type);
-										const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
-										if (effectiveMalId) target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
-										else target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
-									}
+								if (w?.closed) {
+									pendingPopups.delete(w);
+									return;
 								}
+								const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
+								const target = effectiveMalId ? `https://myanimelist.net/${route.kind}/${effectiveMalId}` : `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
 								if (w) {
-									w.opener = null;
+									pendingPopups.delete(w);
 									w.location.href = target;
 								} else openTab(target);
 							})();
@@ -10546,18 +12929,49 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					}
 				});
 				activeLink = link;
-				ensureEditMount();
+				let currentQuickEdit = null;
+				const editMount = rc.mount({
+					id: EDIT_ID,
+					anchor: () => link.el()?.parentElement || document.querySelector(H1_SEL),
+					position: "beforeend",
+					ownUi: true,
+					match: () => currentQuickEdit !== null,
+					create: () => {
+						const editBtn = document.createElement("a");
+						editBtn.href = "#";
+						editBtn.title = "Set or edit MyAnimeList mapping";
+						editBtn.setAttribute("aria-label", "Set or edit MyAnimeList mapping");
+						editBtn.innerHTML = icon("edit", 16);
+						editBtn.addEventListener("click", (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							currentQuickEdit?.(route.id, route.type);
+						});
+						return editBtn;
+					}
+				});
+				const stopQuickEditWatch = ctx.services.onAvailable("manualOverrides:quickEdit", (quickEditFn) => {
+					if (rc.signal.aborted) return;
+					currentQuickEdit = quickEditFn;
+					editMount.refresh();
+					return () => {
+						if (currentQuickEdit === quickEditFn) {
+							currentQuickEdit = null;
+							editMount.refresh();
+						}
+					};
+				});
 				rc.onCleanup(() => {
+					for (const w of pendingPopups) if (!w.closed) w.close?.();
+					pendingPopups.clear();
 					clearTouchTimers();
+					stopQuickEditWatch();
+					currentQuickEdit = null;
 					if (activeLink === link) activeLink = null;
 					if (activeRoute === route) activeRoute = null;
-					activeEdit?.unmount();
-					activeEdit = null;
 				});
 			});
 			ctx.onCleanup(() => {
-				activeEdit?.unmount();
-				activeEdit = null;
 				activeLink = null;
 				activeRoute = null;
 			});
@@ -10592,7 +13006,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					const links = el.matches("a[href]") ? [el] : el.querySelectorAll("a[href]");
 					for (const a of links) {
 						const href = a.getAttribute("href");
-						if (href && SLUG_HREF.test(href)) a.setAttribute("href", strip(href));
+						if (href && SLUG_HREF.test(href)) {
+							const next = strip(href);
+							if (next !== href) a.setAttribute("href", next);
+						}
 					}
 				}
 			}
@@ -10635,7 +13052,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		})}  ${level === "error" ? "ERROR" : level === "warn" ? "WARN " : level === "success" ? "OK   " : "INFO "} ${String(msg)}`;
 		logLines.unshift(line);
 		logLines = logLines.slice(0, 60);
-		console[level === "error" ? "error" : level === "warn" ? "warn" : "log"]("[AL→MAL Sync]", msg);
+		if (level === "error") malLog.error(msg);
+		else if (level === "warn") malLog.warn(msg);
+		else malLog.debug(msg);
 		lastNotice = String(msg);
 		try {
 			uiSink?.onLog?.({
@@ -10715,9 +13134,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return typeof token === "string" && token.length > 0 && typeof expiresAt === "number" && Number.isFinite(expiresAt) && token !== failedToken && Date.now() < expiresAt - 6e4;
 	}
 	async function malEnsureToken(failedToken) {
+		if (malRefresh) return malRefresh;
 		const current = store$1.get("mal_token", null);
 		if (isStoredTokenValid(current, store$1.get("mal_expires_at", 0), failedToken)) return current;
-		if (!malRefresh) malRefresh = (async () => {
+		malRefresh = (async () => {
 			const latest = store$1.get("mal_token", null);
 			if (isStoredTokenValid(latest, store$1.get("mal_expires_at", 0), failedToken)) return latest;
 			const refresh = store$1.get("mal_refresh_token", null);
@@ -10771,6 +13191,54 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	});
 	var BREAKER_THRESHOLD = 8;
 	var BREAKER_COOLDOWN_MS = 9e4;
+	function createMalAbortError(signal) {
+		const reason = signal?.reason;
+		const base = reason instanceof Error ? reason : createAbortError(signal);
+		const tagged = base;
+		if (!tagged.cancelled) try {
+			tagged.cancelled = true;
+		} catch {
+			return Object.assign(new Error(base.message), {
+				name: base.name,
+				cancelled: true
+			});
+		}
+		return tagged;
+	}
+	function rethrowMalAbort(err, signal) {
+		if (signal?.aborted) throw createMalAbortError(signal);
+		if (isAbortError(err)) {
+			const tagged = err;
+			if (!tagged.cancelled) try {
+				tagged.cancelled = true;
+			} catch {
+				throw Object.assign(new Error(tagged.message), {
+					name: tagged.name,
+					cancelled: true
+				});
+			}
+			throw tagged;
+		}
+		throw err;
+	}
+	function sleepMal(ms, signal) {
+		return sleep(ms, signal).catch((err) => rethrowMalAbort(err, signal));
+	}
+	function normalizeMalCallOptions(cancelOrOpts) {
+		const opts = typeof cancelOrOpts === "function" ? { checkCancel: cancelOrOpts } : cancelOrOpts;
+		const hasExplicit = Boolean(opts?.checkCancel || opts?.signal);
+		const checkFn = opts?.checkCancel ?? (hasExplicit ? void 0 : () => hooks.checkCancel?.());
+		const signal = opts?.signal;
+		const check = () => {
+			checkFn?.();
+			if (signal?.aborted) throw createMalAbortError(signal);
+		};
+		return {
+			checkFn,
+			signal,
+			check
+		};
+	}
 	var breaker = (() => {
 		let fails = 0;
 		let until = 0;
@@ -10787,11 +13255,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					log(`⚠ ${BREAKER_THRESHOLD} consecutive MAL failures — pausing writes for ${BREAKER_COOLDOWN_MS / 1e3}s.`);
 				}
 			},
-			async wait(checkCancel) {
+			async wait(cancelOrOpts) {
+				const { check, signal } = normalizeMalCallOptions(cancelOrOpts);
 				while (Date.now() < until) {
-					checkCancel?.();
-					await sleep(Math.min(1e3, until - Date.now()));
+					check();
+					await sleepMal(Math.min(1e3, until - Date.now()), signal);
 				}
+				check();
 			},
 			get trips() {
 				return trips;
@@ -10813,21 +13283,29 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 	};
 	function parseRetryAfterMs(headers, fallback) {
-		const m = String(headers || "").match(/retry-after:\s*(\S+)/i);
+		const m = String(headers || "").match(/retry-after:\s*([^\r\n]+)/i);
 		if (!m) return fallback;
-		const secs = Number(m[1]);
+		const raw = m[1].trim();
+		if (!raw) return fallback;
+		const secs = Number(raw);
 		if (Number.isFinite(secs)) return Math.max(1e3, Math.min(secs * 1e3, 12e4));
-		const date = Date.parse(m[1]);
+		const date = Date.parse(raw);
 		return Number.isFinite(date) ? Math.max(1e3, Math.min(date - Date.now(), 12e4)) : fallback;
 	}
 	var looksLimited = (res) => res.status === 429 || res.status === 403 && /^\s*</.test(res.responseText || "");
 	var backoff = (attempt) => Math.min(3e4, 1e3 * 2 ** attempt) * (.8 + Math.random() * .4);
-	async function malRequestWithToken({ method = "GET", url, data, headers = {}, timeout = 3e4 }, checkCancel, failedToken, onTokenResolved) {
-		await malLimiter.acquire(checkCancel ?? hooks.checkCancel);
-		const token = await malEnsureToken(failedToken);
+	async function malRequestWithToken({ method = "GET", url, data, headers = {}, timeout = 3e4 }, cancelOrOpts, failedToken, onTokenResolved) {
+		const { check, signal } = normalizeMalCallOptions(cancelOrOpts);
+		await malLimiter.acquire({
+			check,
+			signal
+		}).catch((err) => rethrowMalAbort(err, signal));
+		check();
+		const token = await raceWithSignal(malEnsureToken(failedToken), signal, createMalAbortError);
+		check();
 		onTokenResolved?.();
 		malLog.debug(`MAL ${method} ${url}`, data ? { data } : "");
-		const res = await gm.request(url, {
+		const res = await raceWithSignal(gm.request(url, {
 			method,
 			data,
 			timeout,
@@ -10835,7 +13313,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				Authorization: `Bearer ${token}`,
 				...headers
 			}
-		});
+		}), signal, createMalAbortError);
+		check();
 		malLog.debug(`MAL ${method} response: ${res.status} for ${url}`);
 		if (looksLimited(res)) malLimiter.limit(parseRetryAfterMs(res.responseHeaders, res.status === 429 ? 5e3 : 6e4));
 		else if (res.status >= 500) malLimiter.limit(2e3);
@@ -10845,23 +13324,31 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			token
 		};
 	}
-	async function malCall(opts, retries = 4, checkCancel) {
-		const check = checkCancel ?? hooks.checkCancel;
+	async function malCall(opts, retriesOrCallOpts = 4, cancelOrOpts) {
+		const retries = typeof retriesOrCallOpts === "number" ? retriesOrCallOpts : 4;
+		const { check, signal } = normalizeMalCallOptions(typeof retriesOrCallOpts === "object" && retriesOrCallOpts !== null ? retriesOrCallOpts : cancelOrOpts);
+		const forwardOpts = {
+			checkCancel: check,
+			signal
+		};
 		let refreshed = false;
 		let failedToken;
-		for (let attempt = 0;; attempt++) {
-			check?.();
+		let attempt = 0;
+		while (true) {
+			check();
 			let res;
 			let usedToken = "";
 			try {
-				const out = await malRequestWithToken(opts, check, failedToken, () => {
+				const out = await malRequestWithToken(opts, forwardOpts, failedToken, () => {
 					failedToken = void 0;
 				});
 				res = out.res;
 				usedToken = out.token;
 			} catch (e) {
-				if (e.auth || e.cancelled || attempt >= retries) throw e;
-				await sleep(backoff(attempt));
+				if (e?.auth || e?.cancelled || isAbortError(e) || signal?.aborted || attempt >= retries) throw e;
+				await sleepMal(backoff(attempt), signal);
+				check();
+				attempt++;
 				continue;
 			}
 			if (res.status === 401) {
@@ -10875,6 +13362,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			if (!looksLimited(res) && res.status < 500) return res;
 			if (attempt >= retries) return res;
+			if (!looksLimited(res)) {
+				check();
+				await sleepMal(backoff(attempt), signal);
+				check();
+			}
+			attempt++;
 		}
 	}
 	var parseJson = (res, what) => {
@@ -10884,42 +13377,47 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			throw new Error(`MAL returned invalid JSON for ${what}.`);
 		}
 	};
-	async function malUpdateEntry(type, malId, patch) {
+	async function malUpdateEntry(type, malId, patch, opts) {
+		const body = new URLSearchParams();
+		for (const [k, v] of Object.entries(patch)) if (v !== void 0 && v !== null) body.append(k, String(v));
 		const res = await malCall({
 			method: "PUT",
 			url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}/${malId}/my_list_status`,
-			data: new URLSearchParams(patch).toString(),
+			data: body.toString(),
 			headers: { "Content-Type": "application/x-www-form-urlencoded" }
-		});
+		}, opts);
 		if (res.status < 200 || res.status >= 300) throw new MalError("MAL", res);
 		return res;
 	}
-	async function malDeleteEntry(type, malId) {
+	async function malDeleteEntry(type, malId, opts) {
 		const res = await malCall({
 			method: "DELETE",
 			url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}/${malId}/my_list_status`
-		});
+		}, opts);
 		if (res.status === 404) return res;
 		if (res.status < 200 || res.status >= 300) throw new MalError("MAL delete", res);
 		return res;
 	}
-	async function malWhoAmI() {
-		const res = await malCall({ url: `${MAL_API}/users/@me` });
+	async function malWhoAmI(opts) {
+		const res = await malCall({ url: `${MAL_API}/users/@me` }, opts);
 		if (res.status < 200 || res.status >= 300) throw new MalError("MAL profile", res);
 		return parseJson(res, "the profile");
 	}
-	async function malFetchList(type) {
+	async function malFetchList(type, opts) {
 		const MAL_LIST_PAGE_SIZE = 1e3;
 		const MAL_LIST_MAX = 1e5;
+		const { check } = normalizeMalCallOptions(opts);
 		const anime = type === "ANIME";
 		const fields = anime ? "num_episodes,list_status{status,score,num_episodes_watched,is_rewatching,num_times_rewatched,start_date,finish_date,comments}" : "num_chapters,num_volumes,list_status{status,score,num_chapters_read,num_volumes_read,is_rereading,num_times_reread,start_date,finish_date,comments}";
 		const entries = {};
 		let total = 0;
 		for (let offset = 0; offset <= MAL_LIST_MAX;) {
+			check();
 			const res = await malCall({
 				url: `${MAL_API}/users/@me/${anime ? "animelist" : "mangalist"}?fields=${encodeURIComponent(fields)}&limit=${MAL_LIST_PAGE_SIZE}&offset=${offset}&nsfw=true`,
 				timeout: 6e4
-			}, 6);
+			}, 6, opts);
+			check();
 			if (res.status < 200 || res.status >= 300) throw new MalError("MAL list", res);
 			const json = parseJson(res, "the list");
 			const nodes = Array.isArray(json.data) ? json.data : [];
@@ -10941,14 +13439,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		return entries;
 	}
-	var searchCandidates = memo(async (type, q) => {
+	var SEARCH_CACHE_MAX = 1e3;
+	var searchCache = new Map();
+	var searchFlights = new Map();
+	async function fetchSearchCandidates(type, q, opts) {
 		const params = new URLSearchParams({
 			q: q.slice(0, 64),
 			limit: "10",
 			nsfw: "true",
 			fields: "alternative_titles,start_date"
 		});
-		const res = await malCall({ url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}?${params}` }, 2);
+		const res = await malCall({ url: `${MAL_API}/${type === "ANIME" ? "anime" : "manga"}?${params}` }, 2, opts);
 		if (res.status === 400) return [];
 		if (res.status < 200 || res.status >= 300) throw new MalError("MAL search", res);
 		const json = parseJson(res, "a search");
@@ -10966,10 +13467,52 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				year: Number(String(n.start_date || "").slice(0, 4)) || 0
 			};
 		});
-	});
-	async function searchMalId(type, entry) {
+	}
+	async function searchCandidates(key, type, q, opts) {
+		const { check, signal } = normalizeMalCallOptions(opts);
+		check();
+		const k = String(key);
+		if (searchCache.has(k)) return searchCache.get(k);
+		let flight = searchFlights.get(k);
+		if (!flight || flight.controller.signal.aborted) {
+			flight = createSharedFlight({
+				start: (controllerSignal) => {
+					return fetchSearchCandidates(type, q, {
+						checkCancel: () => {
+							if (controllerSignal.aborted) throw createMalAbortError(controllerSignal);
+						},
+						signal: controllerSignal
+					}).then((cands) => {
+						if (!controllerSignal.aborted) {
+							if (searchCache.size >= SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value);
+							searchCache.set(k, cands);
+						}
+						return cands;
+					});
+				},
+				onEvict: (evicted) => {
+					if (searchFlights.get(k) === evicted) searchFlights.delete(k);
+				},
+				onSettled: (doneFlight) => {
+					if (searchFlights.get(k) === doneFlight) searchFlights.delete(k);
+				},
+				createAbortError: createMalAbortError
+			});
+			searchFlights.set(k, flight);
+		}
+		return flight.wait({
+			signal,
+			check
+		});
+	}
+	async function searchMalId(type, entry, opts) {
+		const { check } = normalizeMalCallOptions(opts);
+		check();
 		for (const q of entry.queryTitles.filter((s) => s.length >= 3).slice(0, 2)) {
-			const ok = (await searchCandidates(`${type}:${q}`, type, q)).filter((c) => c.id && c.titles.some((t) => entry.titles.includes(t)) && (!c.year || !entry.startYear || Math.abs(c.year - entry.startYear) <= 1));
+			check();
+			const cands = await searchCandidates(`${type}:${q}`, type, q, opts);
+			check();
+			const ok = cands.filter((c) => c.id && c.titles.some((t) => entry.titles.includes(t)) && (!c.year || !entry.startYear || Math.abs(c.year - entry.startYear) <= 1));
 			if (ok.length === 1) return ok[0].id;
 			if (ok.length > 1) {
 				const exact = ok.filter((c) => c.year && c.year === entry.startYear);
@@ -11110,15 +13653,25 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			settled: makeEmptyStore()
 		}
 	};
+	var syncStoresInitialized = false;
 	function initSyncStores(createPersistent) {
 		for (const t of TYPES) {
 			stores[t].ids = createPersistent(`idmap_${t}`, pruneIds);
 			stores[t].settled = createPersistent(`settled_${t}`, pruneSettled);
 		}
+		syncStoresInitialized = true;
 	}
-	var clearCache = (c) => {
+	function resetSyncStores() {
+		syncStoresInitialized = false;
+		for (const t of TYPES) {
+			stores[t].ids = makeEmptyStore();
+			stores[t].settled = makeEmptyStore();
+		}
+	}
+	var clearCache = (c, persist = true) => {
 		for (const k of Object.keys(c.data)) delete c.data[k];
-		c.save();
+		if (persist) c.save();
+		else c.cancel?.();
 	};
 	var PENDING_DELETES_KEY = "pending_deletes";
 	function getPendingDeletes() {
@@ -11146,20 +13699,40 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		syncStore.del(PENDING_DELETES_KEY);
 	}
 	var heartbeat = null;
-	async function acquireLock() {
+	var syncEpoch = 0;
+	var lockRunToken = 0;
+	function bumpSyncEpoch() {
+		return ++syncEpoch;
+	}
+	async function acquireLock(expectedEpoch = syncEpoch) {
+		if (expectedEpoch !== syncEpoch) return false;
 		const lock = syncStore.jsonGet(LOCK_KEY, null);
 		if (lock && lock.tab !== TAB_ID && Number.isFinite(lock.at) && Date.now() - lock.at < LOCK_STALE_MS) return false;
-		const beat = () => syncStore.jsonSet(LOCK_KEY, {
-			at: Date.now(),
-			tab: TAB_ID
-		});
+		const token = ++lockRunToken;
+		const beat = () => {
+			if (expectedEpoch !== syncEpoch || token !== lockRunToken) {
+				if (heartbeat) {
+					clearInterval(heartbeat);
+					heartbeat = null;
+				}
+				return;
+			}
+			syncStore.jsonSet(LOCK_KEY, {
+				at: Date.now(),
+				tab: TAB_ID
+			});
+		};
 		beat();
 		await sleep(250);
+		if (expectedEpoch !== syncEpoch || token !== lockRunToken) return false;
 		if (syncStore.jsonGet(LOCK_KEY, null)?.tab !== TAB_ID) return false;
+		if (heartbeat) clearInterval(heartbeat);
 		heartbeat = setInterval(beat, LOCK_HEARTBEAT_MS);
 		return true;
 	}
-	function releaseLock() {
+	function releaseLock(expectedEpoch) {
+		if (expectedEpoch !== void 0 && expectedEpoch !== syncEpoch) return;
+		lockRunToken++;
 		if (heartbeat) clearInterval(heartbeat);
 		heartbeat = null;
 		if (syncStore.jsonGet(LOCK_KEY, null)?.tab === TAB_ID) syncStore.del(LOCK_KEY);
@@ -11266,15 +13839,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return patch;
 	}
 	function fallbackPatch(type, patch, mal, tried) {
-		if (!tried.has("dates")) {
-			tried.add("dates");
-			if ("start_date" in patch || "finish_date" in patch) {
-				const out = { ...patch };
-				delete out.start_date;
-				delete out.finish_date;
-				if (Object.keys(out).length) return out;
-			}
-		}
 		if (!tried.has("cap")) {
 			tried.add("cap");
 			const caps = type === "ANIME" ? { num_watched_episodes: mal?.__total } : {
@@ -11288,6 +13852,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				changed = true;
 			}
 			if (changed) return out;
+		}
+		if (!tried.has("dates")) {
+			tried.add("dates");
+			if ("start_date" in patch || "finish_date" in patch) {
+				const out = { ...patch };
+				delete out.start_date;
+				delete out.finish_date;
+				if (Object.keys(out).length) return out;
+			}
 		}
 		return null;
 	}
@@ -11352,12 +13925,29 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		stores[type].ids.data[mediaId] = rec;
 		stores[type].ids.save();
 	}
-	async function runPool(items, worker, concurrency) {
+	function checkTargetCancel(opts) {
+		if (opts?.checkCancel) opts.checkCancel();
+		else checkCancel();
+		if (opts?.signal?.aborted) {
+			const e = new Error("Sync stopped.");
+			e.cancelled = true;
+			throw e;
+		}
+	}
+	async function runPool(items, worker, concurrency, opts) {
+		const poolOpts = opts && typeof opts.aborted === "boolean" ? { signal: opts } : opts;
 		let i = 0;
 		let failure = null;
 		const lane = async () => {
 			while (!failure && i < items.length) {
+				if (poolOpts?.checkCancel || poolOpts?.signal) try {
+					checkTargetCancel(poolOpts);
+				} catch (e) {
+					failure = failure || e;
+					break;
+				}
 				const n = i++;
+				if (n >= items.length) break;
 				try {
 					await worker(items[n], n);
 				} catch (e) {
@@ -11368,7 +13958,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		await Promise.all(Array.from({ length: Math.min(concurrency, items.length) || 1 }, lane));
 		if (failure) throw failure;
 	}
-	async function resolveTargets(type, entries, mal, c) {
+	async function resolveTargets(type, entries, mal, c, opts) {
+		const rawOpts = opts && typeof opts.aborted === "boolean" ? { signal: opts } : opts;
+		const malOpts = {
+			checkCancel: () => checkTargetCancel(rawOpts),
+			signal: rawOpts?.signal
+		};
 		const idx = buildTitleIndex(mal);
 		const targets = [];
 		const pending = [];
@@ -11424,9 +14019,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		await runPool(pending, async (entry) => {
 			let id = 0;
 			try {
-				id = await searchMalId(type, entry);
+				id = await searchMalId(type, entry, malOpts);
 			} catch (e) {
-				if (e.auth || e.cancelled) throw e;
+				if (e?.auth || e?.cancelled || e?.abort || isAbortError(e)) throw e;
 				c.transient++;
 				markDone();
 				log(`${typeLabel(type)}: could not look up "${entry.title.slice(0, 45)}" on MAL: ${e.message}. Will retry on a later sync.`, "warn");
@@ -11443,7 +14038,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				unmatched.push(entry.title);
 				markDone();
 			}
-		}, 3);
+		}, 3, malOpts);
 		if (unmatched.length) log(`${typeLabel(type)}: no confident MAL match for ${unmatched.length} title(s). Skipped: ${unmatched.slice(0, 5).map((t) => `"${t.slice(0, 30)}"`).join(", ")}${unmatched.length > 5 ? `, plus ${unmatched.length - 5} more` : ""}. Use Full Resync after adding/fixing MAL entries.`, "warn");
 		return targets;
 	}
@@ -11464,11 +14059,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		return [...best.values()].sort((a, b) => b.entry.updatedAt - a.entry.updatedAt);
 	}
-	hooks.checkCancel = checkCancel;
+	var syncConfirm = null;
+	function setSyncConfirm(confirm) {
+		syncConfirm = confirm;
+	}
+	var makeMalOpts = (signal) => ({
+		checkCancel: () => checkSyncCancel(signal),
+		signal
+	});
 	var FULL_COMPARE_MS = 6048e5;
 	var BREAKER_MAX_TRIPS = 3;
 	var RETRY_AFTER_FAILURE_MS = 6e5;
-	var LIST_PATH_RE = /^\/user\/[^/]+\/(anime|manga)list/;
+	var LIST_PATH_RE = /^\/user\/[^/]+\/(anime|manga)list\/?$/i;
 	var onAniList = () => location.hostname === "anilist.co";
 	var ENTRY_FIELDS = "status score(format: POINT_100) progress progressVolumes repeat notes updatedAt startedAt { year month day } completedAt { year month day }";
 	var MEDIA_FIELDS = "id idMal startDate { year } synonyms title { userPreferred english romaji native }";
@@ -11495,17 +14097,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			updatedAt: Number(row.updatedAt) || 0
 		};
 	};
-	async function alFetchIncremental(userId, type, since) {
+	async function alFetchIncremental(userId, type, since, signal) {
 		const q = `query ($userId: Int, $type: MediaType, $page: Int) { Page(page: $page, perPage: 50) {
     pageInfo { hasNextPage } mediaList(userId: $userId, type: $type, sort: UPDATED_TIME_DESC) { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } }`;
 		const out = [];
 		for (let page = 1; page <= 400; page++) {
-			checkCancel();
+			checkSyncCancel(signal);
 			const p = (await syncApi?.query(q, {
 				userId,
 				type,
 				page
-			}, { forceFresh: true }))?.Page;
+			}, {
+				forceFresh: true,
+				signal
+			}))?.Page;
+			checkSyncCancel(signal);
 			let stop = false;
 			for (const row of p?.mediaList || []) {
 				if ((Number(row.updatedAt) || 0) < since) {
@@ -11518,35 +14124,51 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		return out;
 	}
-	async function alFetchAll(userId, type, api = syncApi) {
+	async function alFetchAll(userId, type, api = syncApi, signal) {
+		if (!api) throw new Error("AniList API client is unavailable.");
 		const q = `query ($userId: Int, $type: MediaType, $chunk: Int, $perChunk: Int) {
     MediaListCollection(userId: $userId, type: $type, chunk: $chunk, perChunk: $perChunk) { hasNextChunk lists { entries { ${ENTRY_FIELDS} media { ${MEDIA_FIELDS} } } } } }`;
 		const out = [];
 		const seen = new Set();
 		for (let chunk = 1; chunk <= 100; chunk++) {
-			checkCancel();
-			const c = (await api?.query(q, {
+			checkSyncCancel(signal);
+			const res = await api.query(q, {
 				userId,
 				type,
 				chunk,
 				perChunk: 500
-			}, { forceFresh: true }))?.MediaListCollection;
-			for (const list of c?.lists || []) for (const row of list.entries || []) {
+			}, {
+				forceFresh: true,
+				signal
+			});
+			checkSyncCancel(signal);
+			const c = res?.MediaListCollection;
+			if (!c || !Array.isArray(c.lists)) throw new Error("AniList returned an invalid MediaListCollection response.");
+			for (const list of c.lists) for (const row of list.entries || []) {
 				const e = toEntry(row, row.media);
 				if (!e.mediaId || seen.has(e.mediaId)) continue;
 				seen.add(e.mediaId);
 				out.push(e);
 			}
-			if (!c?.hasNextChunk) return out;
+			if (!c.hasNextChunk) return out;
 		}
 		throw new Error("AniList collection exceeded the 100-chunk safety limit.");
 	}
+	function checkSyncCancel(signal) {
+		checkCancel();
+		if (signal?.aborted) {
+			const e = new Error("Sync stopped.");
+			e.cancelled = true;
+			throw e;
+		}
+	}
 	var isTransient = (e) => !(e && (e.status === 400 || e.status === 404 || e.status === 403 && !e.html));
-	async function pushJob(type, { entry, malId, patch }, mal, c) {
+	async function pushJob(type, { entry, malId, patch }, mal, c, signal) {
 		const settled = stores[type].settled;
+		const malOpts = makeMalOpts(signal);
 		try {
-			await breaker.wait(checkCancel);
-			checkCancel();
+			await breaker.wait(malOpts);
+			checkSyncCancel(signal);
 			if (breaker.trips >= BREAKER_MAX_TRIPS) {
 				const e = new Error("MAL keeps failing — stopping this run; it will retry automatically.");
 				e.abort = true;
@@ -11556,7 +14178,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			let res;
 			const tried = new Set();
 			for (;;) try {
-				res = await malUpdateEntry(type, malId, sent);
+				res = await malUpdateEntry(type, malId, sent, malOpts);
 				break;
 			} catch (e) {
 				const alt = e.status === 400 ? fallbackPatch(type, sent, mal[malId], tried) : null;
@@ -11617,11 +14239,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			markDone();
 		}
 	}
-	function planJobs(type, targets, mal, c) {
+	function planJobs(type, targets, mal, c, signal) {
 		const settled = stores[type].settled.data;
 		const jobs = [];
 		for (const t of targets) {
-			checkCancel();
+			checkSyncCancel(signal);
 			const patch = reconcile(type, t.entry, mal[t.malId]);
 			if (!patch) {
 				c.skipped++;
@@ -11647,7 +14269,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		return jobs;
 	}
-	async function syncType(type, userId, full) {
+	async function syncType(type, userId, full, signal) {
 		const label = typeLabel(type);
 		const c = {
 			pushed: 0,
@@ -11663,13 +14285,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const lastSync = Number(syncStore.get(`last_sync_${type}`, 0)) || 0;
 		const fullPass = full || !lastSync || Date.now() - Number(syncStore.get(`last_compare_${type}`, 0)) > FULL_COMPARE_MS;
 		const isExact = syncGet("syncMode") === "exact";
+		const malOpts = makeMalOpts(signal);
 		log(`${label}: starting ${fullPass ? "full library comparison" : "incremental sync"} — fetching AniList entries and your current MAL list.`);
 		syncLog?.debug(`${label}: starting sync pass:`, {
 			fullPass,
 			lastSync,
 			isExact
 		});
-		const [entries, mal] = await Promise.all([fullPass ? alFetchAll(userId, type) : alFetchIncremental(userId, type, lastSync), malFetchList(type)]);
+		const [entries, mal] = await Promise.all([fullPass ? alFetchAll(userId, type, syncApi, signal) : alFetchIncremental(userId, type, lastSync, signal), malFetchList(type, malOpts)]);
+		checkSyncCancel(signal);
 		const newest = entries.reduce((m, e) => Math.max(m, e.updatedAt), 0);
 		log(`${label}: found ${entries.length} AniList entr${entries.length === 1 ? "y" : "ies"} to check and ${Object.keys(mal).length} entr${Object.keys(mal).length === 1 ? "y" : "ies"} on MAL.`);
 		syncLog?.debug(`${label}: AniList entries=${entries.length}, MAL entries=${Object.keys(mal).length}`);
@@ -11679,11 +14303,45 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		if (isExact) {
 			const pending = getPendingDeletes().filter((p) => p.type === type);
 			for (const p of pending) {
-				checkCancel();
+				checkSyncCancel(signal);
 				if (entries.some((e) => e.mediaId === p.mediaId)) {
 					removePendingDelete(p.mediaId, type);
 					log(`${label}: deletion cancelled for "${p.title}" — entry is present on AniList.`);
 					continue;
+				}
+				if (!fullPass) {
+					if (!syncApi) {
+						c.transient++;
+						log(`${label}: skipping pending deletion for "${p.title}" — AniList client unavailable.`, "warn");
+						continue;
+					}
+					let stillOnAniList = null;
+					try {
+						const res = await syncApi.query("query ($id: Int, $type: MediaType) { Media(id: $id, type: $type) { id mediaListEntry { id } } }", {
+							id: p.mediaId,
+							type
+						}, {
+							forceFresh: true,
+							signal
+						});
+						checkSyncCancel(signal);
+						if (res?.Media) stillOnAniList = !!res.Media.mediaListEntry;
+					} catch (e) {
+						if (e?.auth || e?.cancelled || e?.abort || isAbortError(e)) throw e;
+						c.transient++;
+						log(`${label}: could not verify AniList absence for "${p.title}": ${e?.message || e}. Keeping queued.`, "warn");
+						continue;
+					}
+					if (stillOnAniList === true) {
+						removePendingDelete(p.mediaId, type);
+						log(`${label}: deletion cancelled for "${p.title}" — entry is present on AniList.`);
+						continue;
+					}
+					if (stillOnAniList === null) {
+						c.transient++;
+						log(`${label}: could not verify AniList absence for "${p.title}"; keeping pending deletion queued.`, "warn");
+						continue;
+					}
 				}
 				let malId = p.malId || cachedId(type, { mediaId: p.mediaId }) || stores[type].ids.data[p.mediaId]?.m;
 				if (!malId && mal) {
@@ -11692,45 +14350,91 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						break;
 					}
 				}
+				let shouldRemovePending = false;
 				if (malId) try {
-					await breaker.wait(checkCancel);
-					checkCancel();
-					await malDeleteEntry(type, Number(malId));
+					await breaker.wait(malOpts);
+					checkSyncCancel(signal);
+					await malDeleteEntry(type, Number(malId), malOpts);
 					if (mal[malId]) delete mal[malId];
 					c.deleted++;
+					shouldRemovePending = true;
 					log(`${label}: deleted "${p.title}" from MAL (Exact Match).`, "success");
 				} catch (e) {
-					if (e.status === 404) {
+					if (e?.cancelled || e?.auth || e?.abort) throw e;
+					if (e?.status === 404) {
 						if (mal[malId]) delete mal[malId];
-					} else log(`${label}: failed to delete "${p.title}" from MAL: ${e.message}`, "warn");
+						shouldRemovePending = true;
+					} else if (isTransient(e)) {
+						c.transient++;
+						breaker.fail();
+						log(`${label}: failed to delete "${p.title}" from MAL (will retry): ${e?.message || e}`, "warn");
+					} else {
+						c.permanent++;
+						shouldRemovePending = true;
+						log(`${label}: failed to delete "${p.title}" from MAL: ${e?.message || e}`, "warn");
+					}
 				}
-				else log(`${label}: could not find MAL ID for deleted title "${p.title}".`, "warn");
-				removePendingDelete(p.mediaId, type);
+				else {
+					shouldRemovePending = true;
+					log(`${label}: could not find MAL ID for deleted title "${p.title}".`, "warn");
+				}
+				if (shouldRemovePending) removePendingDelete(p.mediaId, type);
 			}
 		}
-		const targets = dedupeTargets(type, await resolveTargets(type, entries, mal, c), c);
-		await runPool(planJobs(type, targets, mal, c), (job) => pushJob(type, job, mal, c), Math.max(2, Math.min(8, Math.round(malLimiter.rate / 20))));
+		checkSyncCancel(signal);
+		const targets = dedupeTargets(type, await resolveTargets(type, entries, mal, c, malOpts), c);
+		checkSyncCancel(signal);
+		await runPool(planJobs(type, targets, mal, c, signal), (job) => {
+			checkSyncCancel(signal);
+			return pushJob(type, job, mal, c, signal);
+		}, Math.max(2, Math.min(8, Math.round(malLimiter.rate / 20))), malOpts);
+		checkSyncCancel(signal);
 		if (isExact && fullPass) {
-			const targetMalIds = new Set(targets.map((t) => t.malId));
-			const orphanedMalIds = Object.keys(mal).map(Number).filter((id) => id > 0 && !targetMalIds.has(id));
-			const MAX_AUTO_DELETE_LIMIT = 10;
-			if (orphanedMalIds.length > MAX_AUTO_DELETE_LIMIT) log(`${label}: Exact Match found ${orphanedMalIds.length} MAL entries not present on AniList, exceeding the safety limit of ${MAX_AUTO_DELETE_LIMIT}. Auto-delete was skipped to protect your MAL list from potential API data loss.`, "warn");
-			else if (orphanedMalIds.length > 0) for (const orphanId of orphanedMalIds) {
-				checkCancel();
-				const orphanTitle = mal[orphanId]?.__malTitle || `MAL ID ${orphanId}`;
-				try {
-					await breaker.wait(checkCancel);
-					checkCancel();
-					await malDeleteEntry(type, orphanId);
-					delete mal[orphanId];
-					c.deleted++;
-					log(`${label}: deleted "${orphanTitle}" from MAL (not on AniList).`, "success");
-				} catch (e) {
-					if (e.status === 404) delete mal[orphanId];
-					else log(`${label}: failed to delete "${orphanTitle}" from MAL: ${e.message}`, "warn");
+			if (c.transient > 0 || c.conflicts > 0 || c.unmatched > 0) log(`${label}: Exact Match orphan auto-delete was skipped because ${[
+				c.transient > 0 ? `${c.transient} lookup/update failure(s)` : "",
+				c.conflicts > 0 ? `${c.conflicts} ID conflict(s)` : "",
+				c.unmatched > 0 ? `${c.unmatched} unmatched entr${c.unmatched === 1 ? "y" : "ies"}` : ""
+			].filter(Boolean).join(", ")} occurred during sync.`, "warn");
+			else {
+				const protectedMalIds = new Set(targets.map((t) => t.malId));
+				for (const entry of entries) {
+					if (!entry.mediaId) continue;
+					const ov = getOverride(entry.mediaId);
+					if (ov && ov.malId === 0) {
+						if (entry.idMal > 0) protectedMalIds.add(entry.idMal);
+						const cached = Number(stores[type].ids.data[entry.mediaId]?.m) || 0;
+						if (cached > 0) protectedMalIds.add(cached);
+					}
+				}
+				const orphanedMalIds = Object.keys(mal).map(Number).filter((id) => id > 0 && !protectedMalIds.has(id));
+				const MAX_AUTO_DELETE_LIMIT = 10;
+				if (orphanedMalIds.length > MAX_AUTO_DELETE_LIMIT) log(`${label}: Exact Match found ${orphanedMalIds.length} MAL entries not present on AniList, exceeding the safety limit of ${MAX_AUTO_DELETE_LIMIT}. Auto-delete was skipped to protect your MAL list from potential API data loss.`, "warn");
+				else if (orphanedMalIds.length > 0) for (const orphanId of orphanedMalIds) {
+					checkSyncCancel(signal);
+					const orphanTitle = mal[orphanId]?.__malTitle || `MAL ID ${orphanId}`;
+					try {
+						await breaker.wait(malOpts);
+						checkSyncCancel(signal);
+						await malDeleteEntry(type, orphanId, malOpts);
+						delete mal[orphanId];
+						c.deleted++;
+						log(`${label}: deleted "${orphanTitle}" from MAL (not on AniList).`, "success");
+					} catch (e) {
+						if (e?.cancelled || e?.auth || e?.abort) throw e;
+						if (e?.status === 404) delete mal[orphanId];
+						else if (isTransient(e)) {
+							c.transient++;
+							breaker.fail();
+							log(`${label}: failed to delete "${orphanTitle}" from MAL: ${e?.message || e}`, "warn");
+						} else {
+							c.permanent++;
+							log(`${label}: failed to delete "${orphanTitle}" from MAL: ${e?.message || e}`, "warn");
+						}
+					}
 				}
 			}
 		}
+		checkSyncCancel(signal);
 		const ok = c.transient === 0;
 		if (ok) {
 			if (fullPass) {
@@ -11755,36 +14459,68 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const m = location.pathname.match(LIST_PATH_RE);
 		return m ? m[1].toUpperCase() : null;
 	};
-	async function confirmDecimalScores() {
-		if ((await tryOr(() => syncApi?.viewer() ?? Promise.resolve(null)))?.scoreFormat !== "POINT_10_DECIMAL") return true;
+	async function confirmDecimalScores(signal) {
+		if (signal?.aborted) return false;
+		const v = await tryOr(() => syncApi?.viewer(false, { signal }) ?? Promise.resolve(null));
+		if (signal?.aborted) return false;
+		if (v?.scoreFormat !== "POINT_10_DECIMAL") return true;
+		if (!syncConfirm) return false;
 		const mode = syncGet("syncScoreRounding");
-		return confirm(`Decimal scores detected on AniList.\n\nMAL uses whole-number scores, so your decimal scores will be converted using: ${{
+		const labels = {
 			ceil: "Ceil (always up)",
 			round: "Round (.1–.4 down, .5–.9 up)",
 			floor: "Floor (always down)"
-		}[mode]}.\n${{
+		};
+		const examples = {
 			ceil: "7.4 → 8 and 7.5 → 8",
 			round: "7.4 → 7 and 7.5 → 8",
 			floor: "7.4 → 7 and 7.5 → 7"
-		}[mode]}.\n\nThis will affect the scores written to MAL during this first sync.\n\nContinue with the first sync?`);
+		};
+		openConfirmCount++;
+		try {
+			return await syncConfirm({
+				id: "decimal-scores-confirm",
+				title: "Decimal Scores Detected",
+				message: `Decimal scores detected on AniList.\n\nMAL uses whole-number scores, so your decimal scores will be converted using: ${labels[mode]}.\n${examples[mode]}.\n\nThis will affect the scores written to MAL during this first sync.\n\nContinue with the first sync?`,
+				confirmText: "Continue",
+				cancelText: "Cancel",
+				signal
+			});
+		} finally {
+			openConfirmCount = Math.max(0, openConfirmCount - 1);
+		}
 	}
 	function handleAuthFailure(e) {
 		if (e.auth === "AniList") syncApi?.clearViewer();
 		else clearMalAuth();
 		log(`⚠ ${e.message}`);
 	}
+	var activeRunSeq = 0;
+	var startingSync = false;
+	var openConfirmCount = 0;
 	async function runSync(types = [...TYPES], opts = {}) {
 		syncLog?.debug("runSync initiated for types:", types, "options:", opts);
+		const signal = opts.signal;
+		if (signal?.aborted) return;
 		if (syncStatus.syncing) return log("Sync already running.");
 		if (!onAniList()) return log("Open AniList to run a sync — it needs your AniList login.", "warn");
 		if (!syncApi?.hasAuth()) return log("Log in to AniList first.");
 		if (!isMalConnected()) return log("Connect MyAnimeList first.");
 		if (navigator.onLine === false) return log("You appear to be offline; sync skipped.");
+		const myEpoch = syncEpoch;
+		const myRunId = ++activeRunSeq;
 		syncStatus.syncing = true;
 		syncStatus.cancelled = false;
-		if (!await acquireLock()) {
-			syncStatus.syncing = false;
+		if (!await acquireLock(myEpoch)) {
+			if (myEpoch === syncEpoch && myRunId === activeRunSeq) {
+				syncStatus.syncing = false;
+				notifyState();
+			}
 			return log("Another tab is already syncing, skipped.");
+		}
+		if (myEpoch !== syncEpoch || myRunId !== activeRunSeq || signal?.aborted) {
+			releaseLock(myEpoch);
+			return;
 		}
 		breaker.reset();
 		syncStore.set("sync_onboarded", true);
@@ -11797,10 +14533,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		notifyState();
 		const startedAt = Date.now();
 		let allOk = false;
+		const runAc = new AbortController();
+		const onCallerAbort = () => runAc.abort();
+		if (signal) {
+			if (signal.aborted) runAc.abort();
+			else signal.addEventListener("abort", onCallerAbort, { once: true });
+		}
 		try {
-			const viewer = await syncApi?.viewer();
+			const viewer = await syncApi?.viewer(false, { signal });
+			if (myEpoch !== syncEpoch || signal?.aborted) return;
 			if (!viewer) throw authError("AniList", "AniList is not logged in.");
-			const me = await malWhoAmI();
+			const me = await malWhoAmI(makeMalOpts(signal));
+			if (myEpoch !== syncEpoch || signal?.aborted) return;
 			const account = `${viewer.id}:${me.id}`;
 			const prev = syncStore.get("sync_account", null);
 			if (prev && prev !== account) {
@@ -11809,13 +14553,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			syncStore.set("sync_account", account);
 			if (opts.full) for (const t of types) clearCache(stores[t].settled);
-			const results = await Promise.allSettled(types.map((t) => syncType(t, viewer.id, !!opts.full)));
+			const results = await Promise.allSettled(types.map((t) => syncType(t, viewer.id, !!opts.full, runAc.signal).catch((err) => {
+				if (err?.auth || err?.abort || err?.cancelled) runAc.abort();
+				throw err;
+			})));
+			if (myEpoch !== syncEpoch || signal?.aborted) return;
 			const fatal = results.find((r) => r.status === "rejected" && (r.reason?.auth || r.reason?.abort));
 			for (const r of results) {
 				if (r.status !== "rejected") continue;
 				const e = r.reason || {};
-				if (e.cancelled) log("Sync stopped after the current request finished.", "warn");
-				else if (!e.auth) log(`Sync could not finish: ${e.message || e}`, "error");
+				if (e.cancelled || isAbortError(e)) {
+					if (!fatal) log("Sync stopped after the current request finished.", "warn");
+				} else if (!e.auth && !e.abort) log(`Sync could not finish: ${e.message || e}`, "error");
 			}
 			if (fatal) {
 				if (fatal.reason.auth) handleAuthFailure(fatal.reason);
@@ -11827,37 +14576,58 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				log(`Synced in ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
 			} else if (!syncStatus.cancelled) syncStore.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
 		} catch (e) {
+			if (myEpoch !== syncEpoch || signal?.aborted) return;
 			if (e.auth) handleAuthFailure(e);
 			else log("Sync could not finish: " + (e.message || e), "error");
 			if (!e.auth && !syncStatus.cancelled) syncStore.set("sync_retry_at", Date.now() + RETRY_AFTER_FAILURE_MS);
 		} finally {
-			for (const t of types) {
-				stores[t].ids.save();
-				stores[t].settled.save();
+			if (signal) signal.removeEventListener("abort", onCallerAbort);
+			if (myEpoch === syncEpoch && myRunId === activeRunSeq) {
+				for (const t of types) {
+					stores[t].ids.save();
+					stores[t].settled.save();
+				}
+				releaseLock(myEpoch);
+				syncStatus.syncing = false;
+				syncStatus.cancelled = false;
+				progress.phase = "idle";
+				notifyState();
 			}
-			releaseLock();
-			syncStatus.syncing = false;
-			syncStatus.cancelled = false;
-			progress.phase = "idle";
-			notifyState();
 		}
 	}
-	async function startManualSync() {
-		if (syncStatus.syncing) return;
-		const pageType = currentListType();
-		const types = pageType ? [pageType] : [...TYPES];
-		if (types.some((t) => !syncStore.get(`last_sync_${t}`, 0)) && !await confirmDecimalScores()) return log("First sync cancelled.");
-		runSync(types);
+	async function startManualSync(signal) {
+		if (syncStatus.syncing || startingSync || signal?.aborted) return;
+		startingSync = true;
+		const myEpoch = syncEpoch;
+		try {
+			const pageType = currentListType();
+			const types = pageType ? [pageType] : [...TYPES];
+			if (types.some((t) => !syncStore.get(`last_sync_${t}`, 0)) && !await confirmDecimalScores(signal)) return log("First sync cancelled.");
+			if (myEpoch !== syncEpoch || signal?.aborted) return;
+			runSync(types, { signal });
+		} finally {
+			startingSync = false;
+		}
 	}
-	async function fullResync() {
-		if (syncStatus.syncing) return;
-		if (!syncStore.get("sync_onboarded", false) && !await confirmDecimalScores()) return log("Full resync cancelled.");
-		for (const t of TYPES) clearCache(stores[t].ids);
-		log("Full Resync started: checking the entire AniList library and clearing cached match/suppression decisions.");
-		runSync([...TYPES], { full: true });
+	async function fullResync(signal) {
+		if (syncStatus.syncing || startingSync || signal?.aborted) return;
+		startingSync = true;
+		const myEpoch = syncEpoch;
+		try {
+			if (!syncStore.get("sync_onboarded", false) && !await confirmDecimalScores(signal)) return log("Full resync cancelled.");
+			if (myEpoch !== syncEpoch || signal?.aborted) return;
+			for (const t of TYPES) clearCache(stores[t].ids);
+			log("Full Resync started: checking the entire AniList library and clearing cached match/suppression decisions.");
+			runSync([...TYPES], {
+				full: true,
+				signal
+			});
+		} finally {
+			startingSync = false;
+		}
 	}
-	function maybeAutoSync() {
-		if (!onAniList() || !syncGet("syncEnabled") || syncStatus.syncing || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
+	function maybeAutoSync(signal) {
+		if (signal?.aborted || !onAniList() || !syncGet("syncEnabled") || syncStatus.syncing || startingSync || openConfirmCount > 0 || Date.now() < syncStatus.autoSyncRetryAfter || navigator.onLine === false) return;
 		if (!syncApi?.hasAuth() || !isMalConnected()) return;
 		const retryAt = Number(syncStore.get("sync_retry_at", 0)) || 0;
 		if (retryAt > 0 && Date.now() < retryAt) return;
@@ -11873,12 +14643,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const labels = dueTypes.map(typeLabel).join(" & ");
 			log(retryAt > 0 ? `Auto-sync (${labels}): retrying after an earlier failure…` : `Auto-sync (${labels}): interval reached or initial sync…`);
 			syncStatus.autoSyncRetryAfter = Date.now() + 3e5;
-			runSync(dueTypes);
+			runSync(dueTypes, { signal });
 		} else if (retryAt > 0 && Date.now() >= retryAt) syncStore.del("sync_retry_at");
 	}
 	var panelCtx = null;
+	var activeMount = null;
 	var routeOwner = null;
-	var panelId = () => panelCtx?.getId("panel") ?? "ala-sync-panel";
+	var pendingConfirm = false;
 	var buildPanelCss = (sel) => `
   ${sel}{box-sizing:border-box;width:100%;margin-top:12px;padding:12px;border-radius:4px;background:rgb(var(--color-foreground));color:rgb(var(--color-text));font-size:13px;line-height:1.45}
   ${sel} *{box-sizing:border-box}
@@ -11953,17 +14724,19 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		showLogs: false
 	};
 	var progressTimer = null;
-	function updateProgressUI(force = false) {
+	function updateProgressUI(force = false, targetEl) {
+		if (!panelCtx || panelCtx.signal.aborted) return;
 		if (!force) {
-			if (!progressTimer && panelCtx) progressTimer = panelCtx.timeout(() => {
+			if (!progressTimer) progressTimer = panelCtx.timeout(() => {
 				progressTimer = null;
 				updateProgressUI(true);
 			}, 120);
 			return;
 		}
-		const fill = document.getElementById("almal-progress-fill");
-		const text = document.getElementById("almal-progress-text");
-		renderRateLimitWarning(document.getElementById(panelId()));
+		const panelEl = targetEl ?? activeMount?.el() ?? null;
+		renderRateLimitWarning(panelEl);
+		const fill = panelEl?.querySelector("#almal-progress-fill") ?? null;
+		const text = panelEl?.querySelector("#almal-progress-text") ?? null;
 		if (!fill || !text) return;
 		if (progress.phase === "fetching") {
 			fill.style.width = "100%";
@@ -11976,11 +14749,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 	}
 	function renderRateLimitWarning(panelEl) {
-		if (!panelEl || !panelEl.isConnected) return;
+		if (!panelEl || !panelEl.isConnected || panelCtx?.signal.aborted) return;
 		const now = Date.now();
 		const limited = [["AniList", panelCtx?.api.resumeAt() ?? 0], ["MAL", malLimiter.resumeAt]].filter(([, at]) => Number(at) > now);
 		let warn = panelEl.querySelector("#almal-api-limit-warning");
 		if (!limited.length) {
+			panelEl._limitCancel?.();
+			panelEl._limitCancel = null;
 			warn?.remove();
 			return;
 		}
@@ -11993,7 +14768,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		warn.innerHTML = limited.map(([name, at]) => `<b>${name} API limit reached.</b> Requests resume in <b>${Math.ceil((Number(at) - now) / 1e3)}s</b>.`).join("<br>");
 		panelEl._limitCancel?.();
-		panelEl._limitCancel = panelCtx?.timeout(() => renderRateLimitWarning(panelEl), 1e3) ?? null;
+		panelEl._limitCancel = panelCtx?.timeout(() => {
+			panelEl._limitCancel = null;
+			renderRateLimitWarning(panelEl);
+		}, 1e3) ?? null;
 	}
 	var LOGOS = {
 		al: {
@@ -12016,7 +14794,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		return `${Math.floor(s / 86400)} d ago`;
 	}
 	var timeEl = (sec) => `<time data-ts="${sec || 0}" title="${sec ? esc(new Date(sec * 1e3).toLocaleString()) : ""}">${ago(sec)}</time>`;
-	var refreshTimes = () => document.getElementById(panelId())?.querySelectorAll("time[data-ts]").forEach((el) => {
+	var refreshTimes = () => activeMount?.el()?.querySelectorAll("time[data-ts]").forEach((el) => {
 		el.textContent = ago(Number(el.dataset.ts));
 	});
 	function connItem(connected) {
@@ -12025,9 +14803,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const connect = connected ? "" : `<button class="almal-btn almal-btn--primary almal-btn--sm almal-btn--block" data-act="mal-connect">Connect MyAnimeList</button>`;
 		return `<div class="almal-conn-item"><div class="almal-conn-row">${chip("mal", true)}<span class="almal-conn-name"><span>MyAnimeList</span>${status}</span></div>${connect}${manual}</div>`;
 	}
-	function renderPanel() {
-		const panelEl = document.getElementById(panelId());
-		if (!panelEl || !panelCtx) return;
+	function renderPanelTo(panelEl) {
+		if (!panelCtx || panelCtx.signal.aborted) return;
 		const alOk = panelCtx.api.hasAuth();
 		const malOk = panelCtx.accounts.isConnected("mal");
 		const ready = alOk && malOk;
@@ -12041,8 +14818,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const t = currentListType();
 			const rows = (t ? [[t, "Last sync"]] : [["ANIME", "Anime sync"], ["MANGA", "Manga sync"]]).map(([type, label]) => `<div class="almal-meta-row">${label}: ${timeEl(syncStore.get("last_run_" + type, 0))}</div>`).join("");
 			html += `<div class="almal-actions">
-        ${syncStatus.syncing ? `<button class="almal-btn almal-btn--icon almal-btn--danger" data-act="stop" ${syncStatus.cancelled ? "disabled" : ""} aria-label="${syncStatus.cancelled ? "Stopping" : "Stop sync"}" title="${syncStatus.cancelled ? "Stopping…" : "Stop sync"}">${icon("stop", 16)}</button>` : `<button class="almal-btn almal-btn--icon" data-act="resync" aria-label="Full resync" title="Full resync">${icon("resync", 16)}</button>`}
-        <button class="almal-btn almal-btn--primary almal-btn--grow" data-act="sync" ${syncStatus.syncing ? "disabled" : ""}><span>${syncStatus.syncing ? "Syncing…" : "Sync"}</span></button>
+        ${syncStatus.syncing ? `<button class="almal-btn almal-btn--icon almal-btn--danger" data-act="stop" ${syncStatus.cancelled ? "disabled" : ""} aria-label="${syncStatus.cancelled ? "Stopping" : "Stop sync"}" title="${syncStatus.cancelled ? "Stopping…" : "Stop sync"}">${icon("stop", 16)}</button>` : `<button class="almal-btn almal-btn--icon" data-act="resync" ${pendingConfirm ? "disabled" : ""} aria-label="Full resync" title="Full resync">${icon("resync", 16)}</button>`}
+        <button class="almal-btn almal-btn--primary almal-btn--grow" data-act="sync" ${syncStatus.syncing || pendingConfirm ? "disabled" : ""}><span>${syncStatus.syncing ? "Syncing…" : "Sync"}</span></button>
         <button class="almal-btn almal-btn--icon${ui.showLogs ? " is-on" : ""}" data-act="logs" aria-label="Show logs" aria-pressed="${ui.showLogs}" title="Logs">${icon("list", 16)}</button>
       </div>`;
 			if (syncStatus.syncing) html += "<div class=\"almal-progress\" role=\"progressbar\" aria-label=\"Sync progress\"><div id=\"almal-progress-fill\"></div></div><div id=\"almal-progress-text\">Starting…</div>";
@@ -12076,11 +14853,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			c.classList.remove("almal-chip--logo");
 			c.textContent = img.dataset.fallback || "";
 		}));
-		const logBox = document.getElementById("almal-log");
+		const logBox = panelEl.querySelector("#almal-log");
 		if (logBox) logBox.textContent = logLines.join("\n") || "No activity yet.";
-		if (syncStatus.syncing) updateProgressUI(true);
+		if (syncStatus.syncing) updateProgressUI(true, panelEl);
 		renderRateLimitWarning(panelEl);
 	}
+	function renderPanel() {
+		const panelEl = activeMount?.el() ?? null;
+		if (panelEl) renderPanelTo(panelEl);
+	}
+	var tryAutoSync = (signal) => {
+		if (!pendingConfirm) maybeAutoSync(signal);
+	};
 	var ACTIONS = {
 		"mal-connect": () => panelCtx?.accounts.connect("mal"),
 		"manual-toggle": () => {
@@ -12090,16 +14874,46 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		"mal-manual-save": async () => {
 			const code = document.getElementById("almal-mal-manual")?.value.trim();
 			if (!code) return;
+			const ctxRef = panelCtx;
+			const btn = activeMount?.el()?.querySelector("[data-act=\"mal-manual-save\"]");
+			if (btn?.disabled) return;
+			if (btn) btn.disabled = true;
 			try {
 				await exchangeMalCode(code);
 				log("MAL connected (manual).");
+				if (panelCtx !== ctxRef || ctxRef?.signal.aborted) return;
 				renderPanel();
-				maybeAutoSync();
+				tryAutoSync(ctxRef?.signal);
 			} catch (e) {
-				log("MAL token exchange failed: " + e.message);
+				log("MAL token exchange failed: " + (e?.message || e), "error");
+			} finally {
+				if (panelCtx === ctxRef && !ctxRef?.signal.aborted && btn?.isConnected) btn.disabled = false;
 			}
 		},
-		sync: startManualSync,
+		sync: async () => {
+			const ctxRef = panelCtx;
+			if (!ctxRef || ctxRef.signal.aborted || pendingConfirm) return;
+			pendingConfirm = true;
+			const panelEl = activeMount?.el();
+			const syncBtn = panelEl?.querySelector("[data-act=\"sync\"]");
+			const resyncBtn = panelEl?.querySelector("[data-act=\"resync\"]");
+			if (syncBtn) syncBtn.disabled = true;
+			if (resyncBtn) resyncBtn.disabled = true;
+			try {
+				await startManualSync(ctxRef.signal);
+			} finally {
+				if (panelCtx === ctxRef) {
+					pendingConfirm = false;
+					if (!ctxRef.signal.aborted && !syncStatus.syncing) {
+						const curPanel = activeMount?.el();
+						const curSync = curPanel?.querySelector("[data-act=\"sync\"]");
+						const curResync = curPanel?.querySelector("[data-act=\"resync\"]");
+						if (curSync) curSync.disabled = false;
+						if (curResync) curResync.disabled = false;
+					}
+				}
+			}
+		},
 		stop: () => {
 			if (syncStatus.syncing && !syncStatus.cancelled) {
 				syncStatus.cancelled = true;
@@ -12107,16 +14921,43 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				renderPanel();
 			}
 		},
-		resync: () => {
-			if (confirm("This will re-check your entire AniList library against MAL. Continue?")) fullResync();
+		resync: async () => {
+			const ctxRef = panelCtx;
+			if (!ctxRef || ctxRef.signal.aborted || pendingConfirm) return;
+			pendingConfirm = true;
+			const panelEl = activeMount?.el();
+			const resyncBtn = panelEl?.querySelector("[data-act=\"resync\"]");
+			const syncBtn = panelEl?.querySelector("[data-act=\"sync\"]");
+			if (resyncBtn) resyncBtn.disabled = true;
+			if (syncBtn) syncBtn.disabled = true;
+			try {
+				const confirmed = await ctxRef.confirm({
+					id: "full-resync-confirm",
+					title: "Full Resync",
+					message: "This will re-check your entire AniList library against MAL. Continue?",
+					confirmText: "Continue",
+					cancelText: "Cancel"
+				});
+				if (panelCtx !== ctxRef || ctxRef.signal.aborted || !confirmed) return;
+				await fullResync(ctxRef.signal);
+			} finally {
+				if (panelCtx === ctxRef) {
+					pendingConfirm = false;
+					if (!ctxRef.signal.aborted && !syncStatus.syncing) {
+						const curPanel = activeMount?.el();
+						const curResync = curPanel?.querySelector("[data-act=\"resync\"]");
+						const curSync = curPanel?.querySelector("[data-act=\"sync\"]");
+						if (curResync) curResync.disabled = false;
+						if (curSync) curSync.disabled = false;
+					}
+				}
+			}
 		},
 		logs: () => {
 			ui.showLogs = !ui.showLogs;
 			renderPanel();
 		}
 	};
-	var lastMountTry = 0;
-	var retryCancel = null;
 	var selfLookup = false;
 	function decodeOwner(raw) {
 		try {
@@ -12139,31 +14980,26 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	function isOwnList() {
 		let owner = routeOwner || "";
 		if (!owner) {
-			const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i);
+			const m = location.pathname.match(/^\/user\/([^/]+)\/(?:anime|manga)list\/?$/i);
 			if (!m) return false;
 			owner = decodeOwner(m[1]);
 		}
 		const me = panelCtx?.session.username || "";
 		if (!me && panelCtx?.api.hasAuth() && !selfLookup) {
 			selfLookup = true;
-			tryOr(() => panelCtx.api.viewer()).then(() => mountSoon());
+			const ctxRef = panelCtx;
+			tryOr(() => ctxRef.api.viewer()).then((v) => {
+				if (panelCtx !== ctxRef || ctxRef.signal.aborted) return;
+				if (v) activeMount?.refresh();
+			}).finally(() => {
+				if (panelCtx === ctxRef) selfLookup = false;
+			});
 		}
 		return !!me && me.toLowerCase() === owner.toLowerCase();
 	}
-	var onListRoute = () => !!panelCtx?.get("syncEnabled") && LIST_PATH_RE.test(location.pathname) && isOwnList();
-	function mountPanel() {
-		retryCancel?.();
-		retryCancel = null;
-		const id = panelId();
-		if (!panelCtx || !onListRoute() || document.getElementById(id)) return;
-		lastMountTry = Date.now();
-		const anchor = findPanelAnchor();
-		if (!anchor) {
-			retryCancel = panelCtx.timeout(mountSoon, 700);
-			return;
-		}
+	var onListRoute = () => !!panelCtx && !panelCtx.signal.aborted && !!panelCtx.get("syncEnabled") && LIST_PATH_RE.test(location.pathname) && isOwnList();
+	function createPanelEl() {
 		const panelEl = document.createElement("div");
-		panelEl.id = id;
 		panelEl.addEventListener("click", (e) => {
 			const a = e.target?.closest("[data-act]");
 			if (a && a.dataset.act && ACTIONS[a.dataset.act]) ACTIONS[a.dataset.act]();
@@ -12172,21 +15008,18 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const target = e.target;
 			if (e.key === "Enter" && target?.id === "almal-mal-manual") ACTIONS["mal-manual-save"]();
 		});
-		anchor.insertAdjacentElement("afterend", panelEl);
-		renderPanel();
+		return panelEl;
 	}
-	var mountSoon = debounce(mountPanel, 250);
 	function initSyncPanel(ctx) {
 		panelCtx = ctx;
-		const rootId = ctx.getId("panel");
-		const rootSel = `#${rootId}`;
-		ctx.ownUi(rootSel);
-		ctx.addStyle(() => buildPanelCss(rootSel));
+		pendingConfirm = false;
+		setSyncConfirm((opts) => ctx.confirm(opts));
 		ctx.onCleanup(setMalUiSink({
 			onLog: () => {
-				const hint = document.getElementById("almal-hint");
+				const panelEl = activeMount?.el() ?? null;
+				const hint = panelEl?.querySelector("#almal-hint");
 				if (hint) hint.textContent = lastNotice;
-				const logBox = document.getElementById("almal-log");
+				const logBox = panelEl?.querySelector("#almal-log");
 				if (logBox) logBox.textContent = logLines.join("\n") || "No activity yet.";
 			},
 			onToast: (msg, isError, closeTab) => {
@@ -12198,18 +15031,27 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}));
 		ctx.onCleanup(onProgressChange((force) => updateProgressUI(force)));
 		ctx.onCleanup(onStateChange(renderPanel));
-		ctx.interval(() => maybeAutoSync(), 6e4);
-		ctx.ready(() => maybeAutoSync());
-		ctx.onRoute(/^\/user\/([^/]+)\/(?:anime|manga)list(?:\/|$)/i, (rc) => {
+		ctx.interval(() => tryAutoSync(ctx.signal), 6e4);
+		ctx.ready(() => tryAutoSync(ctx.signal));
+		ctx.onRoute(/^\/user\/([^/]+)\/(?:anime|manga)list\/?$/i, (rc) => {
 			routeOwner = decodeOwner(rc.match[1]);
-			retryCancel?.();
-			retryCancel = null;
-			document.getElementById(rootId)?.remove();
-			mountSoon();
+			activeMount = rc.mount({
+				id: "panel",
+				anchor: findPanelAnchor,
+				position: "afterend",
+				match: onListRoute,
+				ownUi: true,
+				style: buildPanelCss,
+				create: createPanelEl,
+				onMount: (el) => {
+					renderPanelTo(el);
+					return () => {
+						el._limitCancel?.();
+						el._limitCancel = null;
+					};
+				}
+			});
 			rc.onCleanup(ctx.accounts.watch("mal", () => renderPanel()));
-			rc.onCleanup(ctx.onBodyMutation(() => {
-				if (!rc.signal.aborted && !document.getElementById(rootId) && Date.now() - lastMountTry > 1e3 && onListRoute()) mountSoon();
-			}));
 			let lastAl = null;
 			let lastMal = null;
 			rc.interval(() => {
@@ -12221,25 +15063,27 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					renderPanel();
 				}
 				refreshTimes();
-				if (onListRoute() && !document.getElementById(rootId)) mountSoon();
-				maybeAutoSync();
+				activeMount?.refresh();
+				tryAutoSync(ctx.signal);
 			}, 2e3);
 			return () => {
-				retryCancel?.();
-				retryCancel = null;
+				progressTimer?.();
+				progressTimer = null;
 				routeOwner = null;
-				document.getElementById(rootId)?.remove();
+				activeMount = null;
 			};
 		});
 		ctx.onCleanup(() => {
-			retryCancel?.();
-			retryCancel = null;
 			progressTimer?.();
 			progressTimer = null;
 			routeOwner = null;
+			activeMount = null;
 			selfLookup = false;
-			document.getElementById(rootId)?.remove();
-			if (panelCtx === ctx) panelCtx = null;
+			pendingConfirm = false;
+			if (panelCtx === ctx) {
+				setSyncConfirm(null);
+				panelCtx = null;
+			}
 		});
 	}
 	var buildOverridesCss = (sel, fullHeight) => `
@@ -12346,11 +15190,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		for (let i = 0; i < t.length && qIdx < q.length; i++) if (t[i] === q[qIdx]) qIdx++;
 		return qIdx === q.length;
 	}
+	var safeCoverUrl = (url) => {
+		const trimmed = String(url || "").trim();
+		return /^https?:\/\//i.test(trimmed) ? trimmed : "";
+	};
 	var unmatchedMetaCache = new Map();
-	async function batchFetchUnmatchedMeta(ids, log, api = syncApi) {
+	async function batchFetchUnmatchedMeta(ids, log, api = syncApi, signal) {
 		const needed = ids.filter((id) => id > 0 && !unmatchedMetaCache.has(id));
-		if (!needed.length) return;
+		if (!needed.length || signal?.aborted) return;
 		for (let i = 0; i < needed.length; i += 50) {
+			if (signal?.aborted) break;
 			const batch = needed.slice(i, i + 50);
 			const q = `query ($ids: [Int]) {
       Page(page: 1, perPage: 50) {
@@ -12362,7 +15211,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
       }
     }`;
 			try {
-				const list = (await api?.query(q, { ids: batch }))?.Page?.media || [];
+				const res = await api?.query(q, { ids: batch }, { signal });
+				if (signal?.aborted) break;
+				const list = res?.Page?.media || [];
 				for (const m of list) {
 					const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || `Media #${m.id}`;
 					unmatchedMetaCache.set(m.id, {
@@ -12371,18 +15222,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					});
 				}
 			} catch (e) {
+				if (signal?.aborted || isAbortError(e)) break;
 				log?.warn("Failed to batch fetch unmatched metadata:", e);
 				break;
 			}
 		}
 	}
 	async function openQuickOverrideModal(mediaId, mediaType = "ANIME", ctx, onUpdated) {
+		if (ctx.signal?.aborted) return;
 		const api = ctx.api ?? syncApi;
 		const existingOverride = getManualOverrides()[String(mediaId)];
-		const modal = ctx.modal({
+		const { backdrop, close, signal, listen, onCleanup } = ctx.modal({
 			id: "quick-override",
 			title: "Set MAL Mapping",
 			maxWidth: "480px",
+			style: (sel) => buildOverridesCss(sel, false),
 			bodyHtml: `
       <div id="ala-qo-preview" class="ala-ov-preview">
         <span style="font-size:12px;color:rgb(var(--color-text-lighter))">Loading entry details...</span>
@@ -12399,11 +15253,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
         ${existingOverride ? `<button type="button" class="ala-btn ala-btn--danger" id="ala-qo-btn-remove" style="margin-left:auto">Reset to Default</button>` : ""}
       </div>
     `,
-			footerHtml: `<button class="ala-btn ala-qo-close" type="button">Cancel</button>`
+			footerHtml: `<button class="ala-btn ala-qo-close" type="button" data-ala-close>Cancel</button>`
 		});
-		ctx.addStyle("quick-override", () => buildOverridesCss(`#${modal.backdrop.id}`, false));
-		const { backdrop, close } = modal;
-		backdrop.querySelectorAll(".ala-qo-close").forEach((btn) => btn.addEventListener("click", close));
+		const isClosed = () => signal.aborted || !!ctx.signal?.aborted || !backdrop.isConnected;
+		if (isClosed()) return;
+		const composedQuick = composeAbortSignals(signal, ctx.signal);
+		const quickSignal = composedQuick.signal;
+		onCleanup(composedQuick.dispose);
 		const previewBox = backdrop.querySelector("#ala-qo-preview");
 		const malInput = backdrop.querySelector("#ala-qo-mal-input");
 		const saveBtn = backdrop.querySelector("#ala-qo-btn-save");
@@ -12411,7 +15267,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const removeBtn = backdrop.querySelector("#ala-qo-btn-remove");
 		if (existingOverride && existingOverride.malId > 0) malInput.value = String(existingOverride.malId);
 		let loadedTitle = existingOverride?.title || `Media #${mediaId}`;
-		let loadedCover = existingOverride?.cover;
+		let loadedCover = safeCoverUrl(existingOverride?.cover) || void 0;
 		let loadedType = existingOverride?.type || mediaType;
 		let detectedMalId;
 		const q = `query ($id: Int) {
@@ -12424,31 +15280,55 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
     }
   }`;
 		try {
-			const m = (await api?.query(q, { id: mediaId }))?.Media;
+			const res = await api?.query(q, { id: mediaId }, { signal: quickSignal });
+			if (isClosed()) return;
+			const m = res?.Media;
 			if (m) {
 				loadedTitle = m.title?.userPreferred || m.title?.english || m.title?.romaji || loadedTitle;
-				loadedCover = m.coverImage?.medium || loadedCover;
+				loadedCover = safeCoverUrl(m.coverImage?.medium) || loadedCover;
 				loadedType = m.type === "MANGA" ? "MANGA" : "ANIME";
 				detectedMalId = Number(m.idMal) || void 0;
 			}
-		} catch (_) {}
+		} catch (_) {
+			if (isClosed()) return;
+		}
+		if (isClosed()) return;
 		const isIgnored = existingOverride && existingOverride.malId === 0;
 		const isCustom = existingOverride && existingOverride.malId > 0;
+		const safeLoadedCover = safeCoverUrl(loadedCover);
 		previewBox.innerHTML = `
-    ${loadedCover ? `<img class="ala-ov-preview-cover" src="${loadedCover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+    ${safeLoadedCover ? `<img class="ala-ov-preview-cover" src="${esc(safeLoadedCover)}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
     <div class="ala-ov-preview-info">
-      <div class="ala-ov-preview-title">${loadedTitle}</div>
+      <div class="ala-ov-preview-title">${esc(loadedTitle)}</div>
       <div class="ala-ov-preview-meta">
-        <span class="ala-ov-badge ${loadedType === "MANGA" ? "ala-ov-badge--manga" : ""}">${loadedType}</span>
-        ${isIgnored ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>` : isCustom ? `<span>Overridden to MAL ID: <b>${existingOverride.malId}</b></span>` : detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+        <span class="ala-ov-badge ${loadedType === "MANGA" ? "ala-ov-badge--manga" : ""}">${esc(loadedType)}</span>
+        ${isIgnored ? `<span class="ala-ov-badge ala-ov-badge--ignored">Currently: AniList-Only</span>` : isCustom ? `<span>Overridden to MAL ID: <b>${esc(existingOverride.malId)}</b></span>` : detectedMalId ? `<span>Detected MAL ID: <b>${esc(detectedMalId)}</b></span>` : `<span>No MAL ID on AniList</span>`}
       </div>
     </div>
   `;
 		if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
-		saveBtn.addEventListener("click", () => {
+		const showAlert = (message, title = "Notice", id) => {
+			if (isClosed()) return Promise.resolve();
+			return ctx.alert({
+				id,
+				title,
+				message,
+				signal: quickSignal
+			});
+		};
+		listen(saveBtn, "click", async () => {
+			if (saveBtn.disabled || isClosed()) return;
 			let malId = extractMalId(malInput.value);
 			if (!malId && detectedMalId) malId = detectedMalId;
-			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
+			if (!malId) {
+				saveBtn.disabled = true;
+				try {
+					await showAlert("Please enter a valid MyAnimeList ID or URL.", "Invalid MAL ID", "qo-invalid-mal");
+				} finally {
+					if (!isClosed()) saveBtn.disabled = false;
+				}
+				return;
+			}
 			setOverride(mediaId, {
 				malId,
 				type: loadedType,
@@ -12458,7 +15338,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			onUpdated?.();
 			close();
 		});
-		ignoreBtn.addEventListener("click", () => {
+		listen(ignoreBtn, "click", () => {
 			setOverride(mediaId, {
 				malId: 0,
 				type: loadedType,
@@ -12468,13 +15348,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			onUpdated?.();
 			close();
 		});
-		removeBtn?.addEventListener("click", () => {
+		if (removeBtn) listen(removeBtn, "click", () => {
 			removeOverride(mediaId);
 			onUpdated?.();
 			close();
 		});
 	}
 	function openOverridesModal(ec) {
+		if (ec.signal?.aborted) return;
 		const api = ec.api ?? syncApi;
 		const staging = typeof ec?.onApply === "function";
 		const initCheck = staging ? validateOverrides(ec.value) : null;
@@ -12524,10 +15405,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				count: Object.keys(check.overrides).length
 			};
 		};
-		const modal = ec.modal({
+		let appliedInStaging = false;
+		const { backdrop, signal, listen, timeout, onCleanup } = ec.modal({
 			id: "overrides",
 			title: "Manual Mappings & Sync Audit",
 			maxWidth: "680px",
+			style: (sel) => buildOverridesCss(sel, true),
 			bodyHtml: `
       <div class="ala-ov-tabs">
         <button class="ala-ov-tab is-active" data-tab="overrides" type="button">Overrides & Ignored</button>
@@ -12634,30 +15517,45 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
         </div>
       </div>
     `,
-			footerHtml: `<button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button">Done</button>`,
-			onClose: () => {
-				cancelLookup?.();
-				cancelSearch?.();
-				cancelUnmatchedSearch?.();
-				cancelOrphansSearch?.();
-				cancelCopyTimer?.();
+			footerHtml: `<button class="ala-btn ala-btn--primary" id="ala-ov-btn-done" type="button" data-ala-close>Done</button>`
+		});
+		const isClosed = () => signal.aborted || !!ec.signal?.aborted || !backdrop.isConnected;
+		if (isClosed()) return;
+		const composedMal = composeAbortSignals(signal, ec.signal);
+		const malSignal = composedMal.signal;
+		onCleanup(composedMal.dispose);
+		const showAlert = (message, title = "Notice", id) => {
+			if (isClosed()) return Promise.resolve();
+			return ec.alert({
+				id,
+				title,
+				message,
+				signal: malSignal
+			});
+		};
+		const showConfirm = (opts) => {
+			if (isClosed()) return Promise.resolve(false);
+			return ec.confirm({
+				...opts,
+				signal: opts.signal ?? malSignal
+			});
+		};
+		if (!staging) refreshStaleOverrides({ signal: malSignal }).then(() => {
+			if (!isClosed()) renderList();
+		});
+		const doneBtn = backdrop.querySelector("#ala-ov-btn-done");
+		if (doneBtn) listen(doneBtn, "click", () => {
+			if (staging) {
+				appliedInStaging = true;
+				ec.onApply(draftOverrides);
 			}
-		});
-		ec.addStyle("overrides", () => buildOverridesCss(`#${modal.backdrop.id}`, true));
-		const { backdrop, close } = modal;
-		if (!staging) refreshStaleOverrides().then(() => {
-			if (backdrop.isConnected) renderList();
-		});
-		backdrop.querySelector("#ala-ov-btn-done")?.addEventListener("click", () => {
-			if (staging) ec.onApply(draftOverrides);
-			close();
 		});
 		const tabs = backdrop.querySelectorAll(".ala-ov-tab");
 		const viewOverrides = backdrop.querySelector("#ala-ov-view-overrides");
 		const viewAudit = backdrop.querySelector("#ala-ov-view-audit");
 		const viewJson = backdrop.querySelector("#ala-ov-view-json");
 		tabs.forEach((t) => {
-			t.addEventListener("click", () => {
+			listen(t, "click", () => {
 				tabs.forEach((o) => o.classList.toggle("is-active", o === t));
 				const target = t.dataset.tab;
 				viewOverrides.style.display = target === "overrides" ? "block" : "none";
@@ -12691,20 +15589,23 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return;
 			}
 			const { type, title, cover, detectedMalId } = activePreview;
+			const safeCover = safeCoverUrl(cover);
 			previewBox.style.display = "flex";
 			previewBox.innerHTML = `
-      ${cover ? `<img class="ala-ov-preview-cover" src="${cover}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
+      ${safeCover ? `<img class="ala-ov-preview-cover" src="${esc(safeCover)}" alt="">` : `<div class="ala-ov-preview-cover"></div>`}
       <div class="ala-ov-preview-info">
-        <div class="ala-ov-preview-title">${title}</div>
+        <div class="ala-ov-preview-title">${esc(title)}</div>
         <div class="ala-ov-preview-meta">
-          <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
-          ${detectedMalId ? `<span>Detected MAL ID: <b>${detectedMalId}</b></span>` : `<span>No MAL ID on AniList</span>`}
+          <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${esc(type)}</span>
+          ${detectedMalId ? `<span>Detected MAL ID: <b>${esc(detectedMalId)}</b></span>` : `<span>No MAL ID on AniList</span>`}
         </div>
       </div>
     `;
 			if (detectedMalId && !malInput.value) malInput.placeholder = `${detectedMalId} (AniList default)`;
 		};
+		let lookupSeq = 0;
 		const doLookup = async (id) => {
+			const seq = ++lookupSeq;
 			if (!id) {
 				activePreview = null;
 				updatePreviewUI();
@@ -12732,8 +15633,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
       }
     }`;
 			try {
-				const res = await api?.query(q, { id });
-				if (extractAlId(alInput.value) !== id) return;
+				const res = await api?.query(q, { id }, { signal: malSignal });
+				if (seq !== lookupSeq || isClosed() || extractAlId(alInput.value) !== id) return;
 				const m = res?.Media;
 				if (!m) {
 					if (!existing) {
@@ -12747,21 +15648,22 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					mediaId: m.id,
 					type: m.type === "MANGA" ? "MANGA" : "ANIME",
 					title: t,
-					cover: m.coverImage?.medium || existing?.cover,
+					cover: safeCoverUrl(m.coverImage?.medium) || safeCoverUrl(existing?.cover) || void 0,
 					detectedMalId: Number(m.idMal) || void 0
 				};
 				updatePreviewUI();
 				if (existing && existing.malId > 0 && !malInput.value) malInput.value = String(existing.malId);
-			} catch (_) {
+			} catch (err) {
+				if (seq !== lookupSeq || isClosed() || malSignal.aborted || isAbortError(err)) return;
 				if (!existing && extractAlId(alInput.value) === id) {
 					activePreview = null;
 					updatePreviewUI();
 				}
 			}
 		};
-		alInput.addEventListener("input", () => {
+		listen(alInput, "input", () => {
 			cancelLookup?.();
-			cancelLookup = ec.timeout(() => {
+			cancelLookup = timeout(() => {
 				cancelLookup = null;
 				const id = extractAlId(alInput.value);
 				doLookup(id);
@@ -12771,6 +15673,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const ignoreBtn = backdrop.querySelector("#ala-ov-btn-ignore");
 		const clearBtn = backdrop.querySelector("#ala-ov-btn-clear");
 		const clearForm = () => {
+			lookupSeq++;
 			cancelLookup?.();
 			cancelLookup = null;
 			alInput.value = "";
@@ -12778,16 +15681,57 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			activePreview = null;
 			updatePreviewUI();
 		};
-		clearBtn.addEventListener("click", clearForm);
-		saveBtn.addEventListener("click", () => {
+		listen(clearBtn, "click", clearForm);
+		const fetchMissingMeta = (id) => {
+			api?.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }, { signal: staging ? ec.signal : malSignal }).then((res) => {
+				const m = res?.Media;
+				if (!m) return;
+				if (ec.signal?.aborted) return;
+				if (signal.aborted && (!staging || !appliedInStaging)) return;
+				const current = { ...readOverrides() };
+				if (!current[String(id)]) return;
+				const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
+				const safeCover = safeCoverUrl(m.coverImage?.medium || current[String(id)].cover);
+				const updatedEntry = {
+					...current[String(id)],
+					title: t,
+					type: m.type === "MANGA" ? "MANGA" : "ANIME",
+					updatedAt: Date.now()
+				};
+				if (safeCover) updatedEntry.cover = safeCover;
+				else delete updatedEntry.cover;
+				current[String(id)] = updatedEntry;
+				writeOverrides(current);
+				if (staging && appliedInStaging) ec.onApply(current);
+				if (!isClosed()) renderList();
+			}).catch(() => {});
+		};
+		listen(saveBtn, "click", async () => {
+			if (saveBtn.disabled || isClosed()) return;
 			const id = activePreview?.mediaId || extractAlId(alInput.value);
-			if (!id) return alert("Please enter a valid AniList ID or URL.");
+			if (!id) {
+				saveBtn.disabled = true;
+				try {
+					await showAlert("Please enter a valid AniList ID or URL.", "Invalid AniList ID", "ov-invalid-al");
+				} finally {
+					if (!isClosed()) saveBtn.disabled = false;
+				}
+				return;
+			}
 			let malId = extractMalId(malInput.value);
 			if (!malId && activePreview?.detectedMalId) malId = activePreview.detectedMalId;
-			if (!malId) return alert("Please enter a valid MyAnimeList ID or URL.");
+			if (!malId) {
+				saveBtn.disabled = true;
+				try {
+					await showAlert("Please enter a valid MyAnimeList ID or URL.", "Invalid MAL ID", "ov-invalid-mal");
+				} finally {
+					if (!isClosed()) saveBtn.disabled = false;
+				}
+				return;
+			}
 			const existing = readOverrides()[String(id)];
 			const title = activePreview?.title || existing?.title || `Media #${id}`;
-			const cover = activePreview?.cover || existing?.cover;
+			const cover = safeCoverUrl(activePreview?.cover || existing?.cover) || void 0;
 			const type = activePreview?.type || existing?.type || "ANIME";
 			patchOverride(id, {
 				malId,
@@ -12797,32 +15741,23 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			});
 			clearForm();
 			renderList();
-			if (title === `Media #${id}`) api?.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
-				const m = res?.Media;
-				if (m) {
-					const current = { ...readOverrides() };
-					if (current[String(id)]) {
-						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-						const c = m.coverImage?.medium || current[String(id)].cover;
-						current[String(id)] = {
-							...current[String(id)],
-							title: t,
-							cover: c,
-							type: m.type === "MANGA" ? "MANGA" : "ANIME",
-							updatedAt: Date.now()
-						};
-						writeOverrides(current);
-						if (backdrop.isConnected) renderList();
-					}
-				}
-			}).catch(() => {});
+			if (title === `Media #${id}`) fetchMissingMeta(id);
 		});
-		ignoreBtn.addEventListener("click", () => {
+		listen(ignoreBtn, "click", async () => {
+			if (ignoreBtn.disabled || isClosed()) return;
 			const id = activePreview?.mediaId || extractAlId(alInput.value);
-			if (!id) return alert("Please enter a valid AniList ID or URL.");
+			if (!id) {
+				ignoreBtn.disabled = true;
+				try {
+					await showAlert("Please enter a valid AniList ID or URL.", "Invalid AniList ID", "ov-invalid-al");
+				} finally {
+					if (!isClosed()) ignoreBtn.disabled = false;
+				}
+				return;
+			}
 			const existing = readOverrides()[String(id)];
 			const title = activePreview?.title || existing?.title || `Media #${id}`;
-			const cover = activePreview?.cover || existing?.cover;
+			const cover = safeCoverUrl(activePreview?.cover || existing?.cover) || void 0;
 			const type = activePreview?.type || existing?.type || "ANIME";
 			patchOverride(id, {
 				malId: 0,
@@ -12832,43 +15767,25 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			});
 			clearForm();
 			renderList();
-			if (title === `Media #${id}`) api?.query(`query ($id: Int) { Media(id: $id) { id type title { userPreferred english romaji } coverImage { medium } } }`, { id }).then((res) => {
-				const m = res?.Media;
-				if (m) {
-					const current = { ...readOverrides() };
-					if (current[String(id)]) {
-						const t = m.title?.userPreferred || m.title?.english || m.title?.romaji || current[String(id)].title;
-						const c = m.coverImage?.medium || current[String(id)].cover;
-						current[String(id)] = {
-							...current[String(id)],
-							title: t,
-							cover: c,
-							type: m.type === "MANGA" ? "MANGA" : "ANIME",
-							updatedAt: Date.now()
-						};
-						writeOverrides(current);
-						if (backdrop.isConnected) renderList();
-					}
-				}
-			}).catch(() => {});
+			if (title === `Media #${id}`) fetchMissingMeta(id);
 		});
 		backdrop.querySelectorAll("[data-status-filter]").forEach((c) => {
-			c.addEventListener("click", () => {
+			listen(c, "click", () => {
 				backdrop.querySelectorAll("[data-status-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
 				statusFilter = c.dataset.statusFilter || "all";
 				renderList();
 			});
 		});
 		backdrop.querySelectorAll("[data-type-filter]").forEach((c) => {
-			c.addEventListener("click", () => {
+			listen(c, "click", () => {
 				backdrop.querySelectorAll("[data-type-filter]").forEach((o) => o.classList.toggle("is-active", o === c));
 				typeFilter = c.dataset.typeFilter || "all";
 				renderList();
 			});
 		});
-		searchInput?.addEventListener("input", () => {
+		if (searchInput) listen(searchInput, "input", () => {
 			cancelSearch?.();
-			cancelSearch = ec.timeout(() => {
+			cancelSearch = timeout(() => {
 				cancelSearch = null;
 				searchQuery = searchInput.value.trim();
 				renderList();
@@ -12894,20 +15811,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				const isIgnoredEntry = o.malId === 0;
 				const alUrl = `https://anilist.co/${o.type.toLowerCase()}/${id}`;
 				const malUrl = o.malId > 0 ? `https://myanimelist.net/${o.type.toLowerCase()}/${o.malId}` : "#";
+				const safeCover = safeCoverUrl(o.cover);
 				return `
-        <div class="ala-ov-item" data-id="${id}">
-          ${o.cover ? `<img class="ala-ov-item-cover" src="${o.cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+        <div class="ala-ov-item" data-id="${esc(id)}">
+          ${safeCover ? `<img class="ala-ov-item-cover" src="${esc(safeCover)}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
           <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="${alUrl}" target="_blank" rel="noopener" title="${o.title}">${o.title}</a>
+            <a class="ala-ov-item-title" href="${esc(alUrl)}" target="_blank" rel="noopener" title="${esc(o.title)}">${esc(o.title)}</a>
             <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${o.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${o.type}</span>
-              <span>AniList ID: <b>${id}</b></span>
-              ${isIgnoredEntry ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>` : `<span>MAL ID: <a href="${malUrl}" target="_blank" rel="noopener"><b>${o.malId}</b></a></span>`}
+              <span class="ala-ov-badge ${o.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${esc(o.type)}</span>
+              <span>AniList ID: <b>${esc(id)}</b></span>
+              ${isIgnoredEntry ? `<span class="ala-ov-badge ala-ov-badge--ignored">AniList-Only (Ignored)</span>` : `<span>MAL ID: <a href="${esc(malUrl)}" target="_blank" rel="noopener"><b>${esc(o.malId)}</b></a></span>`}
             </div>
           </div>
           <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${id}">Edit</button>
-            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${id}" title="Remove override">✕</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-edit" data-id="${esc(id)}">Edit</button>
+            <button type="button" class="ala-icon-btn ala-ov-btn-del" data-id="${esc(id)}" title="Remove override">✕</button>
           </div>
         </div>
       `;
@@ -12926,6 +15844,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				btn.addEventListener("click", () => {
 					const id = Number(btn.dataset.id);
 					if (id) {
+						cancelLookup?.();
+						cancelLookup = null;
+						malInput.value = "";
 						alInput.value = String(id);
 						doLookup(id);
 						viewOverrides.scrollTop = 0;
@@ -12940,21 +15861,22 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const unmatchedControls = backdrop.querySelector("#ala-ov-unmatched-controls");
 		const unmatchedSearchInput = backdrop.querySelector("#ala-ov-unmatched-search");
 		backdrop.querySelectorAll("[data-unmatched-type]").forEach((c) => {
-			c.addEventListener("click", () => {
+			listen(c, "click", () => {
 				backdrop.querySelectorAll("[data-unmatched-type]").forEach((o) => o.classList.toggle("is-active", o === c));
 				unmatchedTypeFilter = c.dataset.unmatchedType || "all";
 				renderUnmatchedList();
 			});
 		});
-		unmatchedSearchInput?.addEventListener("input", () => {
+		if (unmatchedSearchInput) listen(unmatchedSearchInput, "input", () => {
 			cancelUnmatchedSearch?.();
-			cancelUnmatchedSearch = ec.timeout(() => {
+			cancelUnmatchedSearch = timeout(() => {
 				cancelUnmatchedSearch = null;
 				unmatchedSearchQuery = unmatchedSearchInput.value.trim();
 				renderUnmatchedList();
 			}, 150);
 		});
 		function getRawUnmatched() {
+			if (!syncStoresInitialized) return [];
 			const configured = readOverrides();
 			const unmatched = [];
 			for (const t of ["ANIME", "MANGA"]) {
@@ -12971,6 +15893,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		function renderUnmatchedList() {
 			const unmatchedBox = backdrop.querySelector("#ala-ov-audit-unmatched");
+			if (!syncStoresInitialized) {
+				unmatchedControls.style.display = "none";
+				unmatchedBox.innerHTML = `<div class="ala-ov-empty">Enable <b>AniList → MyAnimeList Sync</b> and run a sync to view unmatched entries here.</div>`;
+				return;
+			}
 			const raw = getRawUnmatched();
 			if (!raw.length) {
 				unmatchedControls.style.display = "none";
@@ -12991,20 +15918,20 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			unmatchedBox.innerHTML = filtered.map(({ mediaId, type }) => {
 				const meta = unmatchedMetaCache.get(mediaId);
 				const title = meta?.title || `Media #${mediaId}`;
-				const cover = meta?.cover;
+				const cover = safeCoverUrl(meta?.cover);
 				return `
-        <div class="ala-ov-item" data-id="${mediaId}">
-          ${cover ? `<img class="ala-ov-item-cover" src="${cover}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
+        <div class="ala-ov-item" data-id="${esc(mediaId)}">
+          ${cover ? `<img class="ala-ov-item-cover" src="${esc(cover)}" alt="">` : `<div class="ala-ov-item-cover"></div>`}
           <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://anilist.co/${type.toLowerCase()}/${mediaId}" target="_blank" rel="noopener" title="${title}">${title}</a>
+            <a class="ala-ov-item-title" href="https://anilist.co/${esc(type.toLowerCase())}/${esc(mediaId)}" target="_blank" rel="noopener" title="${esc(title)}">${esc(title)}</a>
             <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${type}</span>
-              <span>AniList ID: <b>${mediaId}</b></span>
+              <span class="ala-ov-badge ${type === "MANGA" ? "ala-ov-badge--manga" : ""}">${esc(type)}</span>
+              <span>AniList ID: <b>${esc(mediaId)}</b></span>
             </div>
           </div>
           <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${mediaId}">Set MAL ID</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${mediaId}" data-type="${type}">Ignore</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-set" data-id="${esc(mediaId)}">Set MAL ID</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-audit-ignore" data-id="${esc(mediaId)}" data-type="${esc(type)}">Ignore</button>
           </div>
         </div>
       `;
@@ -13012,7 +15939,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			unmatchedBox.querySelectorAll(".ala-ov-audit-set").forEach((btn) => {
 				btn.addEventListener("click", () => {
 					const id = Number(btn.dataset.id);
+					cancelLookup?.();
+					cancelLookup = null;
 					tabs[0].click();
+					malInput.value = "";
 					alInput.value = String(id);
 					doLookup(id);
 				});
@@ -13026,7 +15956,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						malId: 0,
 						type,
 						title: meta?.title || `Media #${id}`,
-						cover: meta?.cover
+						cover: safeCoverUrl(meta?.cover) || void 0
 					});
 					renderUnmatchedList();
 					renderList();
@@ -13035,25 +15965,29 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		function renderAudit() {
 			renderUnmatchedList();
-			const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
-			if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds, ec.log, api).then(() => {
-				renderUnmatchedList();
-			});
+			if (syncStoresInitialized) {
+				const missingMetaIds = getRawUnmatched().map((r) => r.mediaId).filter((id) => !unmatchedMetaCache.has(id));
+				if (missingMetaIds.length > 0) batchFetchUnmatchedMeta(missingMetaIds, ec.log, api, malSignal).then(() => {
+					if (!isClosed()) renderUnmatchedList();
+				});
+			}
 			renderOrphansList();
 		}
 		let scannedOrphans = null;
+		let orphanScanErrors = [];
+		const deletingOrphans = new Set();
 		const orphansControls = backdrop.querySelector("#ala-ov-orphans-controls");
 		const orphansSearchInput = backdrop.querySelector("#ala-ov-orphans-search");
 		backdrop.querySelectorAll("[data-orphans-type]").forEach((c) => {
-			c.addEventListener("click", () => {
+			listen(c, "click", () => {
 				backdrop.querySelectorAll("[data-orphans-type]").forEach((o) => o.classList.toggle("is-active", o === c));
 				orphansTypeFilter = c.dataset.orphansType || "all";
 				renderOrphansList();
 			});
 		});
-		orphansSearchInput?.addEventListener("input", () => {
+		if (orphansSearchInput) listen(orphansSearchInput, "input", () => {
 			cancelOrphansSearch?.();
-			cancelOrphansSearch = ec.timeout(() => {
+			cancelOrphansSearch = timeout(() => {
 				cancelOrphansSearch = null;
 				orphansSearchQuery = orphansSearchInput.value.trim();
 				renderOrphansList();
@@ -13062,14 +15996,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		function renderOrphansList() {
 			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
 			if (!orphansBox) return;
+			const errorBanner = orphanScanErrors.length ? `<div class="ala-ov-status ala-ov-status--error" style="display:block;margin-top:0;margin-bottom:10px">${orphanScanErrors.map(esc).join("<br>")}</div>` : "";
 			if (scannedOrphans === null) {
 				orphansControls.style.display = "none";
-				orphansBox.innerHTML = `<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
+				orphansBox.innerHTML = `${errorBanner}<div class="ala-ov-empty">Click "Scan MAL" to find entries present on MyAnimeList that are missing from your AniList library.</div>`;
 				return;
 			}
 			if (!scannedOrphans.length) {
 				orphansControls.style.display = "none";
-				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
+				orphansBox.innerHTML = orphanScanErrors.length ? errorBanner : `<div class="ala-ov-empty">No orphaned entries found. Your MyAnimeList list matches your AniList library!</div>`;
 				return;
 			}
 			orphansControls.style.display = "flex";
@@ -13079,101 +16014,149 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return true;
 			});
 			if (!filtered.length) {
-				orphansBox.innerHTML = `<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
+				orphansBox.innerHTML = `${errorBanner}<div class="ala-ov-empty">No orphaned entries match this filter.</div>`;
 				return;
 			}
-			orphansBox.innerHTML = filtered.map((item) => `
-        <div class="ala-ov-item" data-mal-id="${item.malId}">
+			orphansBox.innerHTML = errorBanner + filtered.map((item) => {
+				const delKey = `${item.type}:${item.malId}`;
+				const isDeleting = deletingOrphans.has(delKey);
+				return `
+        <div class="ala-ov-item" data-mal-id="${esc(item.malId)}">
           <div class="ala-ov-item-info">
-            <a class="ala-ov-item-title" href="https://myanimelist.net/${item.type.toLowerCase()}/${item.malId}" target="_blank" rel="noopener" title="${item.title}">${item.title}</a>
+            <a class="ala-ov-item-title" href="https://myanimelist.net/${esc(item.type.toLowerCase())}/${esc(item.malId)}" target="_blank" rel="noopener" title="${esc(item.title)}">${esc(item.title)}</a>
             <div class="ala-ov-item-meta">
-              <span class="ala-ov-badge ${item.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${item.type}</span>
-              <span>MAL ID: <b>${item.malId}</b></span>
+              <span class="ala-ov-badge ${item.type === "MANGA" ? "ala-ov-badge--manga" : ""}">${esc(item.type)}</span>
+              <span>MAL ID: <b>${esc(item.malId)}</b></span>
             </div>
           </div>
           <div class="ala-ov-item-actions">
-            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${item.malId}" data-type="${item.type}">Delete from MAL</button>
-            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${item.malId}">Keep on MAL</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-btn--danger ala-ov-btn-del-mal" data-mal-id="${esc(item.malId)}" data-type="${esc(item.type)}"${isDeleting ? " disabled" : ""}>${isDeleting ? "Deleting..." : "Delete from MAL"}</button>
+            <button type="button" class="ala-btn ala-btn--sm ala-ov-btn-keep-mal" data-mal-id="${esc(item.malId)}" data-type="${esc(item.type)}">Keep on MAL</button>
           </div>
         </div>
-      `).join("");
+      `;
+			}).join("");
 			orphansBox.querySelectorAll(".ala-ov-btn-del-mal").forEach((btn) => {
 				btn.addEventListener("click", async () => {
 					const id = Number(btn.dataset.malId);
 					const type = btn.dataset.type || "ANIME";
-					if (!id) return;
-					if (!confirm(`Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`)) return;
+					const delKey = `${type}:${id}`;
+					if (!id || btn.disabled || deletingOrphans.has(delKey) || isClosed()) return;
+					deletingOrphans.add(delKey);
 					btn.disabled = true;
-					btn.textContent = "Deleting...";
 					try {
-						await malDeleteEntry(type, id);
-						scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
-						renderOrphansList();
+						const confirmed = await showConfirm({
+							id: "ov-del-mal-confirm",
+							title: "Delete from MyAnimeList",
+							message: `Delete MAL ID ${id} from your MyAnimeList account? This cannot be undone.`,
+							confirmText: "Delete",
+							danger: true
+						});
+						if (isClosed() || !confirmed) return;
+						btn.textContent = "Deleting...";
+						await malDeleteEntry(type, id, { signal: malSignal });
+						if (isClosed()) return;
+						scannedOrphans = scannedOrphans?.filter((o) => !(o.malId === id && o.type === type)) || [];
 					} catch (err) {
-						btn.disabled = false;
-						btn.textContent = "Delete from MAL";
-						alert(`Failed to delete from MAL: ${err?.message || err}`);
+						if (isClosed() || malSignal.aborted || isAbortError(err)) return;
+						await showAlert(`Failed to delete from MAL: ${err?.message || err}`, "Delete Failed", "ov-del-mal-error");
+					} finally {
+						deletingOrphans.delete(delKey);
+						if (!isClosed()) {
+							if (btn.isConnected) {
+								btn.disabled = false;
+								btn.textContent = "Delete from MAL";
+							} else renderOrphansList();
+						}
 					}
 				});
 			});
 			orphansBox.querySelectorAll(".ala-ov-btn-keep-mal").forEach((btn) => {
 				btn.addEventListener("click", () => {
 					const id = Number(btn.dataset.malId);
-					scannedOrphans = scannedOrphans?.filter((o) => o.malId !== id) || [];
+					const type = btn.dataset.type || "ANIME";
+					scannedOrphans = scannedOrphans?.filter((o) => !(o.malId === id && o.type === type)) || [];
 					renderOrphansList();
 				});
 			});
 		}
 		const scanOrphansBtn = backdrop.querySelector("#ala-ov-btn-scan-orphans");
-		scanOrphansBtn?.addEventListener("click", async () => {
+		if (scanOrphansBtn) listen(scanOrphansBtn, "click", async () => {
+			if (scanOrphansBtn.disabled || isClosed()) return;
 			const orphansBox = backdrop.querySelector("#ala-ov-audit-orphans");
 			scanOrphansBtn.disabled = true;
 			scanOrphansBtn.textContent = "Scanning...";
+			orphanScanErrors = [];
 			orphansBox.innerHTML = `<div class="ala-ov-empty">Scanning your AniList and MyAnimeList libraries...</div>`;
 			try {
-				const viewer = await api?.viewer();
+				const viewer = await api?.viewer(false, { signal: malSignal });
+				if (isClosed()) return;
 				if (!viewer) {
 					orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">AniList user not found. Please log in to AniList first.</div>`;
 					return;
 				}
 				const overrides = readOverrides();
-				const knownMalIds = new Set();
+				const knownMalIdsByType = {
+					ANIME: new Set(),
+					MANGA: new Set()
+				};
+				const succeededTypes = new Set();
 				for (const t of ["ANIME", "MANGA"]) try {
-					const alEntries = await alFetchAll(viewer.id, t, api);
+					const alEntries = await alFetchAll(viewer.id, t, api, malSignal);
+					if (isClosed()) return;
+					succeededTypes.add(t);
+					const known = knownMalIdsByType[t];
 					for (const e of alEntries) {
 						const ov = overrides[String(e.mediaId)];
 						if (ov) {
-							if (ov.malId > 0) knownMalIds.add(ov.malId);
+							if (ov.malId > 0) known.add(ov.malId);
+							else if (ov.malId === 0) {
+								if (e.idMal > 0) known.add(e.idMal);
+								const cached = syncStoresInitialized ? Number(stores[t].ids.data[e.mediaId]?.m) || 0 : 0;
+								if (cached > 0) known.add(cached);
+							}
 						} else {
-							const cached = stores[t].ids.data[e.mediaId]?.m;
-							if (cached && cached > 0) knownMalIds.add(cached);
-							else if (e.idMal > 0) knownMalIds.add(e.idMal);
+							const cached = syncStoresInitialized ? Number(stores[t].ids.data[e.mediaId]?.m) || 0 : 0;
+							if (cached > 0) known.add(cached);
+							else if (e.idMal > 0) known.add(e.idMal);
 						}
 					}
 				} catch (e) {
+					if (isClosed() || malSignal.aborted || isAbortError(e)) return;
 					ec?.log?.warn(`Audit scan: failed to fetch AniList ${t}:`, e);
+					orphanScanErrors.push(`Failed to fetch AniList ${t.toLowerCase()} list: ${e?.message || e}`);
 				}
 				const foundOrphans = [];
-				for (const t of ["ANIME", "MANGA"]) try {
-					const malList = await malFetchList(t);
-					for (const [idStr, data] of Object.entries(malList)) {
-						const malId = Number(idStr);
-						if (malId > 0 && !knownMalIds.has(malId)) foundOrphans.push({
-							malId,
-							type: t,
-							title: data.__malTitle || `MAL #${malId}`
-						});
+				for (const t of ["ANIME", "MANGA"]) {
+					if (!succeededTypes.has(t)) continue;
+					try {
+						const malList = await malFetchList(t, { signal: malSignal });
+						if (isClosed()) return;
+						const known = knownMalIdsByType[t];
+						for (const [idStr, data] of Object.entries(malList)) {
+							const malId = Number(idStr);
+							if (malId > 0 && !known.has(malId)) foundOrphans.push({
+								malId,
+								type: t,
+								title: data.__malTitle || `MAL #${malId}`
+							});
+						}
+					} catch (e) {
+						if (isClosed() || malSignal.aborted || isAbortError(e)) return;
+						ec?.log?.warn(`Audit scan: failed to fetch MAL ${t}:`, e);
+						orphanScanErrors.push(`Failed to fetch MAL ${t.toLowerCase()} list: ${e?.message || e}`);
 					}
-				} catch (e) {
-					ec?.log?.warn(`Audit scan: failed to fetch MAL ${t}:`, e);
 				}
 				scannedOrphans = foundOrphans;
 				renderOrphansList();
 			} catch (err) {
-				orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${err?.message || err}</div>`;
+				if (isClosed() || malSignal.aborted || isAbortError(err)) return;
+				orphansBox.innerHTML = `<div class="ala-ov-empty" style="color:rgb(var(--color-red,224,85,85))">Scan error: ${esc(err?.message || err)}</div>`;
 			} finally {
-				scanOrphansBtn.disabled = false;
-				scanOrphansBtn.textContent = "Scan MAL";
+				if (!isClosed()) {
+					scanOrphansBtn.disabled = false;
+					scanOrphansBtn.textContent = "Scan MAL";
+				}
 			}
 		});
 		const jsonTextarea = backdrop.querySelector("#ala-ov-json-textarea");
@@ -13187,30 +16170,32 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			jsonTextarea.value = JSON.stringify(current, null, 2);
 			jsonStatus.style.display = "none";
 		}
-		jsonCopyBtn?.addEventListener("click", async () => {
+		if (jsonCopyBtn) listen(jsonCopyBtn, "click", async () => {
 			try {
 				await navigator.clipboard.writeText(jsonTextarea.value);
+				if (isClosed()) return;
 				const prev = jsonCopyBtn.textContent;
 				jsonCopyBtn.textContent = "Copied!";
 				cancelCopyTimer?.();
-				cancelCopyTimer = ec.timeout(() => {
+				cancelCopyTimer = timeout(() => {
 					cancelCopyTimer = null;
-					jsonCopyBtn.textContent = prev;
+					if (!isClosed()) jsonCopyBtn.textContent = prev;
 				}, 1500);
 			} catch (_) {
+				if (isClosed()) return;
 				jsonTextarea.select();
 				document.execCommand("copy");
 				const prev = jsonCopyBtn.textContent;
 				jsonCopyBtn.textContent = "Copied!";
 				cancelCopyTimer?.();
-				cancelCopyTimer = ec.timeout(() => {
+				cancelCopyTimer = timeout(() => {
 					cancelCopyTimer = null;
-					jsonCopyBtn.textContent = prev;
+					if (!isClosed()) jsonCopyBtn.textContent = prev;
 				}, 1500);
 			}
 		});
-		jsonResetBtn?.addEventListener("click", renderJsonView);
-		jsonSaveBtn?.addEventListener("click", () => {
+		if (jsonResetBtn) listen(jsonResetBtn, "click", renderJsonView);
+		if (jsonSaveBtn) listen(jsonSaveBtn, "click", () => {
 			const res = importDraftOverrides(jsonTextarea.value, "replace");
 			if (!res.success) {
 				jsonStatus.className = "ala-ov-status ala-ov-status--error";
@@ -13223,7 +16208,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			jsonStatus.style.display = "block";
 			renderList();
 		});
-		jsonMergeBtn?.addEventListener("click", () => {
+		if (jsonMergeBtn) listen(jsonMergeBtn, "click", () => {
 			const res = importDraftOverrides(jsonTextarea.value, "merge");
 			if (!res.success) {
 				jsonStatus.className = "ala-ov-status ala-ov-status--error";
@@ -13242,8 +16227,37 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	var activeCandidate = null;
 	var activeRouteMedia = null;
+	function isDialogVisible(el) {
+		let cur = el;
+		while (cur && cur !== document.documentElement) {
+			if (cur instanceof HTMLElement) {
+				if (cur.hidden) return false;
+				if (cur.style.display === "none" || cur.style.visibility === "hidden") return false;
+				if (typeof getComputedStyle === "function") {
+					const cs = getComputedStyle(cur);
+					if (cs.display === "none" || cs.visibility === "hidden") return false;
+				}
+			}
+			cur = cur.parentElement;
+		}
+		return true;
+	}
+	function findVisibleDialogBody(root) {
+		const ownWrapper = root.closest(".el-dialog, .el-dialog__wrapper");
+		if (ownWrapper) {
+			const body = ownWrapper.querySelector(".el-dialog__body") || (ownWrapper.matches(".el-dialog__body") ? ownWrapper : null);
+			return body && isDialogVisible(body) ? body : null;
+		}
+		for (const wrapper of Array.from(document.querySelectorAll(".el-dialog__wrapper"))) {
+			if (!isDialogVisible(wrapper)) continue;
+			const body = wrapper.querySelector(".el-dialog__body");
+			if (body && isDialogVisible(body)) return body;
+		}
+		for (const body of Array.from(document.querySelectorAll(".el-dialog__body"))) if (isDialogVisible(body)) return body;
+		return null;
+	}
 	function extractDialogMedia(root = document.body) {
-		const dialog = root.closest(".el-dialog, .el-dialog__wrapper, body")?.querySelector(".el-dialog__body") || document.querySelector(".el-dialog__body");
+		const dialog = findVisibleDialogBody(root);
 		if (!dialog) return null;
 		const title = dialog.querySelector(".title, .header .title")?.textContent?.trim() || "";
 		let type = "ANIME";
@@ -13262,7 +16276,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 		}
 		if (!mediaId && title) {
-			const link = Array.from(document.querySelectorAll("a[href*=\"/anime/\"], a[href*=\"/manga/\"]")).find((a) => a.textContent?.trim() === title);
+			const dialogRoot = dialog.closest(".el-dialog, .el-dialog__wrapper") || dialog;
+			const link = Array.from(dialogRoot.querySelectorAll("a[href*=\"/anime/\"], a[href*=\"/manga/\"]")).find((a) => a.textContent?.trim() === title);
 			if (link) {
 				const m = link.getAttribute("href")?.match(/^\/(anime|manga)\/(\d+)/);
 				if (m) {
@@ -13300,36 +16315,58 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		ctx.hooks.onGqlFetch((ev) => {
 			const queryStr = ev.query || ev.operationName || "";
 			if (!queryStr) return;
-			if (ev.phase === "request" && queryStr.includes("DeleteMediaListEntry")) {
-				ctx.log.debug("DeleteMediaListEntry intercepted for variables:", ev.variables);
-				if (ctx.get("syncMode") === "exact") {
-					const candidate = activeCandidate || extractDialogMedia(document.body);
-					if (candidate) {
-						addPendingDelete({
-							mediaId: candidate.mediaId,
-							malId: candidate.malId,
-							type: candidate.type,
-							title: candidate.title,
-							deletedAt: Date.now()
-						});
-						ctx.log.debug("Queued pending deletion for exact match:", candidate);
-						activeCandidate = null;
-						log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
+			if (queryStr.includes("DeleteMediaListEntry")) {
+				if (ev.phase === "request") {
+					ctx.log.debug("DeleteMediaListEntry request intercepted for variables:", ev.variables);
+					if (ctx.get("syncMode") === "exact" && !activeCandidate) {
+						const candidate = extractDialogMedia(document.body);
+						if (candidate) activeCandidate = candidate;
 					}
+					return;
+				}
+				if (ev.phase === "response") {
+					if (!(ev.ok === true && !ev.errors?.length && ev.data?.DeleteMediaListEntry?.deleted === true)) {
+						ctx.log.debug("DeleteMediaListEntry response not confirmed, clearing candidate:", ev.status, ev.data);
+						activeCandidate = null;
+						return;
+					}
+					if (ctx.get("syncMode") === "exact") {
+						const candidate = activeCandidate || extractDialogMedia(document.body);
+						if (candidate) {
+							addPendingDelete({
+								mediaId: candidate.mediaId,
+								malId: candidate.malId,
+								type: candidate.type,
+								title: candidate.title,
+								deletedAt: Date.now()
+							});
+							ctx.log.debug("Queued pending deletion for exact match:", candidate);
+							activeCandidate = null;
+							log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
+						}
+					} else activeCandidate = null;
+					return;
 				}
 				return;
 			}
-			if (ev.phase === "response" && queryStr.includes("SaveMediaListEntry") && ev.variables?.mediaId) {
+			if (ev.phase === "response" && queryStr.includes("SaveMediaListEntry") && ev.variables?.mediaId && ev.ok === true && !ev.errors?.length && Boolean(ev.data?.SaveMediaListEntry)) {
 				const mediaId = Number(ev.variables.mediaId);
 				ctx.log.debug("SaveMediaListEntry intercepted, un-queuing any pending deletion for mediaId:", mediaId);
 				removePendingDelete(mediaId, "ANIME");
 				removePendingDelete(mediaId, "MANGA");
 			}
 		});
+		ctx.listen(document, "keydown", (e) => {
+			if (e.key === "Escape") activeCandidate = null;
+		}, true);
 		ctx.listen(document, "click", (e) => {
 			if (ctx.get("syncMode") !== "exact") return;
 			const target = e.target;
 			if (!target) return;
+			if (target.classList.contains("el-message-box__wrapper") || target.classList.contains("el-dialog__wrapper") || target.closest(".el-message-box__headerbtn, .el-dialog__headerbtn, .el-message-box__close, .el-dialog__close")) {
+				activeCandidate = null;
+				return;
+			}
 			const btnText = ((target.closest(".delete-btn, .delete, button, [role=\"button\"]") || target).textContent || "").trim().toLowerCase();
 			if (target.classList.contains("delete-btn") || target.classList.contains("delete") || btnText === "delete" || btnText.includes("delete list entry")) {
 				const candidate = extractDialogMedia(target);
@@ -13338,17 +16375,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			const inWarningBox = !!target.closest(".el-message-box, .el-message-box__wrapper");
 			if ((btnText === "ok" || target.classList.contains("el-button--primary") || !!target.closest(".el-message-box__btns .el-button--primary")) && inWarningBox) {
-				const candidate = activeCandidate || extractDialogMedia(document.body);
-				if (candidate) {
-					addPendingDelete({
-						mediaId: candidate.mediaId,
-						malId: candidate.malId,
-						type: candidate.type,
-						title: candidate.title,
-						deletedAt: Date.now()
-					});
-					activeCandidate = null;
-					log(`${typeLabel(candidate.type)}: queued "${candidate.title}" for deletion on MAL (Exact Match).`, "info");
+				if (!activeCandidate) {
+					const candidate = extractDialogMedia(document.body);
+					if (candidate) activeCandidate = candidate;
 				}
 				return;
 			}
@@ -13489,24 +16518,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 						m.legacy.del(oldKey);
 					}
 				}
-				for (const t of TYPES) {
-					const rawIds = m.storage.get(`idmap_${t}`, void 0);
-					if (rawIds !== void 0) try {
-						const parsed = typeof rawIds === "string" ? JSON.parse(rawIds) : rawIds;
-						if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stores[t].ids.data = parsed;
-					} catch {}
-					const rawSettled = m.storage.get(`settled_${t}`, void 0);
-					if (rawSettled !== void 0) try {
-						const parsed = typeof rawSettled === "string" ? JSON.parse(rawSettled) : rawSettled;
-						if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stores[t].settled.data = parsed;
-					} catch {}
-				}
 				m.storage.set("schema", 3);
 				m.legacy.del("sync_schema");
 				m.legacy.del("sync_lock_heartbeat");
 			}, "sync schema upgrade");
 		},
 		setup(ctx) {
+			bumpSyncEpoch();
 			setSyncLog(ctx.log);
 			setSyncGet(ctx.get);
 			setSyncStorage(ctx.storage);
@@ -13514,14 +16532,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			initSyncStores(ctx.persistent);
 			initDeletionInterceptor(ctx);
 			ctx.menuCommand("🗑️ AL→MAL Sync: Reset all data", () => {
-				syncStore.clearKnown();
+				for (const t of TYPES) {
+					clearCache(stores[t].ids, false);
+					clearCache(stores[t].settled, false);
+				}
 				ctx.api.clearViewer();
 				ctx.accounts.clearSecrets("mal");
 				ctx.storage.clear();
-				for (const t of TYPES) {
-					clearCache(stores[t].ids);
-					clearCache(stores[t].settled);
-				}
 				log("All stored data cleared.");
 				renderPanel();
 			});
@@ -13532,8 +16549,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			});
 			if (location.hostname === "anilist.co") initSyncPanel(ctx);
 			ctx.onCleanup(() => {
-				if (syncStatus.syncing) syncStatus.cancelled = true;
+				bumpSyncEpoch();
+				if (syncStatus.syncing) {
+					syncStatus.cancelled = true;
+					syncStatus.syncing = false;
+					progress.phase = "idle";
+					notifyState();
+				}
 				releaseLock();
+				resetSyncStores();
 				setSyncLog(null);
 				setSyncGet(null);
 				setSyncStorage(null);
@@ -13557,6 +16581,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			legacy: [OVERRIDES_SETTING_KEY],
 			title: "Manual Overrides & Audit",
 			help: "Configure custom AniList → MyAnimeList ID mappings, ignore titles, and audit unmatched or orphaned entries.",
+			autoEnableParentWhenNonEmpty: true,
 			validate: validateOverrides,
 			editor: openOverridesModal
 		}],
@@ -13590,20 +16615,38 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const PARAM = "minimumTagRank";
 			const VALUE = String(ctx.get("tagPercentage"));
 			const isTarget = () => /^\/search\/(anime|manga)\/?$/.test(location.pathname);
-			const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && /genre|tag/i.test(k) && v.trim() !== "");
+			const hasSelection = (url) => [...url.searchParams].some(([k, v]) => k !== PARAM && !/^exclude/i.test(k) && /genre|tag/i.test(k) && v.trim() !== "");
 			let fixing = false;
+			let appliedForFilter = false;
+			let lastPathname = "";
 			function apply(initial) {
-				if (fixing || !isTarget()) return;
+				if (fixing) return;
+				if (!isTarget()) {
+					appliedForFilter = false;
+					lastPathname = "";
+					return;
+				}
+				if (location.pathname !== lastPathname) {
+					appliedForFilter = false;
+					lastPathname = location.pathname;
+				}
 				const u = new URL(location.href);
-				if (!hasSelection(u) || u.searchParams.get(PARAM) === VALUE) return;
+				if (!hasSelection(u)) {
+					appliedForFilter = false;
+					return;
+				}
+				if (appliedForFilter || u.searchParams.has(PARAM)) {
+					appliedForFilter = true;
+					return;
+				}
 				u.searchParams.set(PARAM, VALUE);
+				appliedForFilter = true;
 				fixing = true;
 				try {
-					if (initial) location.replace(u.toString());
-					else {
+					ctx.silently(() => {
 						history.replaceState(history.state, document.title, u.toString());
-						window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
-					}
+						if (!initial) window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+					});
 				} finally {
 					fixing = false;
 				}
@@ -13670,39 +16713,39 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		for (const tier of tiers) if (rating >= tier.min - .05 && rating <= tier.max + .05) return tier;
 		return null;
 	}
-	var NAMED_COLORS = new Set([
-		"black",
-		"white",
-		"gray",
-		"grey",
-		"silver",
-		"red",
-		"maroon",
-		"yellow",
-		"olive",
-		"lime",
-		"green",
-		"aqua",
-		"cyan",
-		"teal",
-		"blue",
-		"navy",
-		"fuchsia",
-		"magenta",
-		"purple",
-		"orange",
-		"gold",
-		"pink",
-		"brown",
-		"transparent"
-	]);
+	var NAMED_COLOR_HEX = {
+		black: "#000000",
+		white: "#ffffff",
+		gray: "#808080",
+		grey: "#808080",
+		silver: "#c0c0c0",
+		red: "#ff0000",
+		maroon: "#800000",
+		yellow: "#ffff00",
+		olive: "#808000",
+		lime: "#00ff00",
+		green: "#008000",
+		aqua: "#00ffff",
+		cyan: "#00ffff",
+		teal: "#008080",
+		blue: "#0000ff",
+		navy: "#000080",
+		fuchsia: "#ff00ff",
+		magenta: "#ff00ff",
+		purple: "#800080",
+		orange: "#ffa500",
+		gold: "#ffd700",
+		pink: "#ffc0cb",
+		brown: "#a52a2a",
+		transparent: null
+	};
 	function isValidColor(color) {
 		if (typeof color !== "string") return false;
 		const s = color.trim();
 		if (!s) return false;
 		if (/^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return true;
 		if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
-		if (NAMED_COLORS.has(s.toLowerCase())) return true;
+		if (Object.prototype.hasOwnProperty.call(NAMED_COLOR_HEX, s.toLowerCase())) return true;
 		if (typeof CSS !== "undefined" && typeof CSS.supports === "function") try {
 			if (CSS.supports("color", s)) return true;
 		} catch (_) {}
@@ -13712,6 +16755,83 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			return !!opt.style.color;
 		} catch (_) {}
 		return false;
+	}
+	function byteToHex(n) {
+		return Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+	}
+	function parseRgbChannel(raw) {
+		const s = raw.trim();
+		if (!s) return null;
+		if (s.endsWith("%")) {
+			const pct = parseFloat(s.slice(0, -1));
+			return Number.isFinite(pct) ? pct / 100 * 255 : null;
+		}
+		const num = Number(s);
+		return Number.isFinite(num) ? num : null;
+	}
+	function hslToRgb(h, sPct, lPct) {
+		const hue = (h % 360 + 360) % 360 / 360;
+		const s = Math.max(0, Math.min(100, sPct)) / 100;
+		const l = Math.max(0, Math.min(100, lPct)) / 100;
+		if (s === 0) {
+			const v = l * 255;
+			return [
+				v,
+				v,
+				v
+			];
+		}
+		const q = l < .5 ? l * (1 + s) : l + s - l * s;
+		const p = 2 * l - q;
+		const hue2rgb = (t) => {
+			let x = t;
+			if (x < 0) x += 1;
+			if (x > 1) x -= 1;
+			if (x < 1 / 6) return p + (q - p) * 6 * x;
+			if (x < 1 / 2) return q;
+			if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+			return p;
+		};
+		return [
+			hue2rgb(hue + 1 / 3) * 255,
+			hue2rgb(hue) * 255,
+			hue2rgb(hue - 1 / 3) * 255
+		];
+	}
+	function cssColorToHex(color) {
+		const s = (color || "").trim();
+		if (!s) return null;
+		const m3 = s.match(/^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])[0-9a-fA-F]?$/);
+		if (m3) return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`.toLowerCase();
+		if (/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(s)) return s.slice(0, 7).toLowerCase();
+		const lower = s.toLowerCase();
+		if (Object.prototype.hasOwnProperty.call(NAMED_COLOR_HEX, lower)) return NAMED_COLOR_HEX[lower];
+		const rgbMatch = s.match(/^rgba?\(\s*([^)]+)\s*\)$/i);
+		if (rgbMatch) {
+			const body = rgbMatch[1].split("/")[0].trim();
+			const parts = body.includes(",") ? body.split(",") : body.split(/\s+/);
+			if (parts.length >= 3) {
+				const r = parseRgbChannel(parts[0]);
+				const g = parseRgbChannel(parts[1]);
+				const b = parseRgbChannel(parts[2]);
+				if (r !== null && g !== null && b !== null) return `#${byteToHex(r)}${byteToHex(g)}${byteToHex(b)}`;
+			}
+		}
+		const hslMatch = s.match(/^hsla?\(\s*([^)]+)\s*\)$/i);
+		if (hslMatch) {
+			const body = hslMatch[1].split("/")[0].trim();
+			const parts = body.includes(",") ? body.split(",") : body.split(/\s+/);
+			if (parts.length >= 3) {
+				const h = parseFloat(parts[0]);
+				const sat = parseFloat(parts[1]);
+				const light = parseFloat(parts[2]);
+				if (Number.isFinite(h) && Number.isFinite(sat) && Number.isFinite(light)) {
+					const [r, g, b] = hslToRgb(h, sat, light);
+					return `#${byteToHex(r)}${byteToHex(g)}${byteToHex(b)}`;
+				}
+			}
+		}
+		return null;
 	}
 	function normalizeHexColor(color) {
 		const s = (color || "").trim();
@@ -13851,29 +16971,46 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
     `,
 			footerHtml: `
       <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-      <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+      <button class="ala-btn" id="ala-tier-btn-cancel" type="button" data-ala-close>Cancel</button>
       <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-    `
+    `,
+			style: buildTierModalCss
 		});
-		ctx.addStyle("tier-modal", () => buildTierModalCss(`#${modal.backdrop.id}`));
 		const { backdrop, close } = modal;
 		const tbody = backdrop.querySelector("#ala-tier-tbody");
 		const status = backdrop.querySelector("#ala-tier-status");
+		const onClick = (selector, fn) => {
+			const el = backdrop.querySelector(selector);
+			if (el) modal.listen(el, "click", fn);
+		};
 		const setModalStatus = (msg, isError = false) => {
 			status.textContent = msg;
 			status.className = `ala-tier-status ${isError ? "is-error" : ""}`;
 		};
+		const getColorInputValue = (input, fallback) => {
+			if (!input) return fallback;
+			const rawColor = input.dataset.rawColor;
+			const pickerHex = input.dataset.pickerHex;
+			if (rawColor !== void 0 && pickerHex !== void 0 && input.value.toLowerCase() === pickerHex.toLowerCase()) return rawColor;
+			return input.value || fallback;
+		};
 		const createRowHtml = (t, idx) => {
-			const badgeColor = normalizeHexColor(t.color) || "#000000";
-			const textColor = normalizeHexColor(t.textColor) || "#ffffff";
+			const rawBadgeColor = typeof t.color === "string" ? t.color.trim() : "";
+			const rawTextColor = typeof t.textColor === "string" ? t.textColor.trim() : "";
+			const pickerBadgeColor = cssColorToHex(rawBadgeColor) || "#000000";
+			const pickerTextColor = cssColorToHex(rawTextColor) || "#ffffff";
+			const previewBadgeColor = rawBadgeColor || pickerBadgeColor;
+			const previewTextColor = rawTextColor || pickerTextColor;
+			const minVal = Number.isFinite(t.min) ? String(t.min) : "";
+			const maxVal = Number.isFinite(t.max) ? String(t.max) : "";
 			return `
     <tr data-idx="${idx}">
       <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
-      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
-      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
-      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
-      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
-      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
+      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${esc(minVal)}" style="width:100%"></td>
+      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${esc(maxVal)}" style="width:100%"></td>
+      <td><input type="color" class="ala-t-color" value="${esc(pickerBadgeColor)}" data-raw-color="${esc(rawBadgeColor)}" data-picker-hex="${esc(pickerBadgeColor)}" title="Badge Background Color"></td>
+      <td><input type="color" class="ala-t-text-color" value="${esc(pickerTextColor)}" data-raw-color="${esc(rawTextColor)}" data-picker-hex="${esc(pickerTextColor)}" title="Badge Text Color"></td>
+      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(previewBadgeColor)};color:${esc(previewTextColor)}">${esc(t.label)}</span></td>
       <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
     </tr>
   `;
@@ -13885,15 +17022,17 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const rows = tbody.querySelectorAll("tr");
 			const result = [];
 			rows.forEach((tr) => {
-				const label = (tr.querySelector(".ala-t-label")?.value || "").trim();
-				const min = parseFloat(tr.querySelector(".ala-t-min")?.value || "0");
-				const max = parseFloat(tr.querySelector(".ala-t-max")?.value || "100");
-				const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-				const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+				const label = (tr.querySelector(".ala-t-label")?.value ?? "").trim();
+				const minRaw = (tr.querySelector(".ala-t-min")?.value ?? "").trim();
+				const maxRaw = (tr.querySelector(".ala-t-max")?.value ?? "").trim();
+				const min = minRaw === "" ? NaN : Number(minRaw);
+				const max = maxRaw === "" ? NaN : Number(maxRaw);
+				const color = getColorInputValue(tr.querySelector(".ala-t-color"), "#000000");
+				const textColor = getColorInputValue(tr.querySelector(".ala-t-text-color"), "#ffffff");
 				result.push({
-					label: label || "Tier",
-					min: isNaN(min) ? 0 : min,
-					max: isNaN(max) ? 100 : max,
+					label,
+					min,
+					max,
 					color,
 					textColor
 				});
@@ -13902,8 +17041,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		};
 		const updatePreview = (tr) => {
 			const label = tr.querySelector(".ala-t-label")?.value || "";
-			const color = tr.querySelector(".ala-t-color")?.value || "#000000";
-			const textColor = tr.querySelector(".ala-t-text-color")?.value || "#ffffff";
+			const color = getColorInputValue(tr.querySelector(".ala-t-color"), "#000000");
+			const textColor = getColorInputValue(tr.querySelector(".ala-t-text-color"), "#ffffff");
 			const preview = tr.querySelector(".ala-t-preview");
 			if (preview) {
 				preview.textContent = label;
@@ -13911,11 +17050,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				preview.style.color = textColor;
 			}
 		};
-		tbody.addEventListener("input", (e) => {
-			const tr = e.target.closest("tr");
+		const handleRowColorOrInput = (target) => {
+			if (target instanceof HTMLInputElement && target.matches(".ala-t-color, .ala-t-text-color")) {
+				delete target.dataset.rawColor;
+				delete target.dataset.pickerHex;
+			}
+			const tr = target.closest("tr");
 			if (tr) updatePreview(tr);
+		};
+		modal.listen(tbody, "input", (e) => {
+			handleRowColorOrInput(e.target);
 		});
-		tbody.addEventListener("click", (e) => {
+		modal.listen(tbody, "change", (e) => {
+			handleRowColorOrInput(e.target);
+		});
+		modal.listen(tbody, "click", (e) => {
 			const btn = e.target.closest(".ala-tier-del-btn");
 			if (btn) {
 				const tr = btn.closest("tr");
@@ -13925,7 +17074,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				}
 			}
 		});
-		backdrop.querySelector("#ala-tier-btn-add")?.addEventListener("click", () => {
+		onClick("#ala-tier-btn-add", () => {
 			const current = getRowsData();
 			current.push({
 				min: 0,
@@ -13937,19 +17086,19 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			renderTable(current);
 			setModalStatus("Added new tier.");
 		});
-		backdrop.querySelector("#ala-tier-btn-reset")?.addEventListener("click", () => {
+		onClick("#ala-tier-btn-reset", () => {
 			renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
 			setModalStatus("Reset to default tiers.");
 		});
 		const jsonWrap = backdrop.querySelector("#ala-tier-json-wrap");
 		const jsonArea = backdrop.querySelector("#ala-tier-json-area");
-		backdrop.querySelector("#ala-tier-btn-toggle-json")?.addEventListener("click", () => {
+		onClick("#ala-tier-btn-toggle-json", () => {
 			if (jsonWrap.style.display === "none") {
 				jsonArea.value = JSON.stringify(getRowsData(), null, 2);
 				jsonWrap.style.display = "block";
 			} else jsonWrap.style.display = "none";
 		});
-		backdrop.querySelector("#ala-tier-btn-apply-json")?.addEventListener("click", () => {
+		onClick("#ala-tier-btn-apply-json", () => {
 			try {
 				const check = validateTiers(JSON.parse(jsonArea.value));
 				if (!check.valid || !check.tiers) {
@@ -13963,8 +17112,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				setModalStatus("Invalid JSON syntax: " + (e.message || e), true);
 			}
 		});
-		backdrop.querySelector("#ala-tier-btn-cancel")?.addEventListener("click", close);
-		backdrop.querySelector("#ala-tier-btn-save")?.addEventListener("click", () => {
+		onClick("#ala-tier-btn-save", () => {
 			const check = validateTiers(getRowsData());
 			if (!check.valid || !check.tiers) {
 				setModalStatus(check.error || "Invalid tier configuration.", true);
@@ -14129,7 +17277,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			function getCompareColumnFormat(el, viewerScoreFormat) {
 				const compareRoot = el.closest(".compare");
 				if (!compareRoot) return "UNKNOWN";
-				const isAuthUser = (el.getAttribute("label") || "") === "Score" || !!el.matches(".entry > .cell.score:first-of-type, .entry > .score:first-of-type");
+				const label = el.getAttribute("label") || "";
+				const entry = el.closest(".entry");
+				const entryScores = entry ? Array.from(entry.querySelectorAll(".score")) : [];
+				const hasScoreLabel = entryScores.some((s) => s.getAttribute("label") === "Score");
+				const isAuthUser = label === "Score" || !hasScoreLabel && (label ? entryScores.length >= 2 && entryScores[0] === el : entryScores[0] === el);
 				const sideKey = isAuthUser ? "auth" : "target";
 				if (!compareRoot._colFormats) compareRoot._colFormats = {};
 				if (compareRoot._colFormats[sideKey]) return compareRoot._colFormats[sideKey];
@@ -14137,13 +17289,49 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					compareRoot._colFormats[sideKey] = viewerScoreFormat;
 					return viewerScoreFormat;
 				}
-				const colSelector = isAuthUser ? ".entry > .cell.score:first-of-type, .entry > .score:first-of-type, .score[label=\"Score\"]" : ".entry > .cell.score:nth-of-type(2), .entry > .score:nth-of-type(2), .score:not([label=\"Score\"])";
-				const cells = compareRoot.querySelectorAll(colSelector);
+				const entries = compareRoot.querySelectorAll(".entry");
+				let cells = [];
+				if (entries.length > 0) for (const row of entries) {
+					const rowScores = Array.from(row.querySelectorAll(".score"));
+					if (rowScores.length === 0) continue;
+					const labeledAuth = rowScores.find((s) => s.getAttribute("label") === "Score");
+					if (isAuthUser) {
+						const cell = labeledAuth || (rowScores[0].hasAttribute("label") ? null : rowScores[0]);
+						if (cell) cells.push(cell);
+					} else {
+						const cell = labeledAuth ? rowScores.find((s) => s !== labeledAuth) : rowScores[1] || (rowScores[0].getAttribute("label") ? rowScores[0] : null);
+						if (cell) cells.push(cell);
+					}
+				}
+				else {
+					const fallbackSelector = isAuthUser ? ".score[label=\"Score\"]" : ".score:not([label=\"Score\"])";
+					cells = Array.from(compareRoot.querySelectorAll(fallbackSelector));
+				}
 				let maxScore = 0;
 				let hasDecimal = false;
 				let hasStarIcon = false;
+				let hasSmileyIcon = false;
 				for (const cell of cells) {
-					if (cell.querySelector("svg, .icon")) hasStarIcon = true;
+					const icons = cell.querySelectorAll("svg, .icon, [data-icon]");
+					if (icons.length > 0) {
+						let cellIsSmiley = false;
+						const cellClass = (cell.getAttribute("class") || "").toLowerCase();
+						if (/(?:point_3|smiley)/.test(cellClass)) cellIsSmiley = true;
+						else for (const icon of icons) {
+							const sig = [
+								icon.getAttribute("data-icon") || "",
+								icon.getAttribute("class") || "",
+								icon.getAttribute("aria-label") || "",
+								icon.getAttribute("title") || ""
+							].join(" ").toLowerCase();
+							if (/(?:smile|smiley|meh|frown)/.test(sig)) {
+								cellIsSmiley = true;
+								break;
+							}
+						}
+						if (cellIsSmiley) hasSmileyIcon = true;
+						else hasStarIcon = true;
+					}
 					const s = cell.getAttribute("score") || (cell.textContent || "").replace("%", "").trim();
 					const num = parseFloat(s);
 					if (!isNaN(num) && num > 0) {
@@ -14155,13 +17343,16 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				if (maxScore > 10) detected = "POINT_100";
 				else if (hasDecimal) detected = "POINT_10_DECIMAL";
 				else if (hasStarIcon) detected = "POINT_5";
+				else if (hasSmileyIcon && maxScore <= 3) detected = "POINT_3";
+				else if (hasSmileyIcon) detected = "POINT_5";
 				else if (maxScore > 5) detected = "POINT_10";
 				else if (maxScore > 0) detected = "POINT_10";
 				compareRoot._colFormats[sideKey] = detected;
 				ctx.log.debug(`Detected score system for ${isAuthUser ? "viewer" : "other"}:`, detected, {
 					maxScore,
 					hasDecimal,
-					hasStarIcon
+					hasStarIcon,
+					hasSmileyIcon
 				});
 				return detected;
 			}
@@ -14177,6 +17368,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					default: return score > 10 ? score : score * 10;
 				}
 			}
+			function clearProcessedCell(el, fallbackText = "") {
+				const container = el.querySelector(".ala-tier-container");
+				if (container) {
+					if (fallbackText) container.replaceWith(document.createTextNode(fallbackText));
+					else container.remove();
+				}
+				delete el.dataset.tierModified;
+				delete el.dataset.tierSource;
+			}
 			function processScoreElement(el, tiers, colorScore, viewerScoreFormat, isPercentage = false, isBlockView = false) {
 				if (el.hasAttribute("data-ala-probe")) return;
 				if (el.dataset.tierModified) {
@@ -14186,14 +17386,26 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					delete el.dataset.tierModified;
 				}
 				const attr = el.getAttribute("score");
-				const rawText = (attr || el.textContent || "").replace("%", "").trim();
-				if (!rawText || rawText === "-" || rawText === "0") return;
+				const rawText = (attr !== null ? attr : el.textContent || "").replace("%", "").trim();
+				if (!rawText || rawText === "-" || rawText === "0") {
+					clearProcessedCell(el, rawText);
+					return;
+				}
 				const num = parseFloat(rawText);
-				if (isNaN(num) || num <= 0) return;
+				if (isNaN(num) || num <= 0) {
+					clearProcessedCell(el, rawText);
+					return;
+				}
 				const normalizedRating = normalizeScore(num, el.closest(".compare") ? getCompareColumnFormat(el, viewerScoreFormat) : getScoreSystem(viewerScoreFormat), isPercentage);
-				if (normalizedRating === null) return;
+				if (normalizedRating === null) {
+					clearProcessedCell(el, rawText);
+					return;
+				}
 				const tier = getTier(normalizedRating, tiers);
-				if (!tier) return;
+				if (!tier) {
+					clearProcessedCell(el, rawText);
+					return;
+				}
 				ctx.log.debug("Applied tier badge:", tier.label, "to raw score:", rawText, "normalized:", normalizedRating);
 				el.dataset.tierModified = "true";
 				el.dataset.tierSource = attr ?? "";
@@ -14263,11 +17475,44 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				});
 				processTop100Elements(tiers, colorScore);
 			}
+			function cleanupTierDom() {
+				document.querySelectorAll(".ala-tier-container").forEach((container) => {
+					const parent = container.parentElement;
+					if (!parent) {
+						container.remove();
+						return;
+					}
+					const scoreSpan = container.querySelector(".ala-tier-score-text");
+					if (scoreSpan) while (scoreSpan.firstChild) parent.insertBefore(scoreSpan.firstChild, container);
+					container.remove();
+				});
+				document.querySelectorAll("[data-tier-modified]").forEach((el) => {
+					delete el.dataset.tierModified;
+					delete el.dataset.tierSource;
+				});
+				document.querySelectorAll(".compare").forEach((c) => {
+					delete c._colFormats;
+				});
+			}
 			const HINT_KEY = "standalone_seen";
 			let paused = !!ctx.storage.get(HINT_KEY, false);
-			const runScan = () => {
-				if (!paused) applyTierLabels();
+			let disposed = false;
+			let cancelScanTimer = null;
+			const cancelPendingScan = () => {
+				if (cancelScanTimer) {
+					cancelScanTimer();
+					cancelScanTimer = null;
+				}
 			};
+			const runScan = () => {
+				if (!paused && !disposed) applyTierLabels();
+			};
+			ctx.onCleanup(() => {
+				disposed = true;
+				cancelPendingScan();
+				cleanupTierDom();
+				probeCache = null;
+			});
 			ctx.ready(() => {
 				runScan();
 				const unsubNav = ctx.onNav(() => {
@@ -14276,25 +17521,29 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					});
 					runScan();
 				});
-				let scanQueued = false;
 				const unsubBody = ctx.onBodyMutation(() => {
-					if (scanQueued) return;
-					scanQueued = true;
-					ctx.timeout(() => {
-						scanQueued = false;
+					if (paused || disposed || cancelScanTimer) return;
+					cancelScanTimer = ctx.timeout(() => {
+						cancelScanTimer = null;
 						runScan();
 					}, 100);
 				});
 				probeTierLabels().then((found) => {
+					if (disposed) return;
 					ctx.storage.set(HINT_KEY, found);
 					const wasPaused = paused;
 					paused = found;
-					ctx.setStandalonePaused(found);
 					if (found) {
+						cancelPendingScan();
 						unsubNav();
 						unsubBody();
+						cleanupTierDom();
 						if (!wasPaused) ctx.log.warn("Built-in Tier Labels paused: the standalone AniList Tier Labels script is installed. Uninstall it to use the built-in version.");
-					} else if (wasPaused) runScan();
+						ctx.setStandalonePaused(true);
+					} else {
+						ctx.setStandalonePaused(false);
+						if (wasPaused) runScan();
+					}
 				});
 			});
 		}
@@ -14315,7 +17564,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			enabled: false,
 			channels: Object.fromEntries(Object.values(CORE_DEBUG_CHANNELS).map((ch) => [ch.id, true]))
 		} };
-		const debugModules = features.filter((f) => Boolean(f.debug && f.debug.debug !== false)).sort((a, b) => a.id.localeCompare(b.id));
+		const debugModules = features.filter((f) => Boolean(f.debug && f.debug.debug !== false && f.id !== "core")).sort((a, b) => a.id.localeCompare(b.id));
 		for (const f of debugModules) {
 			const debuggable = getDebuggableChannels(f.debug);
 			out[f.id] = debuggable.length ? {
@@ -14470,6 +17719,91 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
     flex-direction: column;
     animation: alaModalPop 0.15s ease-out;
   }
+  #ala-pwd-backdrop .ala-sheet {
+    box-sizing: border-box;
+    max-height: 92vh;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+  #ala-pwd-backdrop .ala-sheet * {
+    box-sizing: border-box;
+  }
+  #ala-pwd-backdrop .ala-sheet :focus-visible {
+    outline: 2px solid rgb(var(--color-blue, 61, 180, 242));
+    outline-offset: 2px;
+  }
+  #ala-pwd-backdrop .ala-sheet-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 20px 10px;
+  }
+  #ala-pwd-backdrop .ala-sheet-head h2 {
+    margin: 0;
+    font-family: inherit;
+    font-size: 19px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+  #ala-pwd-backdrop .ala-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0 20px 8px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  #ala-pwd-backdrop .ala-sheet-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 20px;
+    border-top: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.14);
+  }
+  #ala-pwd-backdrop .ala-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 38px;
+    padding: 0 18px;
+    border: 1px solid rgba(var(--color-text-lighter, 146, 154, 166), 0.25);
+    border-radius: 4px;
+    background: transparent;
+    color: rgb(var(--color-text, 240, 243, 246));
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #ala-pwd-backdrop .ala-btn--primary {
+    border-color: transparent;
+    background: rgb(var(--color-blue, 61, 180, 242));
+    color: #fff;
+    font-weight: 600;
+  }
+  #ala-pwd-backdrop .ala-btn:hover {
+    filter: brightness(1.1);
+  }
+  #ala-pwd-backdrop .ala-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: rgb(var(--color-text-lighter, 146, 154, 166));
+    cursor: pointer;
+  }
+  #ala-pwd-backdrop .ala-icon-btn:hover {
+    background: rgba(var(--color-text-lighter, 146, 154, 166), 0.14);
+    color: rgb(var(--color-text, 240, 243, 246));
+  }
   @keyframes alaModalPop {
     from { opacity: 0; transform: scale(0.96) translateY(-4px); }
     to { opacity: 1; transform: scale(1) translateY(0); }
@@ -14560,6 +17894,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				return;
 			}
 			const disposeStyle = addStyle("ala-pwd-modal-style", MODAL_CSS);
+			const disposeOwn = Core.registerOwnUi("#ala-pwd-backdrop");
 			const existing = document.getElementById("ala-pwd-backdrop");
 			if (existing) existing.remove();
 			const backdrop = document.createElement("div");
@@ -14624,12 +17959,15 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			let isVisible = false;
 			let settled = false;
 			let focusTimer = null;
+			let overlay = null;
 			const onKeyDown = (e) => {
 				if (e.key === "Escape") {
+					if (!overlay?.isTop()) return;
 					e.preventDefault();
-					e.stopPropagation();
+					e.stopImmediatePropagation();
 					cancel();
 				} else if (e.key === "Enter") {
+					if (!overlay?.isTop()) return;
 					const target = e.target;
 					if (target instanceof Element) {
 						if (backdrop.contains(target)) {
@@ -14653,8 +17991,11 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					focusTimer = null;
 				}
 				document.removeEventListener("keydown", onKeyDown, true);
+				overlay?.dispose();
+				overlay = null;
 				if (activeCancel === cancel) activeCancel = null;
 				backdrop.remove();
+				disposeOwn();
 				disposeStyle();
 			};
 			const cancel = () => {
@@ -14671,6 +18012,12 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					input.focus();
 					return;
 				}
+				if (val.length > 0 && !val.trim()) {
+					errBox.textContent = "Password cannot contain only whitespace.";
+					errBox.style.display = "block";
+					input.focus();
+					return;
+				}
 				if (options.confirm && confirmInput) {
 					if (val !== confirmInput.value) {
 						errBox.textContent = "Passwords do not match.";
@@ -14683,6 +18030,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				resolve(val);
 			};
 			activeCancel = cancel;
+			overlay = registerModalOverlay(cancel);
 			toggleBtn.addEventListener("click", () => {
 				isVisible = !isVisible;
 				const type = isVisible ? "text" : "password";
@@ -14720,6 +18068,23 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	]);
 	var PBKDF2_ITERATIONS = 1e5;
 	var hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+	function isPlainObject(value) {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+		const proto = Object.getPrototypeOf(value);
+		return proto === Object.prototype || proto === null;
+	}
+	function validateBackupPayloadEnvelope(payload) {
+		if (!isPlainObject(payload)) throw new Error("Invalid backup file: root must be an object.");
+		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
+	}
+	function extractBackupPayloadData(payload) {
+		validateBackupPayloadEnvelope(payload);
+		if (hasOwn(payload, "version") || hasOwn(payload, "data")) {
+			if (!isPlainObject(payload.data)) throw new Error("Backup data is invalid or empty.");
+			return payload.data;
+		}
+		return payload;
+	}
 	function isValidSecretValue(key, value) {
 		if (key.endsWith("_at")) return typeof value === "number" && Number.isFinite(value) && value >= 0;
 		return typeof value === "string" && value.trim().length > 0;
@@ -14787,6 +18152,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	async function createBackup(includeSecrets, password, overrides) {
 		if (includeSecrets && !(password && password.trim().length > 0)) throw new Error("A password is required to export credentials.");
+		if (typeof password === "string" && password.length > 0 && !password.trim()) throw new Error("Password cannot contain only whitespace.");
 		const data = collectBackupData(includeSecrets, overrides);
 		const plainPayload = {
 			version: 1,
@@ -14891,8 +18257,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		} catch {
 			throw new Error("Invalid backup file: corrupted JSON content.");
 		}
-		if (!payload || typeof payload !== "object") throw new Error("Invalid backup file: root must be an object.");
-		if (typeof payload.version === "number" && payload.version !== 1) throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
+		validateBackupPayloadEnvelope(payload);
 		if (payload.encrypted === true) {
 			if (!payload.crypto || typeof payload.crypto !== "object" || !payload.crypto.salt || !payload.crypto.iv || !payload.crypto.ciphertext) throw new Error("Encrypted backup is missing cryptographic data.");
 			const password = await promptPassword("Enter password to decrypt your settings backup:");
@@ -14916,7 +18281,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			return applyVersion1Settings(data);
 		}
-		return applyVersion1Settings(payload.data && typeof payload.data === "object" ? payload.data : payload);
+		return applyVersion1Settings(extractBackupPayloadData(payload));
 	}
 	async function importBackup(fileInput, customPromptPassword) {
 		let bytes;
@@ -14968,7 +18333,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				throw new Error("Decrypted content is not valid JSON.");
 			}
 			settingsLog$1.debug("Imported encrypted binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+			return applyVersion1Settings(extractBackupPayloadData(payload));
 		}
 		if (matchesMagic(bytes, MAGIC_PLAIN)) {
 			if (bytes.length < 5) throw new Error("Invalid backup file: file is truncated.");
@@ -14987,7 +18352,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				throw new Error("Corrupted backup file: invalid JSON content.");
 			}
 			settingsLog$1.debug("Imported plain binary backup successfully.");
-			return applyVersion1Settings(payload && typeof payload === "object" && payload.data ? payload.data : payload);
+			return applyVersion1Settings(extractBackupPayloadData(payload));
 		}
 		if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
 			let jsonText;
@@ -15001,7 +18366,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}
 		let jsonText;
 		try {
-			jsonText = new TextDecoder().decode(bytes);
+			jsonText = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 		} catch {
 			throw new Error("Failed to decode backup file as UTF-8 text.");
 		}
@@ -15019,6 +18384,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	var settingsLog = createCoreLogger("settings");
 	var getRow = (key) => key && Object.prototype.hasOwnProperty.call(ROWS, key) ? ROWS[key] : void 0;
+	var isNonEmptyValue = (val) => {
+		if (Array.isArray(val)) return val.length > 0;
+		if (!val || typeof val !== "object") return false;
+		const proto = Object.getPrototypeOf(val);
+		if (proto !== Object.prototype && proto !== null) return false;
+		return Object.keys(val).length > 0;
+	};
 	var PINNED_FIRST = ["Sync", "General"];
 	var PINNED_LAST = ["Advanced"];
 	var NOOP_HOST = {
@@ -15204,8 +18576,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 	}
 	function backupRestoreHtml() {
 		const isDev = !!Settings.get(DEV_MODE_DEF.key);
-		return `<details class="ala-section-dropdown" data-section="backup" open>
-    <summary class="ala-section-summary">
+		return `<details class="ala-section-dropdown" data-section="backup">
+    <summary class="ala-section-summary" aria-expanded="false">
       <span class="ala-section-title">Backup &amp; Restore</span>
       <span class="ala-chevron">${icon("chevron", 14)}</span>
     </summary>
@@ -15283,8 +18655,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			...PINNED_LAST.filter((s) => all.includes(s))
 		].map((name) => {
 			const cardsHtml = [...features.filter((f) => f.section === name).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id)).map(featureHtml), ...name === "Advanced" ? [devModeCardHtml()] : []].join("");
-			return cardsHtml ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
-            <summary class="ala-section-summary">
+			return cardsHtml ? `<details class="ala-section-dropdown" data-section="${esc(name)}">
+            <summary class="ala-section-summary" aria-expanded="false">
               <span class="ala-section-title">${esc(name)}</span>
               <span class="ala-chevron">${icon("chevron", 14)}</span>
             </summary>
@@ -15297,8 +18669,8 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		}).filter(Boolean).join("");
 	}
 	function creditsDropdownHtml() {
-		return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits" open>
-    <summary class="ala-section-summary">
+		return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits">
+    <summary class="ala-section-summary" aria-expanded="false">
       <span class="ala-section-title">Credits</span>
       <span class="ala-chevron">${icon("chevron", 14)}</span>
     </summary>
@@ -15309,19 +18681,75 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
     </div>
   </details>`;
 	}
+	function hasCollapsibleTransition(el) {
+		if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return false;
+		const raw = getComputedStyle(el).transitionDuration;
+		if (!raw) return false;
+		return raw.split(",").some((part) => {
+			const trimmed = part.trim();
+			if (!trimmed) return false;
+			const num = parseFloat(trimmed);
+			return Number.isFinite(num) && num > 0;
+		});
+	}
 	function initDropdownAnimations(panel) {
+		const cleanups = [];
 		panel.querySelectorAll("details.ala-section-dropdown").forEach((details) => {
 			const summary = details.querySelector(":scope > summary");
 			const collapsible = details.querySelector(":scope > .ala-collapsible");
 			if (!summary || !collapsible) return;
+			let collapseCleanup = null;
+			const cancelPendingCollapse = () => {
+				collapseCleanup?.();
+				collapseCleanup = null;
+			};
+			cleanups.push(cancelPendingCollapse);
+			const expandedInitially = details.classList.contains("is-expanded") || details.open;
+			details.open = expandedInitially;
+			details.classList.toggle("is-expanded", expandedInitially);
+			collapsible.classList.toggle("is-open", expandedInitially);
+			summary.setAttribute("aria-expanded", String(expandedInitially));
 			summary.addEventListener("click", (e) => {
 				e.preventDefault();
-				const isExpanded = details.classList.toggle("is-expanded");
-				collapsible.classList.toggle("is-open", isExpanded);
+				const willExpand = !details.classList.contains("is-expanded");
+				cancelPendingCollapse();
+				if (willExpand) {
+					details.open = true;
+					collapsible.offsetHeight;
+					details.classList.add("is-expanded");
+					collapsible.classList.add("is-open");
+					summary.setAttribute("aria-expanded", "true");
+					return;
+				}
+				details.classList.remove("is-expanded");
+				collapsible.classList.remove("is-open");
+				summary.setAttribute("aria-expanded", "false");
+				if (!hasCollapsibleTransition(collapsible)) {
+					details.open = false;
+					return;
+				}
+				const finishCollapse = () => {
+					cancelPendingCollapse();
+					if (!details.classList.contains("is-expanded")) details.open = false;
+				};
+				const onTransitionEnd = (ev) => {
+					if (ev.target !== collapsible) return;
+					if (ev.propertyName && ev.propertyName !== "grid-template-rows") return;
+					finishCollapse();
+				};
+				const fallbackTimer = setTimeout(finishCollapse, 300);
+				collapsible.addEventListener("transitionend", onTransitionEnd);
+				collapseCleanup = () => {
+					collapsible.removeEventListener("transitionend", onTransitionEnd);
+					clearTimeout(fallbackTimer);
+				};
 			});
 		});
+		return () => {
+			for (const fn of cleanups) fn();
+		};
 	}
-	var prevOverflow = null;
+	var scrollLockRelease = null;
 	function standaloneNoteHtml(f) {
 		const name = f.standalone?.name || f.title;
 		const extra = f.standalone?.note ? ` ${esc(f.standalone.note)}` : "";
@@ -15342,8 +18770,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			onCleanup?.();
 		} finally {
 			b.remove();
-			document.documentElement.style.overflow = prevOverflow || "";
-			prevOverflow = null;
+			document.querySelectorAll("#ala-settings-nav-section .ala-settings-nav-link.is-active").forEach((el) => el.classList.remove("is-active"));
+			scrollLockRelease?.();
+			scrollLockRelease = null;
 		}
 	}
 	function showPanel(host = NOOP_HOST) {
@@ -15383,6 +18812,35 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		const findFeatureMainToggle = (id) => {
 			return panel.querySelector(`.ala-feature[data-feature="${id}"]`)?.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]") || null;
 		};
+		const resolveEffectiveStatuses = (enabledMap) => {
+			const statuses = { ...host.resolveStagedStates(enabledMap) };
+			for (const f of features) {
+				if (!enabledMap[f.id]) continue;
+				const live = host.getStatus(f.id);
+				if (live.reason === "error" && statuses[f.id]?.active) statuses[f.id] = {
+					active: false,
+					reason: "error",
+					error: live.error
+				};
+			}
+			let propagated = true;
+			while (propagated) {
+				propagated = false;
+				for (const f of features) {
+					if (!statuses[f.id]?.active || !f.dependsOn?.length) continue;
+					const missingDeps = f.dependsOn.filter((depId) => !statuses[depId]?.active);
+					if (missingDeps.length > 0) {
+						statuses[f.id] = {
+							active: false,
+							reason: "dep-unavailable",
+							missingDeps
+						};
+						propagated = true;
+					}
+				}
+			}
+			return statuses;
+		};
 		const snapshotInitial = () => {
 			const vals = {};
 			const enabledMap = {};
@@ -15390,7 +18848,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			for (const f of features) enabledMap[f.id] = !!Settings.get(f.toggle.key) && !isFeatureStandalonePaused(f.id);
 			return {
 				vals,
-				statuses: host.resolveStagedStates(enabledMap)
+				statuses: resolveEffectiveStatuses(enabledMap)
 			};
 		};
 		let baseline = snapshotInitial();
@@ -15409,7 +18867,7 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			}
 			baseline = {
 				vals: baseline.vals,
-				statuses: host.resolveStagedStates(enabledMap)
+				statuses: resolveEffectiveStatuses(enabledMap)
 			};
 		};
 		const readStagedEnabled = () => {
@@ -15452,16 +18910,43 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 					changedKeys.add(r.key);
 				}
 			});
-			const stagedStatuses = host.resolveStagedStates(readStagedEnabled());
+			const stagedStatuses = resolveEffectiveStatuses(readStagedEnabled());
 			const hotReloadIds = [];
+			const affectedActiveIds = [];
 			let needsPageReload = false;
 			for (const f of features) {
 				const wasActive = !!baseline.statuses[f.id]?.active;
 				const isNowActive = !!stagedStatuses[f.id]?.active;
 				const optionChanged = f.options.some((o) => changedKeys.has(o.key));
 				if (wasActive !== isNowActive || (wasActive || isNowActive) && optionChanged) {
+					if (wasActive || isNowActive) affectedActiveIds.push(f.id);
 					if (f.requiresReload) needsPageReload = true;
 					else hotReloadIds.push(f.id);
+				}
+			}
+			if (!needsPageReload && affectedActiveIds.length > 0) {
+				const dependentsOf = new Map();
+				for (const f of features) for (const depId of f.dependsOn || []) {
+					const list = dependentsOf.get(depId);
+					if (list) list.push(f);
+					else dependentsOf.set(depId, [f]);
+				}
+				const visited = new Set(affectedActiveIds);
+				const queue = [...affectedActiveIds];
+				while (queue.length > 0 && !needsPageReload) {
+					const id = queue.shift();
+					for (const depFeature of dependentsOf.get(id) || []) {
+						if (visited.has(depFeature.id)) continue;
+						const depWasActive = !!baseline.statuses[depFeature.id]?.active;
+						const depIsNowActive = !!stagedStatuses[depFeature.id]?.active;
+						if (!depWasActive && !depIsNowActive) continue;
+						visited.add(depFeature.id);
+						if (depFeature.requiresReload) {
+							needsPageReload = true;
+							break;
+						}
+						queue.push(depFeature.id);
+					}
 				}
 			}
 			return {
@@ -15624,9 +19109,19 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			return plan;
 		};
 		syncAll();
-		initDropdownAnimations(panel);
+		const cleanupDropdowns = initDropdownAnimations(panel);
+		const panelAc = new AbortController();
+		const panelScope = createContextScope({
+			prefix: "settings",
+			signal: panelAc.signal,
+			isClosed: () => !panel.isConnected || panelAc.signal.aborted,
+			styleKind: "style",
+			onError: (err) => settingsLog.error("Settings panel cleanup failed:", err)
+		});
 		const editorOverlays = new Set();
+		const editorOverlayFlushers = new Set();
 		const editorStyleDisposers = new Set();
+		const activeEditorSessions = new Map();
 		let reloadTimer = null;
 		const clearReloadTimer = () => {
 			if (reloadTimer !== null) {
@@ -15680,74 +19175,116 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				e.preventDefault();
 				const inputEl = panel.querySelector(`input[data-key="${key}"]`);
 				if (!inputEl) return;
+				activeEditorSessions.get(key)?.();
 				const beforeBodyChildren = new Set(Array.from(document.body.children));
-				let edIdSeq = 0;
-				let edStyleSeq = 0;
-				let edModalSeq = 0;
-				const edGetId = (name) => {
-					const trimmed = name?.trim();
-					if (!trimmed) return `ala-editor-${key}-${++edIdSeq}`;
-					return trimmed.startsWith("ala-") ? trimmed : `ala-editor-${key}-${trimmed}`;
+				const editorAc = new AbortController();
+				let sessionDisposed = false;
+				let activeSessionModals = 0;
+				let editorPending = false;
+				const recordMutationOverlays = (records) => {
+					for (const rec of records) for (const node of Array.from(rec.addedNodes)) if (node instanceof HTMLElement && node !== backdrop && node.id !== "ala-toast" && !beforeBodyChildren.has(node)) editorOverlays.add(node);
 				};
-				const trackedAddStyle = (idOrCss, maybeCss) => {
-					const isOneArg = maybeCss === void 0;
-					const css = isOneArg ? idOrCss : maybeCss;
-					let styleId;
-					if (isOneArg) styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
-					else {
-						const raw = String(idOrCss || "").trim();
-						if (!raw) styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
-						else if (raw.startsWith("ala-")) styleId = raw;
-						else styleId = `ala-editor-${key}-${raw}${raw.endsWith("-style") ? "" : "-style"}`;
+				const overlayObserver = typeof MutationObserver === "function" ? new MutationObserver((records) => {
+					if (!panel.isConnected || sessionDisposed) return;
+					recordMutationOverlays(records);
+				}) : null;
+				const flushOverlayObserver = () => {
+					if (!overlayObserver) return;
+					recordMutationOverlays(overlayObserver.takeRecords());
+				};
+				if (overlayObserver) {
+					overlayObserver.observe(document.body, { childList: true });
+					editorOverlayFlushers.add(flushOverlayObserver);
+				}
+				let editorScope;
+				const disposeSession = () => {
+					if (sessionDisposed) return;
+					sessionDisposed = true;
+					if (activeEditorSessions.get(key) === disposeSession) activeEditorSessions.delete(key);
+					editorStyleDisposers.delete(disposeSession);
+					editorOverlayFlushers.delete(flushOverlayObserver);
+					if (overlayObserver) {
+						flushOverlayObserver();
+						overlayObserver.disconnect();
 					}
-					const dispose = addStyle(styleId, css);
-					editorStyleDisposers.add(dispose);
-					return dispose;
+					editorAc.abort();
+					editorScope.dispose();
 				};
-				const trackedListen = (target, type, listener, options) => {
-					target.addEventListener(type, listener, options);
-					const dispose = () => target.removeEventListener(type, listener, options);
-					editorStyleDisposers.add(dispose);
-					return dispose;
-				};
-				const trackedTimeout = (fn, ms) => {
-					const timerId = setTimeout(fn, ms);
-					const dispose = () => clearTimeout(timerId);
-					editorStyleDisposers.add(dispose);
-					return dispose;
-				};
-				const trackedModal = (opts) => {
-					const modalId = edGetId(opts.id ?? `modal-${++edModalSeq}`);
-					const handle = createModal({
-						...opts,
-						id: modalId
-					});
-					editorStyleDisposers.add(handle.close);
-					return handle;
-				};
+				activeEditorSessions.set(key, disposeSession);
+				editorStyleDisposers.add(disposeSession);
+				editorScope = createContextScope({
+					prefix: `editor-${key}`,
+					signal: editorAc.signal,
+					isClosed: () => sessionDisposed,
+					styleKind: "style",
+					onError: (err) => settingsLog.error("JSON editor cleanup failed:", err),
+					onModalStart: () => {
+						activeSessionModals++;
+					},
+					onModalAbort: () => {
+						activeSessionModals = Math.max(0, activeSessionModals - 1);
+					},
+					onModalClose: () => {
+						activeSessionModals = Math.max(0, activeSessionModals - 1);
+						if (activeSessionModals === 0 && !editorPending) disposeSession();
+					}
+				});
+				let editorResult;
 				try {
-					r.editor({
+					editorResult = r.editor({
 						value: TYPES$1.json.read(inputEl),
 						onApply: (nextValue) => {
-							if (!panel.isConnected) return;
-							TYPES$1.json.write(inputEl, nextValue);
-							if (key === "syncManualOverrides" && nextValue && typeof nextValue === "object" && !Array.isArray(nextValue) && Object.keys(nextValue).length > 0) {
+							if (sessionDisposed || !panel.isConnected) return;
+							const normalized = TYPES$1.json.normalize(nextValue, r);
+							TYPES$1.json.write(inputEl, normalized);
+							if (Boolean(r.autoEnableParentWhenNonEmpty) && isNonEmptyValue(normalized)) {
 								const mainToggle = inputEl.closest(".ala-feature")?.querySelector(".ala-row--main input[type=\"checkbox\"][data-key]");
 								if (mainToggle && !mainToggle.checked && !mainToggle.disabled) mainToggle.checked = true;
 							}
 							const plan = syncAll();
 							setStatus(`Updated. Press "${plan.needsPageReload ? "Save and reload" : "Save"}" to apply.`);
 						},
-						getId: edGetId,
-						addStyle: trackedAddStyle,
-						listen: trackedListen,
-						timeout: trackedTimeout,
-						modal: trackedModal,
-						api: host.api,
+						signal: editorAc.signal,
+						getId: editorScope.getId,
+						addStyle: editorScope.addStyle,
+						listen: editorScope.listen,
+						timeout: editorScope.timeout,
+						observe: editorScope.observe,
+						modal: editorScope.modal,
+						confirm: editorScope.confirm,
+						alert: editorScope.alert,
+						toast: {
+							show: (msg, opts) => {
+								if (!sessionDisposed && panel.isConnected) showToast(msg, opts);
+							},
+							success: (msg, opts) => {
+								if (!sessionDisposed && panel.isConnected) toastSuccess(msg, opts);
+							},
+							error: (msg, opts) => {
+								if (!sessionDisposed && panel.isConnected) toastError(msg, opts);
+							}
+						},
+						onCleanup: editorScope.onCleanup,
+						api: host.api ? scopeAniListClient(() => host.api, editorAc.signal, () => sessionDisposed) : void 0,
 						log: settingsLog
 					});
+				} catch (err) {
+					if (activeSessionModals === 0) disposeSession();
+					throw err;
 				} finally {
-					for (const child of Array.from(document.body.children)) if (!beforeBodyChildren.has(child) && child instanceof HTMLElement && child !== backdrop) editorOverlays.add(child);
+					flushOverlayObserver();
+					for (const child of Array.from(document.body.children)) if (!beforeBodyChildren.has(child) && child instanceof HTMLElement && child !== backdrop && child.id !== "ala-toast") editorOverlays.add(child);
+				}
+				if (editorResult && (typeof editorResult === "object" || typeof editorResult === "function") && typeof editorResult.then === "function") {
+					editorPending = true;
+					Promise.resolve(editorResult).then(() => {
+						editorPending = false;
+						if (activeSessionModals === 0) disposeSession();
+					}, (err) => {
+						editorPending = false;
+						if (activeSessionModals === 0) disposeSession();
+						settingsLog.error("JSON editor failed:", err);
+					});
 				}
 			});
 		});
@@ -15755,10 +19292,14 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			const plan = computeSavePlan();
 			for (const { key, value } of plan.changed) Settings.set(key, value);
 			if (plan.needsPageReload) {
+				baseline = snapshotInitial();
+				syncAll();
+				saveBtn.disabled = true;
 				setStatus("Saved. Reloading…");
 				scheduleReload(350);
 				return;
 			}
+			clearReloadTimer();
 			baseline = snapshotInitial();
 			if (plan.hotReloadIds.length > 0) host.reload(plan.hotReloadIds);
 			syncAll();
@@ -15780,7 +19321,10 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			if (e.target === backdrop) closePanel();
 		});
 		backdrop._onKey = (e) => {
-			if (e.key === "Escape") closePanel();
+			if (e.key === "Escape") {
+				if (e.defaultPrevented || hasActiveModal()) return;
+				closePanel();
+			}
 		};
 		document.addEventListener("keydown", backdrop._onKey);
 		const providers = listAccountProviders();
@@ -15796,18 +19340,32 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				st.textContent = connected ? "Connected" : "Not connected";
 			}
 		};
-		for (const p of providers) panel.querySelector(`[data-account-btn="${p.id}"]`)?.addEventListener("click", () => {
-			if (p.isConnected()) {
-				if (confirm(`Disconnect ${p.name}?`)) {
-					p.disconnect();
-					updateAccountUI();
-					setStatus(`${p.name} disconnected.`);
+		for (const p of providers) {
+			const btn = panel.querySelector(`[data-account-btn="${p.id}"]`);
+			btn?.addEventListener("click", async () => {
+				if (p.isConnected()) {
+					if (btn.disabled) return;
+					btn.disabled = true;
+					try {
+						const confirmed = await openConfirmModal({
+							title: "Disconnect Account",
+							message: `Disconnect ${p.name}?`,
+							confirmText: "Disconnect",
+							danger: true
+						}, panelScope.modal);
+						if (!panel.isConnected || !confirmed) return;
+						p.disconnect();
+						updateAccountUI();
+						setStatus(`${p.name} disconnected.`);
+					} finally {
+						if (panel.isConnected) btn.disabled = false;
+					}
+				} else {
+					p.connect();
+					setStatus(`Opened ${p.name} authorization tab…`);
 				}
-			} else {
-				p.connect();
-				setStatus(`Opened ${p.name} authorization tab…`);
-			}
-		});
+			});
+		}
 		const getPanelOverrides = () => {
 			const overrides = {};
 			controls().forEach((el) => {
@@ -15817,52 +19375,71 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			});
 			return overrides;
 		};
-		panel.querySelector("#ala-btn-export")?.addEventListener("click", async () => {
-			const pwd = await promptPasswordModal({
-				title: "Export Settings",
-				description: "Optional: Set a password to encrypt your backup file. Leave blank for an unencrypted backup.",
-				submitText: "Export",
-				allowEmpty: true,
-				confirm: true,
-				placeholder: "Optional encryption password"
-			});
-			if (!panel.isConnected || pwd === null) return;
+		const exportBtn = panel.querySelector("#ala-btn-export");
+		exportBtn?.addEventListener("click", async () => {
+			if (exportBtn.disabled) return;
+			exportBtn.disabled = true;
 			try {
-				setStatus("Generating backup…");
-				const envelope = await createBackup(false, pwd, getPanelOverrides());
-				if (!panel.isConnected) return;
-				downloadBackupFile(envelope);
-				setStatus("Settings exported successfully.");
-			} catch (e) {
-				if (!panel.isConnected) return;
-				setStatus("Export failed: " + (e.message || e), true);
+				const pwd = await promptPasswordModal({
+					title: "Export Settings",
+					description: "Optional: Set a password to encrypt your backup file. Leave blank for an unencrypted backup.",
+					submitText: "Export",
+					allowEmpty: true,
+					confirm: true,
+					placeholder: "Optional encryption password"
+				});
+				if (!panel.isConnected || pwd === null) return;
+				try {
+					setStatus("Generating backup…");
+					const envelope = await createBackup(false, pwd, getPanelOverrides());
+					if (!panel.isConnected) return;
+					downloadBackupFile(envelope);
+					setStatus("Settings exported successfully.");
+				} catch (e) {
+					if (!panel.isConnected) return;
+					setStatus("Export failed: " + (e.message || e), true);
+				}
+			} finally {
+				if (panel.isConnected) exportBtn.disabled = false;
 			}
 		});
-		panel.querySelector("#ala-btn-export-secrets")?.addEventListener("click", async () => {
-			const confirmed = confirm("⚠️ Warning: This export includes your connected account credentials.\n\nAnyone with access to this file will have full access to your connected accounts.\n\nDo you want to continue?");
-			if (!panel.isConnected || !confirmed) return;
-			const pwd = await promptPasswordModal({
-				title: "Export Credentials (Encrypted)",
-				description: "A password is required to encrypt your credentials and protect your accounts.",
-				submitText: "Encrypt & Export",
-				allowEmpty: false,
-				confirm: true,
-				placeholder: "Choose an encryption password"
-			});
-			if (!panel.isConnected || pwd === null) return;
-			if (!pwd.trim()) {
-				setStatus("A password is required to export credentials.", true);
-				return;
-			}
+		const exportSecretsBtn = panel.querySelector("#ala-btn-export-secrets");
+		exportSecretsBtn?.addEventListener("click", async () => {
+			if (exportSecretsBtn.disabled) return;
+			exportSecretsBtn.disabled = true;
 			try {
-				setStatus("Generating backup…");
-				const envelope = await createBackup(true, pwd, getPanelOverrides());
-				if (!panel.isConnected) return;
-				downloadBackupFile(envelope);
-				setStatus("Settings and credentials exported successfully.");
-			} catch (e) {
-				if (!panel.isConnected) return;
-				setStatus("Export failed: " + (e.message || e), true);
+				const confirmed = await openConfirmModal({
+					title: "Export Credentials",
+					message: "⚠️ Warning: This export includes your connected account credentials.\n\nAnyone with access to this file will have full access to your connected accounts.\n\nDo you want to continue?",
+					confirmText: "Continue",
+					danger: true
+				}, panelScope.modal);
+				if (!panel.isConnected || !confirmed) return;
+				const pwd = await promptPasswordModal({
+					title: "Export Credentials (Encrypted)",
+					description: "A password is required to encrypt your credentials and protect your accounts.",
+					submitText: "Encrypt & Export",
+					allowEmpty: false,
+					confirm: true,
+					placeholder: "Choose an encryption password"
+				});
+				if (!panel.isConnected || pwd === null) return;
+				if (!pwd.trim()) {
+					setStatus("A password is required to export credentials.", true);
+					return;
+				}
+				try {
+					setStatus("Generating backup…");
+					const envelope = await createBackup(true, pwd, getPanelOverrides());
+					if (!panel.isConnected) return;
+					downloadBackupFile(envelope);
+					setStatus("Settings and credentials exported successfully.");
+				} catch (e) {
+					if (!panel.isConnected) return;
+					setStatus("Export failed: " + (e.message || e), true);
+				}
+			} finally {
+				if (panel.isConnected) exportSecretsBtn.disabled = false;
 			}
 		});
 		panel.querySelector("#ala-btn-export-raw")?.addEventListener("click", () => {
@@ -15875,13 +19452,20 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				setStatus("Export failed: " + (e.message || e), true);
 			}
 		});
+		const importBtn = panel.querySelector("#ala-btn-import");
 		const fileInput = panel.querySelector("#ala-import-file");
-		panel.querySelector("#ala-btn-import")?.addEventListener("click", () => {
+		importBtn?.addEventListener("click", () => {
+			if (importBtn.disabled) return;
 			fileInput?.click();
 		});
+		let importInFlight = false;
 		fileInput?.addEventListener("change", async () => {
+			if (importInFlight) return;
 			const file = fileInput.files?.[0];
 			if (!file) return;
+			importInFlight = true;
+			if (importBtn) importBtn.disabled = true;
+			fileInput.disabled = true;
 			try {
 				setStatus("Reading backup file…");
 				const bytes = await readFileAsBytes(file);
@@ -15890,7 +19474,6 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				if (!panel.isConnected) return;
 				if (result.cancelled) {
 					setStatus("Import cancelled.");
-					fileInput.value = "";
 					return;
 				}
 				const parts = [];
@@ -15901,7 +19484,13 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 			} catch (e) {
 				if (!panel.isConnected) return;
 				setStatus("Import failed: " + (e.message || e), true);
+			} finally {
+				importInFlight = false;
 				fileInput.value = "";
+				if (panel.isConnected) {
+					if (importBtn) importBtn.disabled = false;
+					fileInput.disabled = false;
+				}
 			}
 		});
 		const onFocus = () => {
@@ -15912,9 +19501,21 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		backdrop._onCleanup = () => {
 			unsubStatus();
 			clearReloadTimer();
+			cleanupDropdowns();
+			panelAc.abort();
+			panelScope.dispose();
 			try {
 				closePasswordModal();
 			} catch {}
+			for (const flush of [...editorOverlayFlushers]) try {
+				flush();
+			} catch {}
+			editorOverlayFlushers.clear();
+			for (const dispose of [...editorStyleDisposers]) try {
+				dispose();
+			} catch {}
+			editorStyleDisposers.clear();
+			activeEditorSessions.clear();
 			for (const el of editorOverlays) try {
 				if (el.isConnected) el.querySelector("[aria-label=\"Close\"]")?.click();
 				if (el.isConnected) el.dispatchEvent(new KeyboardEvent("keydown", {
@@ -15925,13 +19526,9 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 				if (el.isConnected) el.remove();
 			} catch {}
 			editorOverlays.clear();
-			for (const dispose of editorStyleDisposers) try {
-				dispose();
-			} catch {}
-			editorStyleDisposers.clear();
 		};
-		prevOverflow = document.documentElement.style.overflow;
-		document.documentElement.style.overflow = "hidden";
+		scrollLockRelease?.();
+		scrollLockRelease = acquireScrollLock();
 		document.body.appendChild(backdrop);
 		panel.focus();
 	}
@@ -15972,24 +19569,41 @@ mutation ($id: Int!, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
 		nav.parentElement.insertBefore(section, nav.nextSibling);
 	}
 	function initSettingsPage(host = NOOP_HOST) {
-		addStyle("ala-settings-style", CSS$1);
+		let disposed = false;
+		const disposeStyle = addStyle("ala-settings-style", CSS$1);
 		const attempt = debounce(() => {
-			if (!onSettingsPage()) return;
+			if (disposed || !onSettingsPage()) return;
 			installSidebar(host);
 			ensureLauncher(host);
 		}, 100);
-		Core.ready(attempt);
-		Core.onBodyMutation(() => {
-			if (onSettingsPage() && !(document.getElementById("ala-settings-nav-section") && document.getElementById("ala-settings-mobile-launcher"))) attempt();
+		const unsubReady = Core.ready(() => {
+			if (!disposed) attempt();
 		});
-		Core.onNavigate(() => {
+		const unsubBody = Core.onBodyMutation(() => {
+			if (!disposed && onSettingsPage() && !(document.getElementById("ala-settings-nav-section") && document.getElementById("ala-settings-mobile-launcher"))) attempt();
+		});
+		const unsubNav = Core.onNavigate(() => {
+			if (disposed) return;
 			if (onSettingsPage()) {
 				attempt();
 				return;
 			}
 			closePanel();
+			document.getElementById("ala-settings-nav-section")?.remove();
 			document.getElementById("ala-settings-mobile-launcher")?.remove();
 		});
+		return () => {
+			if (disposed) return;
+			disposed = true;
+			attempt.cancel();
+			unsubReady();
+			unsubBody();
+			unsubNav();
+			closePanel();
+			document.getElementById("ala-settings-nav-section")?.remove();
+			document.getElementById("ala-settings-mobile-launcher")?.remove();
+			disposeStyle();
+		};
 	}
 	configureCoreServices({
 		api: anilistApiClient,

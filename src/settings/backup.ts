@@ -40,6 +40,37 @@ const PBKDF2_ITERATIONS = 100_000;
 
 const hasOwn = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
 
+function isPlainObject(value: unknown): value is Record<string, any> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function validateBackupPayloadEnvelope(payload: unknown): asserts payload is Record<string, any> {
+  if (!isPlainObject(payload)) {
+    throw new Error('Invalid backup file: root must be an object.');
+  }
+
+  if (typeof payload.version === 'number' && payload.version !== 1) {
+    throw new Error(
+      `Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`
+    );
+  }
+}
+
+function extractBackupPayloadData(payload: unknown): Record<string, any> {
+  validateBackupPayloadEnvelope(payload);
+
+  if (hasOwn(payload, 'version') || hasOwn(payload, 'data')) {
+    if (!isPlainObject(payload.data)) {
+      throw new Error('Backup data is invalid or empty.');
+    }
+    return payload.data;
+  }
+
+  return payload;
+}
+
 function isValidSecretValue(key: string, value: unknown): boolean {
   if (key.endsWith('_at')) {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -180,6 +211,9 @@ export async function createBackup(
 ): Promise<Uint8Array> {
   if (includeSecrets && !(password && password.trim().length > 0)) {
     throw new Error('A password is required to export credentials.');
+  }
+  if (typeof password === 'string' && password.length > 0 && !password.trim()) {
+    throw new Error('Password cannot contain only whitespace.');
   }
 
   const data = collectBackupData(includeSecrets, overrides);
@@ -331,13 +365,7 @@ async function handleLegacyJsonBackup(jsonText: string, promptPassword: Password
     throw new Error('Invalid backup file: corrupted JSON content.');
   }
 
-  if (!payload || typeof payload !== 'object') {
-    throw new Error('Invalid backup file: root must be an object.');
-  }
-
-  if (typeof payload.version === 'number' && payload.version !== 1) {
-    throw new Error(`Unsupported backup version: ${payload.version}. This version of AL Additions only supports version 1.`);
-  }
+  validateBackupPayloadEnvelope(payload);
 
   if (payload.encrypted === true) {
     if (
@@ -375,8 +403,7 @@ async function handleLegacyJsonBackup(jsonText: string, promptPassword: Password
     return applyVersion1Settings(data);
   }
 
-  const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
-  return applyVersion1Settings(data);
+  return applyVersion1Settings(extractBackupPayloadData(payload));
 }
 
 export async function importBackup(
@@ -454,8 +481,7 @@ export async function importBackup(
     }
 
     settingsLog.debug('Imported encrypted binary backup successfully.');
-    const data = payload && typeof payload === 'object' && payload.data ? payload.data : payload;
-    return applyVersion1Settings(data);
+    return applyVersion1Settings(extractBackupPayloadData(payload));
   }
 
   if (matchesMagic(bytes, MAGIC_PLAIN)) {
@@ -482,8 +508,7 @@ export async function importBackup(
     }
 
     settingsLog.debug('Imported plain binary backup successfully.');
-    const data = payload && typeof payload === 'object' && payload.data ? payload.data : payload;
-    return applyVersion1Settings(data);
+    return applyVersion1Settings(extractBackupPayloadData(payload));
   }
 
   // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
@@ -501,7 +526,7 @@ export async function importBackup(
   // @migration(from: "v0.8.0", kind: "import", sunset: "keep-long")
   let jsonText: string;
   try {
-    jsonText = new TextDecoder().decode(bytes);
+    jsonText = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
     throw new Error('Failed to decode backup file as UTF-8 text.');
   }

@@ -177,4 +177,166 @@ describe('MAL Overrides: Sanitization & Validation (B1-18)', () => {
     await refreshStaleOverrides();
     expect(querySpy).toHaveBeenCalledTimes(1);
   });
+
+  it('preserves existing.type when refreshStaleOverrides() receives missing or unknown m.type', async () => {
+    const oldTs = Date.now() - 48 * 3600 * 1000;
+    store.set(SETTING_PREFIX + OVERRIDES_SETTING_KEY, {
+      '300': {
+        malId: 300,
+        type: 'MANGA',
+        title: 'Old Manga 1',
+        updatedAt: oldTs
+      },
+      '301': {
+        malId: 301,
+        type: 'MANGA',
+        title: 'Old Manga 2',
+        updatedAt: oldTs
+      }
+    });
+
+    vi.spyOn(AniList, 'query').mockResolvedValue({
+      Page: {
+        media: [
+          {
+            id: 300,
+            title: { userPreferred: 'Updated Manga 1' }
+          },
+          {
+            id: 301,
+            type: 'NOVEL',
+            title: { userPreferred: 'Updated Manga 2' }
+          }
+        ]
+      }
+    });
+
+    await refreshStaleOverrides();
+
+    const after = getManualOverrides();
+    expect(after['300'].type).toBe('MANGA');
+    expect(after['300'].title).toBe('Updated Manga 1');
+    expect(after['300'].updatedAt).toBeGreaterThan(oldTs);
+    expect(after['301'].type).toBe('MANGA');
+    expect(after['301'].title).toBe('Updated Manga 2');
+    expect(after['301'].updatedAt).toBeGreaterThan(oldTs);
+  });
+
+  it('rejects non-http(s) cover URLs in normalizeOverrideEntry across store read, setOverride, and validateOverrides (BUG-51)', () => {
+    store.set(SETTING_PREFIX + MANUAL_OVERRIDES_ENABLED_KEY, true);
+    store.set(SETTING_PREFIX + OVERRIDES_SETTING_KEY, {
+      '101': { malId: 201, type: 'ANIME', title: 'Bad JS', cover: 'javascript:alert(1)' },
+      '102': { malId: 202, type: 'ANIME', title: 'Bad Data', cover: 'data:text/html,<script>alert(1)</script>' },
+      '103': { malId: 203, type: 'ANIME', title: 'Bad Relative', cover: '/relative/path.jpg' },
+      '104': { malId: 204, type: 'ANIME', title: 'Good HTTPS', cover: '  HTTPS://cdn.example.com/a.jpg  ' },
+      '105': { malId: 205, type: 'ANIME', title: 'Good HTTP', cover: 'http://cdn.example.com/b.jpg' }
+    });
+
+    const loaded = getManualOverrides();
+    expect(loaded['101'].cover).toBeUndefined();
+    expect(loaded['102'].cover).toBeUndefined();
+    expect(loaded['103'].cover).toBeUndefined();
+    expect(loaded['104'].cover).toBe('HTTPS://cdn.example.com/a.jpg');
+    expect(loaded['105'].cover).toBe('http://cdn.example.com/b.jpg');
+
+    setOverride(106, { malId: 206, type: 'MANGA', title: 'Set Bad', cover: 'vbscript:msgbox(1)' });
+    expect(getManualOverrides()['106'].cover).toBeUndefined();
+
+    const validated = validateOverrides({
+      '107': { malId: 207, type: 'ANIME', title: 'Imported', cover: 'javascript:void(0)' },
+      '108': { malId: 208, type: 'ANIME', title: 'Imported OK', cover: 'https://img.example.com/ok.png' }
+    });
+    expect(validated.valid).toBe(true);
+    expect(validated.overrides?.['107'].cover).toBeUndefined();
+    expect(validated.overrides?.['108'].cover).toBe('https://img.example.com/ok.png');
+  });
+
+  it('aborts refreshStaleOverrides({ signal }) mid-batch without writing aborted batches or logging warnings (IMP-11)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const oldTs = Date.now() - 48 * 3600 * 1000;
+    const initial: Record<string, any> = {};
+    for (let id = 1; id <= 60; id++) {
+      initial[String(id)] = {
+        malId: id + 1000,
+        type: 'ANIME',
+        title: `Old Title ${id}`,
+        updatedAt: oldTs + id
+      };
+    }
+    store.set(SETTING_PREFIX + OVERRIDES_SETTING_KEY, initial);
+
+    // 1. Pre-aborted signal exits immediately without querying
+    const preAc = new AbortController();
+    preAc.abort();
+    const querySpy = vi.spyOn(AniList, 'query');
+    await refreshStaleOverrides({ signal: preAc.signal });
+    expect(querySpy).not.toHaveBeenCalled();
+
+    // 2. Abort during batch 1 (with 60 stale entries -> 2 batches) skips storage writes, batch 2, and warnings
+    const acMid = new AbortController();
+    querySpy.mockImplementationOnce(async (_q, _vars, opts) => {
+      expect(typeof opts === 'object' ? opts.signal : undefined).toBe(acMid.signal);
+      acMid.abort();
+      throw new DOMException('Request aborted', 'AbortError');
+    });
+
+    await refreshStaleOverrides({ signal: acMid.signal });
+    expect(querySpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(getManualOverrides()['1'].title).toBe('Old Title 1');
+    expect(getManualOverrides()['1'].updatedAt).toBe(oldTs + 1);
+
+    // 3. Abort after batch 1 completes saves batch 1 and skips batch 2
+    const acBetween = new AbortController();
+    querySpy.mockReset();
+    querySpy.mockImplementationOnce(async (_q, vars, opts) => {
+      expect(typeof opts === 'object' ? opts.signal : undefined).toBe(acBetween.signal);
+      expect((vars as { ids: number[] }).ids).toHaveLength(50);
+      acBetween.abort();
+      return {
+        Page: {
+          media: [
+            {
+              id: 1,
+              type: 'ANIME',
+              title: { userPreferred: 'Should Not Persist On Abort' }
+            }
+          ]
+        }
+      };
+    });
+    await refreshStaleOverrides({ signal: acBetween.signal });
+    expect(querySpy).toHaveBeenCalledTimes(1);
+    expect(getManualOverrides()['1'].title).toBe('Old Title 1');
+
+    // 4. Batch 1 succeeds, then abort fires before batch 2 starts -> batch 1 persists, batch 2 skipped
+    const acAfterBatch1 = new AbortController();
+    querySpy.mockReset();
+    const setSpy = vi.spyOn(store, 'set').mockImplementationOnce((k, v) => {
+      const prev = getManualOverrides();
+      void prev;
+      acAfterBatch1.abort();
+      globalThis.GM_setValue(k, v);
+    });
+    querySpy.mockImplementationOnce(async (_q, vars) => {
+      expect((vars as { ids: number[] }).ids).toHaveLength(50);
+      return {
+        Page: {
+          media: [
+            {
+              id: 1,
+              type: 'ANIME',
+              title: { userPreferred: 'Updated Title 1' }
+            }
+          ]
+        }
+      };
+    });
+    await refreshStaleOverrides({ signal: acAfterBatch1.signal });
+    setSpy.mockRestore();
+    expect(querySpy).toHaveBeenCalledTimes(1);
+    expect(getManualOverrides()['1'].title).toBe('Updated Title 1');
+    expect(getManualOverrides()['51'].title).toBe('Old Title 51');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
 });

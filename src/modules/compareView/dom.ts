@@ -1,4 +1,4 @@
-import type { FeatureContext } from '../../types';
+import type { RouteContext } from '../../types';
 import {
   STATUSES,
   compareEntries,
@@ -161,11 +161,14 @@ export function applySort(
   }
 
   state.isMutatingDOM = true;
-  listContainer.appendChild(frag);
+  try {
+    listContainer.appendChild(frag);
 
-  const emptyEl = listContainer.querySelector('.ala-compare-empty');
-  if (emptyEl) listContainer.appendChild(emptyEl);
-  state.isMutatingDOM = false;
+    const emptyEl = listContainer.querySelector('.ala-compare-empty');
+    if (emptyEl) listContainer.appendChild(emptyEl);
+  } finally {
+    state.isMutatingDOM = false;
+  }
 }
 
 export function updateStatusCounts(state: CompareState, sidebar: HTMLElement, entries: HTMLElement[]): void {
@@ -197,11 +200,7 @@ export function updateStatusCounts(state: CompareState, sidebar: HTMLElement, en
   }
 }
 
-export function setLoadIndicator(state: CompareState, sidebar: HTMLElement, text: string | null): void {
-  if (state.indicatorTimer) {
-    state.indicatorTimer();
-    state.indicatorTimer = null;
-  }
+export function setLoadIndicator(sidebar: HTMLElement, text: string | null): void {
   let indicator = sidebar.querySelector<HTMLElement>('#ala-compare-load-indicator');
   if (!text) {
     indicator?.remove();
@@ -260,10 +259,6 @@ export function cleanupCompareView(state: CompareState): void {
     state.prefetchRelease();
     state.prefetchRelease = null;
   }
-  if (state.indicatorTimer) {
-    state.indicatorTimer();
-    state.indicatorTimer = null;
-  }
   if (state.loadAbortState) {
     state.loadAbortState.abort = true;
     state.loadAbortState = null;
@@ -272,9 +267,9 @@ export function cleanupCompareView(state: CompareState): void {
   state.isCompareLoaded = false;
   state.loadFailed = false;
   state.isMutatingDOM = false;
-  if (state.resizeCleanup) {
-    state.resizeCleanup();
-    state.resizeCleanup = null;
+  if (state.headerCleanup) {
+    state.headerCleanup();
+    state.headerCleanup = null;
   }
 
   document.getElementById('ala-compare-table')?.remove();
@@ -283,11 +278,16 @@ export function cleanupCompareView(state: CompareState): void {
   if (wrap) {
     const main = wrap.querySelector('.ala-compare-main');
     const compareRoot = main?.querySelector<HTMLElement>('.compare:not(#ala-compare-table)') || main?.firstElementChild;
-    if (compareRoot && wrap.parentElement) {
+    if (compareRoot) {
+      if ((compareRoot as HTMLElement).dataset) {
+        delete (compareRoot as HTMLElement).dataset.alaCompareInit;
+      }
       if ((compareRoot as HTMLElement).style) {
         (compareRoot as HTMLElement).style.display = '';
       }
-      wrap.parentElement.insertBefore(compareRoot, wrap);
+      if (wrap.parentElement) {
+        wrap.parentElement.insertBefore(compareRoot, wrap);
+      }
     }
     wrap.remove();
   } else {
@@ -326,7 +326,7 @@ export function cleanupCompareView(state: CompareState): void {
 }
 
 function renderSidebarCard(
-  ctx: FeatureContext,
+  rc: RouteContext,
   state: CompareState,
   sidebar: HTMLElement,
   compareRoot: HTMLElement
@@ -368,7 +368,6 @@ function renderSidebarCard(
     }
   });
 
-  state.resizeCleanup?.();
   let isDesktop = window.innerWidth > 850;
   const syncDetailsOpen = () => {
     if (!details) return;
@@ -378,7 +377,7 @@ function renderSidebarCard(
       isDesktop = nowDesktop;
     }
   };
-  state.resizeCleanup = ctx.listen(window, 'resize', syncDetailsOpen);
+  rc.listen(window, 'resize', syncDetailsOpen);
 
   sidebar.querySelectorAll<HTMLInputElement>('.ala-compare-cb').forEach((cb) => {
     cb.addEventListener('change', () => {
@@ -423,7 +422,7 @@ function findCompareHeaders(header: HTMLElement | null) {
 }
 
 export function setupCompareView(
-  ctx: FeatureContext,
+  rc: RouteContext,
   state: CompareState,
   compareRoot: HTMLElement,
   header: HTMLElement | null,
@@ -434,7 +433,11 @@ export function setupCompareView(
     header.querySelectorAll<HTMLElement>('.status').forEach((statusEl) => {
       if (!statusEl.querySelector('.ala-header-label')) {
         const text = statusEl.textContent?.trim() || '';
-        statusEl.innerHTML = `<span class="ala-header-label">${text}</span>`;
+        const label = document.createElement('span');
+        label.className = 'ala-header-label';
+        label.textContent = text;
+        statusEl.textContent = '';
+        statusEl.appendChild(label);
       }
     });
   }
@@ -468,17 +471,27 @@ export function setupCompareView(
   }
 
   if (sidebar) {
-    renderSidebarCard(ctx, state, sidebar, compareRoot);
+    renderSidebarCard(rc, state, sidebar, compareRoot);
     if (entries.length > 0) {
       updateStatusCounts(state, sidebar, entries);
     }
   }
 
   if (header && titleHeader && yourScoreHeader && otherScoreHeader && !(header as any)._alaHeaderBound) {
+    state.headerCleanup?.();
     (header as any)._alaHeaderBound = true;
-    titleHeader.addEventListener('click', () => triggerSort(state, 'title', compareRoot));
-    yourScoreHeader.addEventListener('click', () => triggerSort(state, 'yourScore', compareRoot));
-    otherScoreHeader.addEventListener('click', () => triggerSort(state, 'otherScore', compareRoot));
+    const onTitleClick = () => triggerSort(state, 'title', compareRoot);
+    const onYourScoreClick = () => triggerSort(state, 'yourScore', compareRoot);
+    const onOtherScoreClick = () => triggerSort(state, 'otherScore', compareRoot);
+    titleHeader.addEventListener('click', onTitleClick);
+    yourScoreHeader.addEventListener('click', onYourScoreClick);
+    otherScoreHeader.addEventListener('click', onOtherScoreClick);
+    state.headerCleanup = () => {
+      titleHeader.removeEventListener('click', onTitleClick);
+      yourScoreHeader.removeEventListener('click', onYourScoreClick);
+      otherScoreHeader.removeEventListener('click', onOtherScoreClick);
+      delete (header as any)._alaHeaderBound;
+    };
   }
 
   if (header && titleHeader) {
@@ -495,8 +508,6 @@ export function setupCompareView(
       }
     });
   });
-
-  disableNativeScrollers(compareRoot);
 
   if (entries.length > 0) {
     applyFilter(state, compareRoot, entries);

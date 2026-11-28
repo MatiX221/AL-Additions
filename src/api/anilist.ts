@@ -1,7 +1,28 @@
 import { unsafeWindow } from 'vite-plugin-monkey/dist/client';
 import { CoreHooks } from '../core/bus';
-import { ANILIST_SESSION_KEYS, type AniListClient, type AniListSession } from '../types';
-import { authError, createCoreLogger, sleep, store } from '../utils/helpers';
+import {
+  ANILIST_SESSION_KEYS,
+  type AniListClient,
+  type AniListSession,
+  type MediaEntry,
+  type MediaListCollectionData,
+  type MediaListEntryItem,
+  type MediaListGroup,
+  type MediaListResult,
+  type QueryOptions,
+  type ViewerInfo
+} from '../types';
+import {
+  authError,
+  createAbortError,
+  createCoreLogger,
+  isAbortError,
+  isGqlMutation,
+  raceWithSignal,
+  sleep,
+  store
+} from '../utils/helpers';
+import { createSharedFlight, type SharedFlight } from '../utils/flight';
 import { RateLimiter } from '../utils/limiter';
 
 const anilistLog = createCoreLogger('anilist');
@@ -31,99 +52,20 @@ function navUserName(doc: Document = document): string {
   }
 }
 
-export type { AniListClient, AniListSession };
+export type {
+  AniListClient,
+  AniListSession,
+  ViewerInfo,
+  MediaEntry,
+  MediaListEntryItem,
+  MediaListGroup,
+  MediaListCollectionData,
+  MediaListResult,
+  QueryOptions
+};
 
-export interface ViewerInfo {
-  id: number;
-  name: string;
-  scoreFormat: string;
-}
-
-export interface MediaEntry {
-  id: number;
-  idMal: number | null;
-  format: string;
-  title: {
-    userPreferred?: string;
-    english?: string;
-    romaji?: string;
-    native?: string;
-  };
-  episodes: number | null;
-  chapters: number | null;
-  status: string;
-  season?: string;
-  seasonYear?: number;
-  nextAiringEpisode?: {
-    episode: number;
-  };
-  mediaListEntry?: {
-    score: number;
-    progress: number;
-    status: string;
-    completedAt?: {
-      year?: number;
-      month?: number;
-      day?: number;
-    };
-  };
-}
-
-export interface MediaListEntryItem {
-  id: number;
-  mediaId: number;
-  status: string;
-  score: number;
-  progress: number;
-  progressVolumes?: number;
-  repeat?: number;
-  priority?: number;
-  notes?: string;
-  customLists?: Record<string, boolean>;
-  startedAt?: { year?: number; month?: number; day?: number };
-  completedAt?: { year?: number; month?: number; day?: number };
-  media?: {
-    id: number;
-    idMal: number | null;
-    format?: string;
-    episodes?: number | null;
-    chapters?: number | null;
-    status?: string;
-    title?: {
-      userPreferred?: string;
-      english?: string;
-      romaji?: string;
-      native?: string;
-    };
-  };
-}
-
-export interface MediaListGroup {
-  name: string;
-  isCustomList: boolean;
-  status: string | null;
-  entries: MediaListEntryItem[];
-}
-
-export interface MediaListCollectionData {
-  hasNextChunk?: boolean;
-  user?: {
-    id: number;
-    name: string;
-  };
-  lists: MediaListGroup[];
-}
-
-export interface MediaListResult {
-  collection: MediaListCollectionData;
-  lists: MediaListGroup[];
-  allEntries: MediaListEntryItem[];
-  user?: { id: number; name: string };
-}
-
-export interface QueryOptions {
-  retries?: number;
-  forceFresh?: boolean;
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw createAbortError(signal);
 }
 
 interface EntityMeta {
@@ -178,10 +120,6 @@ function stripCommentsAndStrings(q: string): string {
     i++;
   }
   return out;
-}
-
-function isGqlMutation(q: string): boolean {
-  return /\bmutation\b/i.test(stripCommentsAndStrings(q));
 }
 
 function parseRootSelection(q: string): { rootField: string; rootArgs: string; innerSelection: string } | null {
@@ -331,6 +269,19 @@ function parseTopLevelArgs(args: string): Record<string, string> | null {
 
 const UNRESOLVABLE_ARG = Symbol('unresolvable');
 
+function parsePositiveId(raw: unknown): number | null {
+  if (typeof raw === 'number') {
+    return Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    const n = Number(trimmed);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+
 function extractSelectionPaths(inner: string): Set<string> | null {
   const paths = new Set<string>();
   const stack: string[] = [];
@@ -444,10 +395,27 @@ function parseEntityMeta(query: string, vars: Record<string, any>): EntityMeta |
         mediaId = Number(argMap.id);
       }
     }
-    if (argMap.type && argMap.type.startsWith('$')) {
-      boundVars.add(argMap.type.slice(1));
-    }
     if (typeof mediaId !== 'number' || !Number.isSafeInteger(mediaId) || mediaId <= 0) return null;
+
+    let resolvedType = '';
+    if (argMap.type !== undefined) {
+      let rawType: any;
+      if (argMap.type.startsWith('$')) {
+        const varName = argMap.type.slice(1);
+        boundVars.add(varName);
+        rawType = safeVars[varName];
+      } else if (/^(?:ANIME|MANGA)$/i.test(argMap.type)) {
+        rawType = argMap.type.toUpperCase();
+      } else {
+        return null;
+      }
+      if (rawType !== undefined && rawType !== null) {
+        if (typeof rawType !== 'string') return null;
+        const norm = rawType.trim().toUpperCase();
+        if (norm !== 'ANIME' && norm !== 'MANGA') return null;
+        resolvedType = norm;
+      }
+    }
 
     for (const k of Object.keys(safeVars)) {
       if (!boundVars.has(k) && safeVars[k] !== undefined && safeVars[k] !== null) {
@@ -456,7 +424,7 @@ function parseEntityMeta(query: string, vars: Record<string, any>): EntityMeta |
     }
 
     return {
-      entityKey: `Media:${mediaId}`,
+      entityKey: `Media:${mediaId}:${resolvedType || '*'}`,
       isSuperset: requiredFields.size > 10,
       requiredFields
     };
@@ -484,6 +452,43 @@ function isSubsetOf(subset: Set<string>, superset: Set<string>): boolean {
   return true;
 }
 
+const MEDIA_LIST_SINGLE_QUERY = `query ($userId: Int, $userName: String, $type: MediaType) {
+      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
+        user { id name }
+        lists {
+          name
+          isCustomList
+          status
+          entries {
+            id
+            mediaId
+            status
+            score
+            progress
+            progressVolumes
+            repeat
+            priority
+            notes
+            customLists
+            startedAt { year month day }
+            completedAt { year month day }
+            media {
+              id
+              idMal
+              format
+              episodes
+              chapters
+              status
+              title { userPreferred english romaji native }
+            }
+          }
+        }
+      }
+    }`;
+
+const MEDIA_LIST_REQUIRED_FIELDS: Set<string> =
+  extractSelectionPaths(parseRootSelection(MEDIA_LIST_SINGLE_QUERY)?.innerSelection ?? '') ?? new Set();
+
 export const AniList = (() => {
   const limiter = new RateLimiter({ rate: 25, max: 90, burst: 1, persistKey: 'ala_anilist_api_resume_at' });
 
@@ -495,13 +500,13 @@ export const AniList = (() => {
   }
 
   interface InflightEntity {
-    promise: Promise<any>;
+    flight: SharedFlight<any>;
     isSuperset: boolean;
     fields: Set<string>;
   }
 
   interface InflightExact {
-    promise: Promise<any>;
+    flight: SharedFlight<any>;
     entityKey?: string;
   }
 
@@ -546,15 +551,20 @@ export const AniList = (() => {
       inflightEntities.clear();
       inflightExact.clear();
     } else {
-      for (const k of entityCache.keys()) {
-        if (k.startsWith(entityKeyPrefix)) entityCache.delete(k);
-      }
-      for (const k of inflightEntities.keys()) {
-        if (k.startsWith(entityKeyPrefix)) inflightEntities.delete(k);
-      }
-      for (const [k, entry] of inflightExact.entries()) {
-        if (entry.entityKey?.startsWith(entityKeyPrefix)) {
-          inflightExact.delete(k);
+      const normPrefix = entityKeyPrefix.replace(/:+$/, '');
+      if (normPrefix) {
+        const matchesPrefix = (k?: string): boolean =>
+          !!k && (k === normPrefix || k.startsWith(`${normPrefix}:`));
+        for (const k of entityCache.keys()) {
+          if (matchesPrefix(k)) entityCache.delete(k);
+        }
+        for (const k of inflightEntities.keys()) {
+          if (matchesPrefix(k)) inflightEntities.delete(k);
+        }
+        for (const [k, entry] of inflightExact.entries()) {
+          if (matchesPrefix(entry.entityKey)) {
+            inflightExact.delete(k);
+          }
         }
       }
     }
@@ -619,8 +629,7 @@ export const AniList = (() => {
       return { userId: null, username: null, scoreFormat: null };
     }
 
-    const storedIdNum = Number(store.get('al_user_id', 0));
-    const storedId = storedIdNum > 0 ? storedIdNum : null;
+    const storedId = parsePositiveId(store.get('al_user_id', null));
     const storedNameRaw = store.get<string | null>('al_username', null);
     const storedName = typeof storedNameRaw === 'string' && storedNameRaw ? storedNameRaw : null;
     const storedFmtRaw = store.get<string | null>('al_score_format', null);
@@ -629,18 +638,19 @@ export const AniList = (() => {
     const cachedViewer = entityCache.get('Viewer')?.data?.Viewer as
       | { id?: number; name?: string; mediaListOptions?: { scoreFormat?: string } }
       | undefined;
+    const cachedViewerId = parsePositiveId(cachedViewer?.id);
     const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
+    const nuxtId = parsePositiveId(nuxtUser?.id);
     const navName = doc ? navUserName(doc) || null : null;
 
-    if (nuxtUser?.id) {
-      const nuxtId = Number(nuxtUser.id);
+    if (nuxtId !== null) {
       const storedMismatch =
         (storedId !== null && storedId !== nuxtId) ||
         (storedId === null &&
           storedName !== null &&
           typeof nuxtUser.name === 'string' &&
           storedName.toLowerCase() !== nuxtUser.name.toLowerCase());
-      const cachedMatches = !!(cachedViewer?.id && Number(cachedViewer.id) === nuxtId);
+      const cachedMatches = cachedViewerId !== null && cachedViewerId === nuxtId;
       const username =
         (nuxtUser.name ? String(nuxtUser.name) : null) ||
         (cachedMatches && cachedViewer?.name ? String(cachedViewer.name) : null) ||
@@ -659,7 +669,7 @@ export const AniList = (() => {
       return {
         userId:
           (storedMatches ? storedId : null) ||
-          (cachedMatches && cachedViewer?.id ? Number(cachedViewer.id) : null),
+          (cachedMatches ? cachedViewerId : null),
         username: (storedMatches && storedName) || navName,
         scoreFormat:
           (storedMatches ? storedFmt : null) ||
@@ -668,7 +678,7 @@ export const AniList = (() => {
     }
 
     return {
-      userId: storedId || (cachedViewer?.id ? Number(cachedViewer.id) : null),
+      userId: storedId || cachedViewerId,
       username: storedName || (cachedViewer?.name ? String(cachedViewer.name) : null),
       scoreFormat: storedFmt || cachedViewer?.mediaListOptions?.scoreFormat || null
     };
@@ -685,25 +695,26 @@ export const AniList = (() => {
       return;
     }
     const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
-    if (nuxtUser?.id) {
-      const nuxtId = Number(nuxtUser.id);
-      const storedId = Number(store.get('al_user_id', 0));
-      const cachedViewerId = Number(entityCache.get('Viewer')?.data?.Viewer?.id || 0);
-      if ((storedId && storedId !== nuxtId) || (cachedViewerId && cachedViewerId !== nuxtId)) {
+    const nuxtId = parsePositiveId(nuxtUser?.id);
+    if (nuxtId !== null) {
+      const storedId = parsePositiveId(store.get('al_user_id', null));
+      const cachedViewerId = parsePositiveId(entityCache.get('Viewer')?.data?.Viewer?.id);
+      if ((storedId !== null && storedId !== nuxtId) || (cachedViewerId !== null && cachedViewerId !== nuxtId)) {
         clearViewer();
       }
       return;
     }
 
-    const navName = doc ? navUserName(doc) : '';
-    if (navName) {
+    const pageName =
+      (typeof nuxtUser?.name === 'string' && nuxtUser.name.trim()) || (doc ? navUserName(doc) : '');
+    if (pageName) {
       const storedName = store.get<string | null>('al_username', null);
       const cachedViewerName = entityCache.get('Viewer')?.data?.Viewer?.name;
       if (
-        (storedName && storedName.toLowerCase() !== navName.toLowerCase()) ||
+        (storedName && storedName.toLowerCase() !== pageName.toLowerCase()) ||
         (typeof cachedViewerName === 'string' &&
           cachedViewerName &&
-          cachedViewerName.toLowerCase() !== navName.toLowerCase())
+          cachedViewerName.toLowerCase() !== pageName.toLowerCase())
       ) {
         clearViewer();
       }
@@ -715,8 +726,10 @@ export const AniList = (() => {
     if (doc && isLoggedOutNav(doc)) return true;
 
     const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
-    if (nuxtUser?.id && v?.id != null && Number(v.id) > 0) {
-      if (Number(v.id) !== Number(nuxtUser.id)) return true;
+    const nuxtId = parsePositiveId(nuxtUser?.id);
+    const vId = parsePositiveId(v?.id);
+    if (nuxtId !== null && vId !== null) {
+      if (vId !== nuxtId) return true;
     }
 
     const pageName =
@@ -754,14 +767,14 @@ export const AniList = (() => {
     }
   }
 
-  function isBrowserLoggedIn(): boolean {
+  function isBrowserLoggedIn(opts?: { reconcile?: boolean }): boolean {
+    if (opts?.reconcile !== false) syncFromPage();
     const { win, doc } = readPageDoc();
-    syncFromPage();
     if (doc && isLoggedOutNav(doc)) return false;
     const nuxtUser = win?.__NUXT__?.state?.auth?.user || win?.__NUXT__?.state?.user;
-    if (nuxtUser?.id) return true;
+    if (parsePositiveId(nuxtUser?.id) !== null) return true;
     if (doc && hasLoggedInNav(doc)) return true;
-    return Boolean(Number(store.get('al_user_id', 0)) > 0 && store.get('al_username', null));
+    return Boolean(parsePositiveId(store.get('al_user_id', null)) !== null && store.get('al_username', null));
   }
 
   const header = (res: Response | undefined, name: string): string | null => {
@@ -774,9 +787,11 @@ export const AniList = (() => {
 
   function resetDelay(res: Response | undefined): number {
     const retry = Number(header(res, 'Retry-After'));
-    if (retry > 0) return Math.min(retry * 1000, 120000);
+    if (Number.isFinite(retry) && retry > 0) return Math.max(0, Math.min(retry * 1000, 120000));
     const reset = Number(header(res, 'X-RateLimit-Reset'));
-    if (reset > 0) return Math.min((reset > 1e12 ? reset : reset * 1000) - Date.now(), 120000);
+    if (Number.isFinite(reset) && reset > 0) {
+      return Math.max(0, Math.min((reset > 1e12 ? reset : reset * 1000) - Date.now(), 120000));
+    }
     return 0;
   }
 
@@ -792,12 +807,16 @@ export const AniList = (() => {
     q: string,
     variables: Record<string, any>,
     retries: number,
-    forceFresh = false
+    forceFresh = false,
+    attempt = 0,
+    signal?: AbortSignal
   ): Promise<T> {
+    throwIfAborted(signal);
+    const safeRetries = Number.isFinite(retries) ? Math.max(0, Math.floor(retries)) : 3;
     const csrfToken = getCsrfToken();
     const win = pageWin();
     const fetchFn = (typeof win.fetch === 'function' ? win.fetch : fetch).bind(win);
-    const backoff = () => sleep(1500 * (4 - retries));
+    const backoff = () => sleep(Math.min(30000, 1500 * (attempt + 1)), signal);
 
     const endpoint = `${win.location?.origin || 'https://anilist.co'}/graphql`;
 
@@ -814,38 +833,50 @@ export const AniList = (() => {
     let res: Response;
 
     try {
-      await limiter.acquire();
+      await limiter.acquire({ signal });
+      throwIfAborted(signal);
       res = await fetchFn(endpoint, {
         method: 'POST',
         headers,
         cache: forceFresh ? 'no-store' : undefined,
         credentials: 'include',
         body: JSON.stringify({ query: q, variables }),
+        signal,
         __alfl: 'internal'
       } as RequestInit);
     } catch (e: any) {
-      if (retries > 0) {
+      if (signal?.aborted || isAbortError(e)) {
+        throw signal?.aborted ? createAbortError(signal) : e;
+      }
+      if (safeRetries > 0) {
         await backoff();
-        return executeNetworkRequest<T>(q, variables, retries - 1, forceFresh);
+        return executeNetworkRequest<T>(q, variables, safeRetries - 1, forceFresh, attempt + 1, signal);
       }
       throw new Error(`AniList network error: ${e?.message || e}`);
     }
 
+    throwIfAborted(signal);
     handle(res);
 
     if (!res) {
       throw new Error('AniList network error: empty response');
     }
 
-    if ((res.status === 429 || res.status >= 500) && retries > 0) {
+    if ((res.status === 429 || res.status >= 500) && safeRetries > 0) {
       if (res.status >= 500) await backoff();
-      return executeNetworkRequest<T>(q, variables, retries - 1, forceFresh);
+      throwIfAborted(signal);
+      return executeNetworkRequest<T>(q, variables, safeRetries - 1, forceFresh, attempt + 1, signal);
     }
 
     let json: any = null;
     try {
       json = await res.json();
-    } catch (_) {}
+    } catch (e: any) {
+      if (signal?.aborted || isAbortError(e)) {
+        throw signal?.aborted ? createAbortError(signal) : e;
+      }
+    }
+    throwIfAborted(signal);
 
     const message = json?.errors?.length ? json.errors.map((e: any) => e.message).join('; ') : '';
     if (res.status === 401 || /invalid token|unauthenticated|unauthorized/i.test(message)) {
@@ -866,13 +897,15 @@ export const AniList = (() => {
       typeof optionsOrRetries === 'number'
         ? { retries: optionsOrRetries }
         : optionsOrRetries || {};
-    const retries = opts.retries ?? 3;
+    throwIfAborted(opts.signal);
+    const rawRetries = opts.retries ?? 3;
+    const retries = Number.isFinite(rawRetries) ? Math.max(0, Math.floor(rawRetries)) : 3;
     const isMutation = isGqlMutation(q);
 
     if (isMutation) {
       invalidate();
-      return executeNetworkRequest<T>(q, variables, retries).finally(() => {
-        invalidateLocal();
+      return executeNetworkRequest<T>(q, variables, retries, false, 0, opts.signal).finally(() => {
+        invalidate();
       });
     }
 
@@ -892,62 +925,70 @@ export const AniList = (() => {
 
     if (meta && !opts.forceFresh) {
       const flyingEntity = inflightEntities.get(meta.entityKey);
-      if (flyingEntity && isSubsetOf(meta.requiredFields, flyingEntity.fields)) {
+      if (
+        flyingEntity &&
+        !flyingEntity.flight.controller.signal.aborted &&
+        isSubsetOf(meta.requiredFields, flyingEntity.fields)
+      ) {
         anilistLog.debug('🔗 Attached to in-flight Superset request:', meta.entityKey);
-        return flyingEntity.promise as Promise<T>;
+        return (flyingEntity.flight as SharedFlight<T>).wait({ signal: opts.signal });
       }
     }
 
     const flyingExact = inflightExact.get(exactKey);
-    if (flyingExact && !opts.forceFresh) {
-      return flyingExact.promise as Promise<T>;
+    if (flyingExact && !flyingExact.flight.controller.signal.aborted && !opts.forceFresh) {
+      return (flyingExact.flight as SharedFlight<T>).wait({ signal: opts.signal });
     }
 
     const reqEpoch = cacheEpoch;
-    const networkPromise = executeNetworkRequest<T>(q, variables, retries, opts.forceFresh)
-      .then((data) => {
-        if (meta && data && cacheEpoch === reqEpoch && (data as any)?.MediaListCollection?.hasNextChunk !== true) {
-          const existing = entityCache.get(meta.entityKey);
-          const wouldDowngrade =
-            !opts.forceFresh &&
-            existing &&
-            Date.now() - existing.time < ENTITY_TTL &&
-            isSubsetOf(meta.requiredFields, existing.fields) &&
-            !isSubsetOf(existing.fields, meta.requiredFields);
-          if (!wouldDowngrade) {
-            entityCache.set(meta.entityKey, {
-              time: Date.now(),
-              data,
-              isSuperset: meta.isSuperset,
-              fields: meta.requiredFields
-            });
+    const cleanupFlightRefs = (targetFlight: SharedFlight<T>) => {
+      if (inflightExact.get(exactKey)?.flight === targetFlight) {
+        inflightExact.delete(exactKey);
+      }
+      if (meta && inflightEntities.get(meta.entityKey)?.flight === targetFlight) {
+        inflightEntities.delete(meta.entityKey);
+      }
+      maybeUnsubscribeMutationListener();
+    };
+    const flight = createSharedFlight<T>({
+      start: (sharedSignal) =>
+        executeNetworkRequest<T>(q, variables, retries, opts.forceFresh, 0, sharedSignal).then((data) => {
+          if (meta && data && cacheEpoch === reqEpoch && (data as any)?.MediaListCollection?.hasNextChunk !== true) {
+            const existing = entityCache.get(meta.entityKey);
+            const wouldDowngrade =
+              !opts.forceFresh &&
+              existing &&
+              Date.now() - existing.time < ENTITY_TTL &&
+              isSubsetOf(meta.requiredFields, existing.fields) &&
+              !isSubsetOf(existing.fields, meta.requiredFields);
+            if (!wouldDowngrade) {
+              entityCache.set(meta.entityKey, {
+                time: Date.now(),
+                data,
+                isSuperset: meta.isSuperset,
+                fields: meta.requiredFields
+              });
+            }
           }
-        }
-        return data;
-      })
-      .finally(() => {
-        if (inflightExact.get(exactKey)?.promise === networkPromise) {
-          inflightExact.delete(exactKey);
-        }
-        if (meta && inflightEntities.get(meta.entityKey)?.promise === networkPromise) {
-          inflightEntities.delete(meta.entityKey);
-        }
-        maybeUnsubscribeMutationListener();
-      });
+          return data;
+        }),
+      onEvict: cleanupFlightRefs,
+      onSettled: cleanupFlightRefs
+    });
 
-    inflightExact.set(exactKey, { promise: networkPromise, entityKey: meta?.entityKey });
+    inflightExact.set(exactKey, { flight, entityKey: meta?.entityKey });
     if (meta) {
       const existing = inflightEntities.get(meta.entityKey);
-      if (!existing || (!existing.isSuperset && meta.isSuperset)) {
+      if (!existing || existing.flight.controller.signal.aborted || (!existing.isSuperset && meta.isSuperset)) {
         inflightEntities.set(meta.entityKey, {
-          promise: networkPromise,
+          flight,
           isSuperset: meta.isSuperset,
           fields: meta.requiredFields
         });
       }
     }
 
-    return networkPromise;
+    return flight.wait({ signal: opts.signal });
   }
 
   function formatMediaListResult(mlc: any): MediaListResult {
@@ -989,13 +1030,34 @@ export const AniList = (() => {
     };
   }
 
+  function isValidFastLoadEntry(entry: any): boolean {
+    if (!entry || typeof entry !== 'object') return false;
+    if (typeof entry.mediaId !== 'number' || !Number.isFinite(entry.mediaId) || entry.mediaId <= 0) return false;
+    if (!entry.media || typeof entry.media !== 'object' || typeof entry.media.id !== 'number') return false;
+    if (typeof entry.status !== 'string' || !entry.status) return false;
+    return true;
+  }
+
+  function isValidFastLoadMediaList(mlc: any): boolean {
+    if (!mlc || typeof mlc !== 'object' || !Array.isArray(mlc.lists) || mlc.hasNextChunk === true) return false;
+    for (const list of mlc.lists) {
+      if (list === null) continue;
+      if (typeof list !== 'object' || !Array.isArray(list.entries)) return false;
+      for (const entry of list.entries) {
+        if (entry === null) continue;
+        if (!isValidFastLoadEntry(entry)) return false;
+      }
+    }
+    return true;
+  }
+
   function parseRpcMediaList(payload: any): MediaListResult | null {
     if (!payload || typeof payload !== 'object') return null;
     if (payload.hasNextChunk === true) return null;
 
     const mlc = payload.MediaListCollection || payload.data?.MediaListCollection;
     if (mlc && Array.isArray(mlc.lists)) {
-      if (mlc.hasNextChunk === true) return null;
+      if (!isValidFastLoadMediaList(mlc)) return null;
       return formatMediaListResult(mlc);
     }
 
@@ -1004,8 +1066,9 @@ export const AniList = (() => {
     if (entriesMap && typeof entriesMap === 'object') {
       const mediaMap = entities.media || entities.listEntryMedia || {};
       const allEntries: MediaListEntryItem[] = [];
+      const normalizedById = new Map<string, MediaListEntryItem>();
 
-      for (const rawEntry of Object.values(entriesMap) as any[]) {
+      for (const [entryKey, rawEntry] of Object.entries(entriesMap) as Array<[string, any]>) {
         if (!rawEntry || typeof rawEntry !== 'object') continue;
         const mediaId =
           rawEntry.mediaId ||
@@ -1017,17 +1080,23 @@ export const AniList = (() => {
             ? rawEntry.media
             : mediaMap[mediaId] || { id: mediaId };
 
-        allEntries.push({
+        const normalized: MediaListEntryItem = {
           ...rawEntry,
           mediaId,
           media: mediaObj
-        });
+        };
+        allEntries.push(normalized);
+        normalizedById.set(entryKey, normalized);
+        if (rawEntry.id != null) {
+          const idKey = String(rawEntry.id);
+          if (idKey !== entryKey) normalizedById.set(idKey, normalized);
+        }
       }
 
       if (allEntries.length === 0) return null;
 
       const userObj = entities.user ? (Object.values(entities.user)[0] as any) : undefined;
-      const lists: any[] = [];
+      const lists: MediaListGroup[] = [];
       if (entities.listSection && typeof entities.listSection === 'object') {
         for (const sec of Object.values(entities.listSection) as any[]) {
           if (!sec) continue;
@@ -1036,7 +1105,11 @@ export const AniList = (() => {
             isCustomList: !!sec.isCustomList,
             status: sec.status,
             entries: Array.isArray(sec.entries)
-              ? sec.entries.map((id: any) => entriesMap[id]).filter(Boolean)
+              ? sec.entries
+                  .map((id: any) =>
+                    typeof id === 'string' || typeof id === 'number' ? normalizedById.get(String(id)) : undefined
+                  )
+                  .filter((e: MediaListEntryItem | undefined): e is MediaListEntryItem => Boolean(e))
               : []
           });
         }
@@ -1100,17 +1173,48 @@ export const AniList = (() => {
     });
   }
 
-  function tryGetCachedMediaList(
+  function resolveMediaListTarget(
     target: number | string,
+    options?: { userId?: number; userName?: string }
+  ): { userId?: number; userName?: string } {
+    const optUserName =
+      typeof options?.userName === 'string' && options.userName.trim() ? options.userName.trim() : undefined;
+    const optUserId = parsePositiveId(options?.userId);
+
+    const hasExplicitOptId = optUserId !== null;
+    const hasExplicitOptName = optUserName !== undefined;
+
+    let inferredId: number | undefined;
+    let inferredName: string | undefined;
+
+    if (!hasExplicitOptId && !hasExplicitOptName) {
+      if (typeof target === 'number') {
+        inferredId = parsePositiveId(target) ?? undefined;
+      } else if (typeof target === 'string') {
+        const trimmed = target.trim();
+        if (/^\d+$/.test(trimmed)) {
+          inferredId = parsePositiveId(Number(trimmed)) ?? undefined;
+        } else if (trimmed) {
+          inferredName = trimmed;
+        }
+      }
+    }
+
+    return {
+      userId: optUserId ?? inferredId,
+      userName: optUserName ?? inferredName
+    };
+  }
+
+  function tryGetCachedMediaList(
     type: 'ANIME' | 'MANGA',
     userId?: number,
     userName?: string
   ): MediaListResult | null {
     const win = pageWin();
     const t = type.toUpperCase();
-    const isId = typeof target === 'number' || /^\d+$/.test(String(target));
-    const id = userId || (isId ? Number(target) : undefined);
-    const name = (userName || (!isId ? String(target) : '')).trim().toLowerCase() || undefined;
+    const id = userId;
+    const name = userName ? userName.toLowerCase() : undefined;
 
     const bridge = safeBridge(() => CoreHooks.getCacheBridge()) ?? null;
     const userMap: Map<string, number> | undefined = safeBridge(() =>
@@ -1132,7 +1236,9 @@ export const AniList = (() => {
         cached &&
         Date.now() - cached.time < ENTITY_TTL &&
         cached.data?.MediaListCollection &&
-        cached.data.MediaListCollection.hasNextChunk !== true
+        cached.data.MediaListCollection.hasNextChunk !== true &&
+        cached.fields &&
+        isSubsetOf(MEDIA_LIST_REQUIRED_FIELDS, cached.fields)
       ) {
         anilistLog.debug('🎯 Cache HIT for MediaListCollection via entityCache:', k);
         return formatMediaListResult(cached.data.MediaListCollection);
@@ -1149,7 +1255,7 @@ export const AniList = (() => {
           const raw = new TextDecoder().decode(cached.snap.buf);
           const json = JSON.parse(raw);
           const mlc = json?.data?.MediaListCollection || json?.MediaListCollection;
-          if (mlc && Array.isArray(mlc.lists) && mlc.hasNextChunk !== true) {
+          if (isValidFastLoadMediaList(mlc)) {
             anilistLog.debug(
               viaScan
                 ? '🎯 Cache HIT for MediaListCollection via FastLoad GQL store (scan):'
@@ -1232,15 +1338,16 @@ export const AniList = (() => {
   async function getMediaList(
     target: number | string,
     type: 'ANIME' | 'MANGA' = 'ANIME',
-    options?: { forceFresh?: boolean; userId?: number; userName?: string }
+    options?: { forceFresh?: boolean; userId?: number; userName?: string; signal?: AbortSignal }
   ): Promise<MediaListResult> {
-    const isId = typeof target === 'number' || /^\d+$/.test(String(target));
-    const userId = options?.userId || (isId ? Number(target) : undefined);
-    const rawUserName = options?.userName || (!isId ? String(target) : '');
-    const userName = rawUserName.trim() || undefined;
+    throwIfAborted(options?.signal);
+    const { userId, userName } = resolveMediaListTarget(target, options);
+    if (!userId && !userName) {
+      throw new Error('Invalid AniList user target for getMediaList');
+    }
 
     if (!options?.forceFresh) {
-      const cached = tryGetCachedMediaList(target, type, userId, userName);
+      const cached = tryGetCachedMediaList(type, userId, userName);
       if (cached) {
         return cached;
       }
@@ -1269,31 +1376,40 @@ export const AniList = (() => {
 
       const checkInflight = async (k: string, flight: { promise: Promise<any> }) => {
         if (!flight?.promise) return null;
+        throwIfAborted(options?.signal);
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           anilistLog.debug('⏳ Awaiting in-flight FastLoad RPC prefetch:', k);
-          const msg = await Promise.race([
-            flight.promise,
-            new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error('timeout')), 5000);
-            })
-          ]);
+          const msg = await raceWithSignal(
+            Promise.race([
+              flight.promise,
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('timeout')), 5000);
+              })
+            ]),
+            options?.signal
+          );
+          throwIfAborted(options?.signal);
           const payload = msg?.result ?? msg;
           const parsed = parseRpcMediaList(payload);
           if (parsed && parsed.allEntries.length > 0) {
             anilistLog.debug('🎯 Cache HIT from completed in-flight FastLoad RPC prefetch:', k);
             return parsed;
           }
-        } catch (_) {
+        } catch (err) {
+          if (options?.signal?.aborted) throw err;
         } finally {
           if (timer !== undefined) clearTimeout(timer);
         }
         return null;
       };
 
+      const seenFlights = new Set<unknown>();
+
       for (const k of rpcKeys) {
         const flight = safeBridge(() => rpcInflight.get(k));
-        if (flight) {
+        if (flight && !seenFlights.has(flight)) {
+          seenFlights.add(flight);
           const res = await checkInflight(k, flight);
           if (res) return res;
         }
@@ -1310,44 +1426,12 @@ export const AniList = (() => {
           return list;
         }) || [];
       for (const [k, flight] of matchingFlights) {
+        if (seenFlights.has(flight)) continue;
+        seenFlights.add(flight);
         const res = await checkInflight(k, flight);
         if (res) return res;
       }
     }
-
-    const singleQuery = `query ($userId: Int, $userName: String, $type: MediaType) {
-      MediaListCollection(userId: $userId, userName: $userName, type: $type) {
-        user { id name }
-        lists {
-          name
-          isCustomList
-          status
-          entries {
-            id
-            mediaId
-            status
-            score
-            progress
-            progressVolumes
-            repeat
-            priority
-            notes
-            customLists
-            startedAt { year month day }
-            completedAt { year month day }
-            media {
-              id
-              idMal
-              format
-              episodes
-              chapters
-              status
-              title { userPreferred english romaji native }
-            }
-          }
-        }
-      }
-    }`;
 
     const queryVars = {
       userId: userId || undefined,
@@ -1356,9 +1440,9 @@ export const AniList = (() => {
     };
 
     const data = await query<{ MediaListCollection: MediaListCollectionData }>(
-      singleQuery,
+      MEDIA_LIST_SINGLE_QUERY,
       queryVars,
-      { forceFresh: options?.forceFresh }
+      { forceFresh: options?.forceFresh, signal: options?.signal }
     );
 
     const mlc = data?.MediaListCollection;
@@ -1369,7 +1453,8 @@ export const AniList = (() => {
     return formatMediaListResult(mlc);
   }
 
-  async function viewer(forceFresh = false): Promise<ViewerInfo | null> {
+  async function viewer(forceFresh = false, opts?: { signal?: AbortSignal }): Promise<ViewerInfo | null> {
+    throwIfAborted(opts?.signal);
     const doc = (pageWin().document || document) as Document;
     syncFromPage();
     if (isLoggedOutNav(doc)) {
@@ -1379,7 +1464,7 @@ export const AniList = (() => {
     if (!forceFresh) {
       const name = store.get<string | null>('al_username', null);
       const fmt = store.get<string | null>('al_score_format', null);
-      const id = Number(store.get('al_user_id', 0));
+      const id = parsePositiveId(store.get('al_user_id', null));
       if (name && fmt && id) return { id, name, scoreFormat: fmt };
     }
     if (!hasAuth()) return null;
@@ -1390,9 +1475,9 @@ export const AniList = (() => {
       query<{ Viewer: { id: number; name: string; mediaListOptions?: { scoreFormat?: string } } | null }>(
         VIEWER_QUERY,
         {},
-        { forceFresh: fresh }
+        { forceFresh: fresh, signal: opts?.signal }
       ).catch((e) => {
-        if (e?.auth) throw e;
+        if (e?.auth || isAbortError(e) || opts?.signal?.aborted) throw e;
         return null;
       });
 
@@ -1411,6 +1496,7 @@ export const AniList = (() => {
     };
 
     let d = await fetchViewer(forceFresh);
+    throwIfAborted(opts?.signal);
     if (checkPostAwaitViewer(d)) {
       return null;
     }
@@ -1418,6 +1504,7 @@ export const AniList = (() => {
     if (d?.Viewer && !d.Viewer.mediaListOptions?.scoreFormat && !forceFresh) {
       invalidateLocal('Viewer');
       d = await fetchViewer(true);
+      throwIfAborted(opts?.signal);
       if (checkPostAwaitViewer(d)) {
         return null;
       }
@@ -1454,13 +1541,18 @@ export const AniList = (() => {
   };
 
   const invalidateMediaList = (target?: number | string, type?: 'ANIME' | 'MANGA'): void => {
-    if (!target) return invalidate('MediaListCollection');
+    const who = target ? String(target).trim().toLowerCase() : '';
+    if (!who) return invalidate('MediaListCollection');
     const t = type ? type.toUpperCase() : '';
-    const prefix = t ? `MediaListCollection:${t}:${String(target).trim().toLowerCase()}` : `MediaListCollection:`;
-    invalidate(prefix);
+    if (t) {
+      invalidate(`MediaListCollection:${t}:${who}`);
+      return;
+    }
+    invalidate(`MediaListCollection:ANIME:${who}`);
+    invalidate(`MediaListCollection:MANGA:${who}`);
   };
 
-  const hasAuth = (): boolean => isBrowserLoggedIn();
+  const hasAuth = (opts?: { reconcile?: boolean }): boolean => isBrowserLoggedIn(opts);
   const resumeAt = (): number => limiter.resumeAt;
 
   const session: AniListSession = {
@@ -1497,7 +1589,7 @@ export const MediaData = (() => {
   async function get(
     id: number | string,
     type: 'ANIME' | 'MANGA',
-    opts?: { throwAuth?: boolean }
+    opts?: { throwAuth?: boolean; signal?: AbortSignal }
   ): Promise<MediaEntry | null> {
     try {
       const data = await AniList.query<{ Media: MediaEntry }>(
@@ -1506,7 +1598,8 @@ export const MediaData = (() => {
           episodes chapters status season seasonYear nextAiringEpisode { episode }
           mediaListEntry { score progress status completedAt { year month day } }
         } }`,
-        { id: Number(id), type }
+        { id: Number(id), type },
+        { signal: opts?.signal }
       );
       return data?.Media || null;
     } catch (e: any) {
@@ -1524,14 +1617,18 @@ export const MediaData = (() => {
       progress?: number;
       status?: string;
       completedAt?: { year: number; month: number; day: number };
-    }
-  ): Promise<any> {
-    const data = await AniList.query(
+    },
+    opts?: { signal?: AbortSignal }
+  ): Promise<NonNullable<MediaEntry['mediaListEntry']> | null> {
+    const data = await AniList.query<{
+      SaveMediaListEntry: NonNullable<MediaEntry['mediaListEntry']> | null;
+    }>(
       `mutation($mediaId:Int!,$score:Float,$progress:Int,$status:MediaListStatus,$completedAt:FuzzyDateInput){
         SaveMediaListEntry(mediaId:$mediaId,score:$score,progress:$progress,status:$status,completedAt:$completedAt){
           score progress status completedAt { year month day }
         } }`,
-      { mediaId: Number(id), score: c.score, progress: c.progress, status: c.status, completedAt: c.completedAt }
+      { mediaId: Number(id), score: c.score, progress: c.progress, status: c.status, completedAt: c.completedAt },
+      { signal: opts?.signal }
     );
     const entry = data?.SaveMediaListEntry || null;
 

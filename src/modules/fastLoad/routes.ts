@@ -9,12 +9,14 @@ import {
   userMap,
   pausedUntil,
   getViewerFromWindow,
-  getLocalUsername
+  getLocalUsername,
+  onCacheClear
 } from './state';
 import { CFG, stats, attempt } from './config';
 import { isGraphQL } from './graphql';
 import { isMutation, isVolatile } from './helpers';
 import { lastAuth, prefetchWorkerList } from './worker';
+import type { CleanupFn, DebouncedFn, FeatureContext } from '../../types';
 
 const sameId = (a: any, b: any) =>
   a === b || (typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase());
@@ -22,17 +24,19 @@ const sameId = (a: any, b: any) =>
 const isIdKey = (key: string) => /^(?:id|name|userName|username|userId)$|Id$/.test(key);
 const STATIC_ROUTE = /^\/(?:home|search\/(?:anime|manga))\/?$/;
 
+function safeDecodeURIComponent(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export function parseRoute(path: string, search = '') {
   const parts = path
     .split('/')
     .filter(Boolean)
-    .map((x) => {
-      try {
-        return decodeURIComponent(x);
-      } catch {
-        return x;
-      }
-    });
+    .map(safeDecodeURIComponent);
   if (['anime', 'manga', 'character', 'staff', 'studio'].includes(parts[0]) && /^\d+$/.test(parts[1] || '')) {
     return { shape: `${parts[0]}/${parts[3] || ''}`, id: Number(parts[1]) };
   }
@@ -87,19 +91,65 @@ export const learned = new Map<string, any>();
 const ROUTES_KEY = 'routes:v4';
 const ROUTES_TTL = 30 * 86400e3;
 
-let persistTimer: any = 0;
+export interface RouteTimerApi {
+  timeout: FeatureContext['timeout'];
+  debounce: FeatureContext['debounce'];
+}
+
+let routesDisposed = false;
+let routeTimers: RouteTimerApi | null = null;
+let persistDebounced: DebouncedFn<() => void> | null = null;
+let autoPrefetchCancel: CleanupFn | null = null;
+let dwellCancel: CleanupFn | null = null;
+const pendingAutoPrefetchCancels = new Set<CleanupFn>();
+
+function writeLearnedRoutes(): void {
+  if (routesDisposed) return;
+  attempt(() => {
+    const out: Record<string, any> = {};
+    for (const [shape, v] of [...learned].slice(-40))
+      out[shape] = { t: v.t, id: v.route.id, static: !!v.route.static, reqs: v.reqs };
+    coreStorage?.set(ROUTES_KEY, out);
+  });
+}
+
+function clearPendingAutoPrefetchTimers(): void {
+  for (const cancel of pendingAutoPrefetchCancels) {
+    cancel();
+  }
+  pendingAutoPrefetchCancels.clear();
+}
+
+export function initRoutes(timers?: RouteTimerApi): void {
+  routesDisposed = false;
+  if (timers) {
+    persistDebounced?.cancel();
+    routeTimers = timers;
+    persistDebounced = timers.debounce(writeLearnedRoutes, 1000);
+  }
+}
+
+export function cleanupRoutes(disposeTimers = false): void {
+  routesDisposed = true;
+  persistDebounced?.cancel();
+  autoPrefetchCancel?.();
+  autoPrefetchCancel = null;
+  dwellCancel?.();
+  dwellCancel = null;
+  clearPendingAutoPrefetchTimers();
+  if (disposeTimers) {
+    routeTimers = null;
+    persistDebounced = null;
+    learned.clear();
+    prefetched.clear();
+    stamps.length = 0;
+    learning = { key: '', started: 0, route: null, reqs: [] };
+  }
+}
+
 export const persistRoutes = () => {
-  clearTimeout(persistTimer);
-  persistTimer = setTimeout(
-    () =>
-      attempt(() => {
-        const out: Record<string, any> = {};
-        for (const [shape, v] of [...learned].slice(-40))
-          out[shape] = { t: v.t, id: v.route.id, static: !!v.route.static, reqs: v.reqs };
-        coreStorage?.set(ROUTES_KEY, out);
-      }),
-    1000
-  );
+  if (routesDisposed) return;
+  persistDebounced?.();
 };
 
 export function loadRoutes() {
@@ -203,7 +253,7 @@ function getReplayAuthToken(): string | null {
 const stamps: number[] = [];
 
 export function replayRoute(known: any, route: any, yielded: () => boolean) {
-  if (yielded()) return 0;
+  if (routesDisposed || yielded()) return 0;
   let sent = 0;
   for (const request of known.reqs) {
     let parsed;
@@ -245,7 +295,7 @@ export function replayRoute(known: any, route: any, yielded: () => boolean) {
 
 export const triggerEarlyStart = (yielded: () => boolean) => {
   attempt(() => {
-    if ((navigator as any).connection?.saveData) return;
+    if (routesDisposed || (navigator as any).connection?.saveData) return;
     const route = here();
     const known = route && learned.get(route.shape);
     if (known) stats.earlyStarts += replayRoute(known, route, yielded);
@@ -253,10 +303,10 @@ export const triggerEarlyStart = (yielded: () => boolean) => {
 };
 
 const prefetched = new Map<string, number>();
-let dwellTimer: any = 0;
+onCacheClear(() => prefetched.clear());
 
 export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
-  if (yielded() || coreHooks?.isPrefetchSuppressed()) return;
+  if (routesDisposed || yielded() || coreHooks?.isPrefetchSuppressed()) return;
   const now = Date.now();
   if (doc.hidden || now < pausedUntil || (navigator as any).connection?.saveData) return;
 
@@ -270,14 +320,15 @@ export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
 
   const listMatch = url.pathname.match(/^\/(?:user\/([^/]+)\/)?(animelist|mangalist)/i);
   if (listMatch) {
-    const targetUser = listMatch[1] || getLocalUsername();
+    const decodedUser = listMatch[1] ? safeDecodeURIComponent(listMatch[1]) : '';
+    const targetUser = decodedUser || getLocalUsername();
     const listType = listMatch[2].toLowerCase() === 'mangalist' ? 'MANGA' : 'ANIME';
     const myId = coreSession?.peek().userId || 0;
     const userId = targetUser
       ? (userMap.get(targetUser.toLowerCase()) || (targetUser.toLowerCase() === getLocalUsername()?.toLowerCase() ? myId : 0))
       : 0;
     if (userId || targetUser) {
-      prefetchWorkerList(listType, userId, targetUser || undefined);
+      prefetchWorkerList(listType, userId, targetUser || undefined, yielded);
     }
     return;
   }
@@ -306,6 +357,11 @@ export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
   while (stamps.length && now - stamps[0] > 60_000) stamps.shift();
   if (prefetched.size > 200) {
     for (const [k, t] of prefetched) if (now - t > cooldown) prefetched.delete(k);
+    while (prefetched.size > 200) {
+      const oldest = prefetched.keys().next().value;
+      if (oldest === undefined) break;
+      prefetched.delete(oldest);
+    }
   }
   if (stamps.length + known.reqs.length > CFG.prefetchMaxPerMin) return;
 
@@ -317,25 +373,32 @@ export function prefetchFor(anchor: HTMLAnchorElement, yielded: () => boolean) {
   }
 }
 
-let autoPrefetchTimer: any = 0;
+function canRunAutoPrefetch(yielded: () => boolean): boolean {
+  if (routesDisposed || !CFG.prefetch || yielded() || coreHooks?.isPrefetchSuppressed()) return false;
+  const now = Date.now();
+  if (doc.hidden || now < pausedUntil || (navigator as any).connection?.saveData) return false;
+  if (win.location.pathname.toLowerCase().includes('/compare')) return false;
+  return true;
+}
+
 export function scheduleAutoPrefetch(yielded: () => boolean, delay = 600) {
-  clearTimeout(autoPrefetchTimer);
-  autoPrefetchTimer = setTimeout(() => {
+  autoPrefetchCancel?.();
+  autoPrefetchCancel = null;
+  clearPendingAutoPrefetchTimers();
+  if (routesDisposed || !routeTimers) return;
+  autoPrefetchCancel = routeTimers.timeout(() => {
+    autoPrefetchCancel = null;
+    if (routesDisposed) return;
     attempt(() => autoPrefetchListsForCurrentRoute(yielded));
   }, delay);
 }
 
 export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
-  if (!CFG.prefetch || yielded() || coreHooks?.isPrefetchSuppressed()) return;
-  const now = Date.now();
-  if (doc.hidden || now < pausedUntil || (navigator as any).connection?.saveData) return;
+  clearPendingAutoPrefetchTimers();
+  if (!canRunAutoPrefetch(yielded)) return;
 
   const path = win.location.pathname;
-  if (path.toLowerCase().includes('/compare')) {
-    // Compare view directly coordinates loading the active comparison collections.
-    // Avoid scheduling conflicting or unrelated background prefetches (e.g. manga while comparing anime).
-    return;
-  }
+  const scheduledPath = path;
   const viewer = getViewerFromWindow();
   const myId = viewer.id;
   const myName = viewer.name || null;
@@ -347,7 +410,7 @@ export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
   let subRoute = '';
 
   if (userMatch) {
-    const targetUser = decodeURIComponent(userMatch[1]);
+    const targetUser = safeDecodeURIComponent(userMatch[1]);
     subRoute = (userMatch[2] || '').toLowerCase();
     const isMe =
       (myName && targetUser.toLowerCase() === myName.toLowerCase()) ||
@@ -360,40 +423,46 @@ export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
     }
   }
 
+  const scheduleWorkerPrefetch = (
+    type: 'ANIME' | 'MANGA',
+    userId: number,
+    userName: string | undefined,
+    delay: number
+  ) => {
+    if (routesDisposed || !routeTimers) return;
+    let settled = false;
+    let cancel: CleanupFn = () => {};
+    cancel = routeTimers.timeout(() => {
+      settled = true;
+      pendingAutoPrefetchCancels.delete(cancel);
+      if (routesDisposed || win.location.pathname !== scheduledPath || !canRunAutoPrefetch(yielded)) return;
+      attempt(() => prefetchWorkerList(type, userId, userName, yielded));
+    }, delay);
+    if (!settled) pendingAutoPrefetchCancels.add(cancel);
+  };
+
   if (isAnotherUserPage) {
     fastLoadRpcLog?.debug('Auto-prefetching for target user:', otherUser, 'subRoute:', subRoute);
     if (subRoute !== 'animelist') {
-      setTimeout(() => {
-        prefetchWorkerList('ANIME', otherUserId, otherUser);
-      }, 100);
+      scheduleWorkerPrefetch('ANIME', otherUserId, otherUser, 100);
     }
     if (subRoute !== 'mangalist') {
-      setTimeout(() => {
-        prefetchWorkerList('MANGA', otherUserId, otherUser);
-      }, 300);
+      scheduleWorkerPrefetch('MANGA', otherUserId, otherUser, 300);
     }
 
     if (myId || myName) {
-      setTimeout(() => {
-        prefetchWorkerList('ANIME', myId, myName || undefined);
-      }, 500);
-      setTimeout(() => {
-        prefetchWorkerList('MANGA', myId, myName || undefined);
-      }, 800);
+      scheduleWorkerPrefetch('ANIME', myId, myName || undefined, 500);
+      scheduleWorkerPrefetch('MANGA', myId, myName || undefined, 800);
     }
   } else {
     if (myId || myName) {
       const isMyAnimePage = path.includes('/animelist') && (myName ? path.toLowerCase().includes(myName.toLowerCase()) : true);
       const isMyMangaPage = path.includes('/mangalist') && (myName ? path.toLowerCase().includes(myName.toLowerCase()) : true);
       if (!isMyAnimePage) {
-        setTimeout(() => {
-          prefetchWorkerList('ANIME', myId, myName || undefined);
-        }, 100);
+        scheduleWorkerPrefetch('ANIME', myId, myName || undefined, 100);
       }
       if (!isMyMangaPage) {
-        setTimeout(() => {
-          prefetchWorkerList('MANGA', myId, myName || undefined);
-        }, 300);
+        scheduleWorkerPrefetch('MANGA', myId, myName || undefined, 300);
       }
     }
   }
@@ -402,7 +471,8 @@ export function autoPrefetchListsForCurrentRoute(yielded: () => boolean) {
 export function installPointerPrefetch(
   yielded: () => boolean,
   listen: (t: EventTarget, type: string, fn: any, opts?: any) => void = (t, type, fn, opts) =>
-    t.addEventListener(type, fn, opts)
+    t.addEventListener(type, fn, opts),
+  timeout: FeatureContext['timeout'] | undefined = routeTimers?.timeout
 ) {
   const linkOf = (event: any) => event.target?.closest?.('a[href]') || null;
   const opts = { capture: true, passive: true };
@@ -411,18 +481,34 @@ export function installPointerPrefetch(
     doc,
     'pointerover',
     (event: any) => {
+      if (routesDisposed) return;
       if (event.pointerType && event.pointerType !== 'mouse') return;
       const anchor = linkOf(event);
-      clearTimeout(dwellTimer);
-      if (anchor) dwellTimer = setTimeout(() => prefetchFor(anchor, yielded), CFG.prefetchDwellMs);
+      dwellCancel?.();
+      dwellCancel = null;
+      if (anchor && timeout) {
+        dwellCancel = timeout(() => {
+          dwellCancel = null;
+          if (!routesDisposed) prefetchFor(anchor, yielded);
+        }, CFG.prefetchDwellMs);
+      }
     },
     opts
   );
-  listen(doc, 'pointerout', () => clearTimeout(dwellTimer), opts);
+  listen(
+    doc,
+    'pointerout',
+    () => {
+      dwellCancel?.();
+      dwellCancel = null;
+    },
+    opts
+  );
   listen(
     doc,
     'pointerdown',
     (event: any) => {
+      if (routesDisposed) return;
       const anchor = linkOf(event);
       if (anchor) prefetchFor(anchor, yielded);
     },

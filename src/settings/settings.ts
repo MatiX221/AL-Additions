@@ -26,6 +26,44 @@ function cloneJsonValue<T>(val: T): T {
   return out as T;
 }
 
+function parseAndNormalizeNumber(v: any, r?: SettingRow): { ok: true; value: number } | { ok: false } {
+  if (typeof v !== 'number' && typeof v !== 'string') return { ok: false };
+  if (typeof v === 'string' && v.trim() === '') return { ok: false };
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return { ok: false };
+  const min = r?.min ?? 0;
+  const max = r?.max ?? 100;
+  return { ok: true, value: Math.max(min, Math.min(max, n)) };
+}
+
+function parseAndValidateJson(v: any, r?: SettingRow): { ok: true; value: any } | { ok: false } {
+  if (v == null) return { ok: false };
+  let val = v;
+  if (typeof val === 'string') {
+    try {
+      val = JSON.parse(val);
+    } catch (_) {
+      return { ok: false };
+    }
+  }
+  val = cloneJsonValue(val);
+  if (r?.validate) {
+    let check: any;
+    try {
+      check = r.validate(val);
+    } catch (_) {
+      return { ok: false };
+    }
+    if (check === false) return { ok: false };
+    if (check && typeof check === 'object') {
+      if (check.valid === false) return { ok: false };
+      const resolved = check.value ?? check.tiers ?? check.config ?? check.overrides ?? val;
+      return { ok: true, value: cloneJsonValue(resolved) };
+    }
+  }
+  return { ok: true, value: val };
+}
+
 const textIO = {
   read: (el: HTMLInputElement | HTMLSelectElement) => el.value,
   write: (el: HTMLInputElement | HTMLSelectElement, v: any) => {
@@ -45,7 +83,7 @@ export const TYPES: Record<
   toggle: {
     normalize: (v) => parseToggle(v),
     html: (r, v) =>
-      `<span class="ala-switch"><input type="checkbox" data-key="${r.key}" ${v ? 'checked' : ''}><span class="ala-slider"></span></span>`,
+      `<span class="ala-switch"><input type="checkbox" data-key="${esc(r.key)}" ${v ? 'checked' : ''}><span class="ala-slider"></span></span>`,
     read: (el: HTMLInputElement) => el.checked,
     write: (el: HTMLInputElement, v) => {
       el.checked = !!v;
@@ -53,23 +91,18 @@ export const TYPES: Record<
   },
   number: {
     normalize: (v, r) => {
-      if (typeof v !== 'number' && typeof v !== 'string') return r?.def;
-      if (typeof v === 'string' && v.trim() === '') return r?.def;
-      const n = Math.round(Number(v));
-      if (!Number.isFinite(n)) return r?.def;
-      const min = r?.min ?? 0;
-      const max = r?.max ?? 100;
-      return Math.max(min, Math.min(max, n));
+      const res = parseAndNormalizeNumber(v, r);
+      return res.ok ? res.value : r?.def;
     },
     html: (r, v) =>
-      `<input type="number" data-key="${r.key}" min="${r.min ?? 0}" max="${r.max ?? 100}" step="1" inputmode="numeric" value="${esc(v)}">`,
+      `<input type="number" data-key="${esc(r.key)}" min="${esc(r.min ?? 0)}" max="${esc(r.max ?? 100)}" step="1" inputmode="numeric" value="${esc(v)}">`,
     ...textIO
   },
   select: {
     normalize: (v, r) => (r?.options?.some((o) => o[0] === v) ? v : r?.def),
     html: (r, v) =>
-      `<select data-key="${r.key}">${(r.options || [])
-        .map(([val, label]) => `<option value="${val}" ${v === val ? 'selected' : ''}>${label}</option>`)
+      `<select data-key="${esc(r.key)}">${(r.options || [])
+        .map(([val, label]) => `<option value="${esc(val)}" ${v === val ? 'selected' : ''}>${esc(label)}</option>`)
         .join('')}</select>`,
     ...textIO
   },
@@ -90,7 +123,7 @@ export const TYPES: Record<
       return arr.length ? arr : Array.isArray(r?.def) ? r.def.slice() : [];
     },
     html: (r, v) =>
-      `<input type="text" data-key="${r.key}" value="${esc((v || []).join(', '))}" autocomplete="off" autocapitalize="off" spellcheck="false">`,
+      `<input type="text" data-key="${esc(r.key)}" value="${esc((v || []).join(', '))}" autocomplete="off" autocapitalize="off" spellcheck="false">`,
     read: (el: HTMLInputElement) => el.value,
     write: (el: HTMLInputElement, v: string[]) => {
       el.value = v.join(', ');
@@ -98,36 +131,11 @@ export const TYPES: Record<
   },
   json: {
     normalize: (v, r) => {
-      if (v == null) return cloneJsonValue(r?.def);
-      let val = v;
-      if (typeof v === 'string') {
-        try {
-          val = JSON.parse(v);
-        } catch (_) {
-          return cloneJsonValue(r?.def);
-        }
-      }
-      if (val === r?.def) {
-        val = cloneJsonValue(val);
-      }
-      if (r?.validate) {
-        let check: any;
-        try {
-          check = r.validate(val);
-        } catch (_) {
-          return cloneJsonValue(r?.def);
-        }
-        if (check === false) return cloneJsonValue(r?.def);
-        if (check && typeof check === 'object') {
-          if (check.valid === false) return cloneJsonValue(r?.def);
-          const resolved = check.value ?? check.tiers ?? check.config ?? check.overrides ?? val;
-          return resolved === r.def ? cloneJsonValue(r.def) : resolved;
-        }
-      }
-      return val;
+      const res = parseAndValidateJson(v, r);
+      return res.ok ? res.value : cloneJsonValue(r?.def);
     },
     html: (r, v) =>
-      `<input type="hidden" data-key="${r.key}" value="${esc(JSON.stringify(v))}"><button type="button" class="ala-btn ala-btn--secondary ala-btn--edit-json" id="ala-btn-edit-${r.key}">Customize</button>`,
+      `<input type="hidden" data-key="${esc(r.key)}" value="${esc(JSON.stringify(v))}"><button type="button" class="ala-btn ala-btn--secondary ala-btn--edit-json" id="ala-btn-edit-${esc(r.key)}">Customize</button>`,
     read: (el: HTMLInputElement) => {
       try {
         return JSON.parse(el.value);
@@ -241,34 +249,57 @@ function set(key: string, raw: any): void {
   store.set(PREFIX + key, normalized);
 }
 
+function readLegacyLocalStorage(name: string): string | null {
+  try {
+    return localStorage.getItem('ALAdditions:' + name);
+  } catch (_) {
+    return null;
+  }
+}
+
+function normalizeMigratedValue(r: SettingRow, v: any): { ok: true; value: any } | { ok: false } {
+  if (r.type === 'number') return parseAndNormalizeNumber(v, r);
+  if (r.type === 'json') {
+    const res = parseAndValidateJson(v, r);
+    if (!res.ok || res.value == null) return { ok: false };
+    return res;
+  }
+  return { ok: true, value: TYPES[r.type].normalize(v, r) };
+}
+
 function migrate(): void {
   safe(() => {
     // @migration(from: "v0.9.0", kind: "cleanup", sunset: "2-3 releases")
     store.del('al_token');
+  }, 'settings migration: al_token');
 
-    for (const r of Object.values(ROWS)) {
-      if (store.get(PREFIX + r.key, undefined) !== undefined) continue;
+  for (const r of Object.values(ROWS)) {
+    safe(() => {
+      if (store.get(PREFIX + r.key, undefined) !== undefined) return;
       for (const name of r.legacy) {
         // @migration(from: "v0.8.0", kind: "storage", sunset: "2-3 releases")
         let v: any = store.get(PREFIX + name, undefined);
         if (v === undefined) {
           // @migration(from: "pre-0.8.0", kind: "storage", sunset: "2-3 releases")
-          const raw = localStorage.getItem('ALAdditions:' + name);
+          const raw = readLegacyLocalStorage(name);
           if (raw != null) {
             try {
               v = JSON.parse(raw);
             } catch (_) {
+              if (r.type === 'json') continue;
               v = raw;
             }
           }
         }
         if (v !== undefined) {
-          store.set(PREFIX + r.key, v);
+          const normalized = normalizeMigratedValue(r, v);
+          if (!normalized.ok) continue;
+          store.set(PREFIX + r.key, normalized.value);
           break;
         }
       }
-    }
-  }, 'settings migration');
+    }, `settings migration: ${r.key}`);
+  }
 }
 
 export const Settings = { has, get, set, register, registerCoreSetting, migrate };

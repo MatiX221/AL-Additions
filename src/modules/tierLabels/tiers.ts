@@ -33,11 +33,32 @@ export function getTier(rating: number, tiers: TierConfig[]): TierConfig | null 
   return null;
 }
 
-const NAMED_COLORS = new Set([
-  'black', 'white', 'gray', 'grey', 'silver', 'red', 'maroon', 'yellow', 'olive',
-  'lime', 'green', 'aqua', 'cyan', 'teal', 'blue', 'navy', 'fuchsia', 'magenta',
-  'purple', 'orange', 'gold', 'pink', 'brown', 'transparent'
-]);
+const NAMED_COLOR_HEX: Record<string, string | null> = {
+  black: '#000000',
+  white: '#ffffff',
+  gray: '#808080',
+  grey: '#808080',
+  silver: '#c0c0c0',
+  red: '#ff0000',
+  maroon: '#800000',
+  yellow: '#ffff00',
+  olive: '#808000',
+  lime: '#00ff00',
+  green: '#008000',
+  aqua: '#00ffff',
+  cyan: '#00ffff',
+  teal: '#008080',
+  blue: '#0000ff',
+  navy: '#000080',
+  fuchsia: '#ff00ff',
+  magenta: '#ff00ff',
+  purple: '#800080',
+  orange: '#ffa500',
+  gold: '#ffd700',
+  pink: '#ffc0cb',
+  brown: '#a52a2a',
+  transparent: null
+};
 
 export function isValidColor(color: string): boolean {
   if (typeof color !== 'string') return false;
@@ -50,7 +71,7 @@ export function isValidColor(color: string): boolean {
   // Functional CSS: rgb(), rgba(), hsl(), hsla()
   if (/^(rgb|hsl)a?\(\s*[\d.%\s,/+-]+\s*\)$/i.test(s)) return true;
 
-  if (NAMED_COLORS.has(s.toLowerCase())) return true;
+  if (Object.prototype.hasOwnProperty.call(NAMED_COLOR_HEX, s.toLowerCase())) return true;
 
   if (typeof CSS !== 'undefined' && typeof CSS.supports === 'function') {
     try {
@@ -67,6 +88,93 @@ export function isValidColor(color: string): boolean {
   }
 
   return false;
+}
+
+function byteToHex(n: number): string {
+  const clamped = Math.max(0, Math.min(255, Math.round(n)));
+  return clamped.toString(16).padStart(2, '0');
+}
+
+function parseRgbChannel(raw: string): number | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (s.endsWith('%')) {
+    const pct = parseFloat(s.slice(0, -1));
+    return Number.isFinite(pct) ? (pct / 100) * 255 : null;
+  }
+  const num = Number(s);
+  return Number.isFinite(num) ? num : null;
+}
+
+function hslToRgb(h: number, sPct: number, lPct: number): [number, number, number] {
+  const hue = (((h % 360) + 360) % 360) / 360;
+  const s = Math.max(0, Math.min(100, sPct)) / 100;
+  const l = Math.max(0, Math.min(100, lPct)) / 100;
+  if (s === 0) {
+    const v = l * 255;
+    return [v, v, v];
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const hue2rgb = (t: number): number => {
+    let x = t;
+    if (x < 0) x += 1;
+    if (x > 1) x -= 1;
+    if (x < 1 / 6) return p + (q - p) * 6 * x;
+    if (x < 1 / 2) return q;
+    if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+    return p;
+  };
+  return [hue2rgb(hue + 1 / 3) * 255, hue2rgb(hue) * 255, hue2rgb(hue - 1 / 3) * 255];
+}
+
+export function cssColorToHex(color: string): string | null {
+  const s = (color || '').trim();
+  if (!s) return null;
+
+  const m3 = s.match(/^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])[0-9a-fA-F]?$/);
+  if (m3) {
+    return `#${m3[1]}${m3[1]}${m3[2]}${m3[2]}${m3[3]}${m3[3]}`.toLowerCase();
+  }
+  if (/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(s)) {
+    return s.slice(0, 7).toLowerCase();
+  }
+
+  const lower = s.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(NAMED_COLOR_HEX, lower)) {
+    return NAMED_COLOR_HEX[lower];
+  }
+
+  const rgbMatch = s.match(/^rgba?\(\s*([^)]+)\s*\)$/i);
+  if (rgbMatch) {
+    const body = rgbMatch[1].split('/')[0].trim();
+    const parts = body.includes(',') ? body.split(',') : body.split(/\s+/);
+    if (parts.length >= 3) {
+      const r = parseRgbChannel(parts[0]);
+      const g = parseRgbChannel(parts[1]);
+      const b = parseRgbChannel(parts[2]);
+      if (r !== null && g !== null && b !== null) {
+        return `#${byteToHex(r)}${byteToHex(g)}${byteToHex(b)}`;
+      }
+    }
+  }
+
+  const hslMatch = s.match(/^hsla?\(\s*([^)]+)\s*\)$/i);
+  if (hslMatch) {
+    const body = hslMatch[1].split('/')[0].trim();
+    const parts = body.includes(',') ? body.split(',') : body.split(/\s+/);
+    if (parts.length >= 3) {
+      const h = parseFloat(parts[0]);
+      const sat = parseFloat(parts[1]);
+      const light = parseFloat(parts[2]);
+      if (Number.isFinite(h) && Number.isFinite(sat) && Number.isFinite(light)) {
+        const [r, g, b] = hslToRgb(h, sat, light);
+        return `#${byteToHex(r)}${byteToHex(g)}${byteToHex(b)}`;
+      }
+    }
+  }
+
+  return null;
 }
 
 export function normalizeHexColor(color: string): string {

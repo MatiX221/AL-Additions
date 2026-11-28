@@ -666,7 +666,7 @@ describe('AniList API — B1-15: FastLoadCacheBridge fault isolation', () => {
     expect(mutRes.SaveMediaListEntry.score).toBe(9);
 
     const saved = await anilist.MediaData.save(321, 'ANIME', { score: 10, progress: 12, status: 'COMPLETED' });
-    expect(saved.score).toBe(10);
+    expect(saved?.score).toBe(10);
 
     unsubBridge();
     (window as any).__ALFL_CLEAR__ = () => {
@@ -1439,5 +1439,627 @@ describe('AniList API — Session peek(), getters, recordHint() & document-start
     anilist.AniList.session.recordHint({ userId: 100, username: 'Alice' });
     expect(helpers.store.get('al_user_id', null)).toBe(100);
     expect(helpers.store.get('al_username', null)).toBe('Alice');
+  });
+});
+
+describe('AniList API — BUG-18..BUG-24 regressions', () => {
+  it('BUG-18: separates Media entityCache entries by resolved type and bypasses cache on invalid/unresolvable explicit type', async () => {
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const varQuery = 'query ($id: Int, $type: MediaType) { Media(id: $id, type: $type) { id title { romaji } } }';
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Cowboy Bebop (Anime)' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Cowboy Bebop (Manga)' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Cowboy Bebop (Untyped)' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 2, title: { romaji: 'InvalidType-1' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 2, title: { romaji: 'InvalidType-2' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 2, title: { romaji: 'BadLit-1' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 2, title: { romaji: 'BadLit-2' } } } }));
+
+    const anime1 = await anilist.AniList.query(varQuery, { id: 1, type: 'ANIME' });
+    const manga1 = await anilist.AniList.query(varQuery, { id: 1, type: 'MANGA' });
+    expect(anime1.Media.title.romaji).toBe('Cowboy Bebop (Anime)');
+    expect(manga1.Media.title.romaji).toBe('Cowboy Bebop (Manga)');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const animeLiteralHit = await anilist.AniList.query(
+      'query { Media(id: 1, type: ANIME) { id title { romaji } } }',
+      {}
+    );
+    const mangaLiteralHit = await anilist.AniList.query(
+      'query { Media(id: 1, type: MANGA) { id title { romaji } } }',
+      {}
+    );
+    expect(animeLiteralHit.Media.title.romaji).toBe('Cowboy Bebop (Anime)');
+    expect(mangaLiteralHit.Media.title.romaji).toBe('Cowboy Bebop (Manga)');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const untyped1 = await anilist.AniList.query('query ($id: Int) { Media(id: $id) { id title { romaji } } }', { id: 1 });
+    expect(untyped1.Media.title.romaji).toBe('Cowboy Bebop (Untyped)');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await anilist.AniList.query(varQuery, { id: 2, type: 'NOVEL' as any });
+    await anilist.AniList.query(varQuery, { id: 2, type: 'NOVEL' as any });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    await anilist.AniList.query('query { Media(id: 2, type: NOVEL) { id title { romaji } } }', {});
+    await anilist.AniList.query('query { Media(id: 2, type: NOVEL) { id title { romaji } } }', {});
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+  });
+
+  it('BUG-19: matches invalidate prefixes on colon boundaries and invalidates both ANIME/MANGA when invalidateMediaList omits type', async () => {
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const mediaQ = 'query ($id: Int, $type: MediaType) { Media(id: $id, type: $type) { id title { romaji } } }';
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Anime1-Old' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Manga1-Old' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 10, title: { romaji: 'Anime10-Keep' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Anime1-New' } } } }))
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 1, title: { romaji: 'Manga1-New' } } } }));
+
+    await anilist.AniList.query(mediaQ, { id: 1, type: 'ANIME' });
+    await anilist.AniList.query(mediaQ, { id: 1, type: 'MANGA' });
+    await anilist.AniList.query(mediaQ, { id: 10, type: 'ANIME' });
+
+    anilist.AniList.invalidate('Media:1:');
+
+    const media10 = await anilist.AniList.query(mediaQ, { id: 10, type: 'ANIME' });
+    expect(media10.Media.title.romaji).toBe('Anime10-Keep');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    const media1Anime = await anilist.AniList.query(mediaQ, { id: 1, type: 'ANIME' });
+    const media1Manga = await anilist.AniList.query(mediaQ, { id: 1, type: 'MANGA' });
+    expect(media1Anime.Media.title.romaji).toBe('Anime1-New');
+    expect(media1Manga.Media.title.romaji).toBe('Manga1-New');
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(1, 'alice', 101) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(1, 'alice', 102) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(2, 'alice2', 201) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(3, 'bob', 301) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(1, 'alice', 111) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(1, 'alice', 112) } }));
+
+    await anilist.AniList.getMediaList('alice', 'ANIME');
+    await anilist.AniList.getMediaList('alice', 'MANGA');
+    await anilist.AniList.getMediaList('alice2', 'ANIME');
+    await anilist.AniList.getMediaList('bob', 'ANIME');
+
+    anilist.AniList.invalidateMediaList('alice');
+
+    const alice2StillCached = await anilist.AniList.getMediaList('alice2', 'ANIME');
+    const bobStillCached = await anilist.AniList.getMediaList('bob', 'ANIME');
+    expect(alice2StillCached.allEntries[0].mediaId).toBe(201);
+    expect(bobStillCached.allEntries[0].mediaId).toBe(301);
+    expect(fetchMock).toHaveBeenCalledTimes(9);
+
+    const aliceAnimeFresh = await anilist.AniList.getMediaList('alice', 'ANIME');
+    const aliceMangaFresh = await anilist.AniList.getMediaList('alice', 'MANGA');
+    expect(aliceAnimeFresh.allEntries[0].mediaId).toBe(111);
+    expect(aliceMangaFresh.allEntries[0].mediaId).toBe(112);
+    expect(fetchMock).toHaveBeenCalledTimes(11);
+  });
+
+  it('BUG-20: scales retry backoff positively from elapsed attempt when retries > 4 or non-finite', async () => {
+    vi.useFakeTimers();
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    for (let i = 0; i < 6; i++) {
+      fetchMock.mockResolvedValueOnce(jsonRes({ errors: [{ message: 'Server busy' }] }, 502));
+    }
+    fetchMock.mockResolvedValueOnce(jsonRes({ data: { Media: { id: 77 } } }));
+
+    const pending = anilist.AniList.query('query { Media(id: 77) { id } }', {}, { retries: 6 });
+    await vi.runAllTimersAsync();
+    const res = await pending;
+    expect(res).toEqual({ Media: { id: 77 } });
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+
+    const backoffDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((ms): ms is number => typeof ms === 'number' && ms >= 1000);
+    expect(backoffDelays).toEqual([1500, 3000, 4500, 6000, 7500, 9000]);
+
+    setTimeoutSpy.mockClear();
+    fetchMock.mockReset();
+    for (let i = 0; i < 4; i++) {
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+    }
+    const nanRetryPromise = anilist.AniList.query('query { Media(id: 78) { id } }', {}, Number.NaN);
+    const nanHandled = nanRetryPromise.catch((err) => err);
+    await vi.runAllTimersAsync();
+    const err = await nanHandled;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/AniList network error/);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const nanDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((ms): ms is number => typeof ms === 'number' && ms >= 1000);
+    expect(nanDelays).toEqual([1500, 3000, 4500]);
+  });
+
+  it('BUG-21: normalizes lists[i].entries identically to allEntries in parseRpcMediaList', async () => {
+    const { bus, anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const rpcCache = new Map<string, any>([
+      [
+        'rpc:MediaListCollection:ANIME:505:{}',
+        {
+          time: Date.now(),
+          msg: {
+            result: {
+              entities: {
+                user: { '505': { id: 505, name: 'NormalizrUser' } },
+                media: {
+                  '4242': { id: 4242, idMal: 888, format: 'TV', title: { userPreferred: 'Expanded Title' } }
+                },
+                listEntry: {
+                  '9001': { id: 9001, media: 4242, status: 'CURRENT', score: 9, progress: 5 }
+                },
+                listSection: {
+                  '0': { name: 'Watching', isCustomList: false, status: 'CURRENT', entries: [9001] }
+                }
+              }
+            }
+          }
+        }
+      ]
+    ]);
+
+    bus.CoreHooks.registerCacheBridge({
+      getGqlStore: () => undefined,
+      getRpcCache: () => rpcCache,
+      getRpcInflight: () => undefined,
+      getUserMap: () => undefined,
+      getIdMap: () => undefined,
+      clear: () => {},
+      clearAuth: () => {}
+    });
+
+    const result = await anilist.AniList.getMediaList(505, 'ANIME');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.allEntries).toHaveLength(1);
+    expect(result.lists).toHaveLength(1);
+    expect(result.lists[0].entries).toHaveLength(1);
+    expect(result.lists[0].entries[0]).toBe(result.allEntries[0]);
+    expect(result.lists[0].entries[0].mediaId).toBe(4242);
+    expect(result.lists[0].entries[0].media).toEqual({
+      id: 4242,
+      idMal: 888,
+      format: 'TV',
+      title: { userPreferred: 'Expanded Title' }
+    });
+  });
+
+  it('BUG-22: preserves all-digit options.userName and rejects empty/0/NaN/negative targets before fetching', async () => {
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    fetchMock.mockResolvedValueOnce(
+      jsonRes({ data: { MediaListCollection: makeMlcPayload(888, '12345', 404) } })
+    );
+
+    const digitUserRes = await anilist.AniList.getMediaList('12345', 'ANIME', { userName: '12345' });
+    expect(digitUserRes.allEntries[0].mediaId).toBe(404);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.variables).toEqual({ userId: undefined, userName: '12345', type: 'ANIME' });
+
+    for (const badTarget of [0, '0', Number.NaN, -5, 1.5, '', '   '] as const) {
+      await expect(anilist.AniList.getMediaList(badTarget, 'ANIME')).rejects.toThrow(
+        /Invalid AniList user target/
+      );
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('BUG-23: ignores non-numeric __NUXT__ user ids in peek(), syncFromPage(), and hasAuth() without returning NaN or wiping valid sessions', async () => {
+    const { bus, helpers, anilist } = await loadFreshAniList();
+    const clearSpy = vi.fn();
+    const clearAuthSpy = vi.fn();
+
+    bus.CoreHooks.registerCacheBridge({
+      getGqlStore: () => undefined,
+      getRpcCache: () => undefined,
+      getRpcInflight: () => undefined,
+      getUserMap: () => undefined,
+      getIdMap: () => undefined,
+      clear: clearSpy,
+      clearAuth: clearAuthSpy
+    });
+
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 'abc', name: 'alice' } } } };
+
+    expect(anilist.AniList.hasAuth()).toBe(false);
+    expect(anilist.AniList.session.peek()).toEqual({ userId: null, username: null, scoreFormat: null });
+    expect(Number.isNaN(anilist.AniList.session.userId as any)).toBe(false);
+
+    helpers.store.set('al_user_id', 100);
+    helpers.store.set('al_username', 'alice');
+    helpers.store.set('al_score_format', 'POINT_10');
+
+    expect(anilist.AniList.session.peek({ reconcile: true })).toEqual({
+      userId: 100,
+      username: 'alice',
+      scoreFormat: 'POINT_10'
+    });
+    anilist.AniList.session.syncFromPage?.();
+    expect(clearSpy).not.toHaveBeenCalled();
+    expect(clearAuthSpy).not.toHaveBeenCalled();
+    expect(helpers.store.get('al_user_id', null)).toBe(100);
+
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 'abc', name: 'bob' } } } };
+    anilist.AniList.session.syncFromPage?.();
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+    expect(helpers.store.get('al_user_id', null)).toBeNull();
+  });
+
+  it('BUG-24: clears FastLoad cache bridge both before and after GraphQL mutations settle', async () => {
+    const { bus, anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const clearSpy = vi.fn();
+    bus.CoreHooks.registerCacheBridge({
+      getGqlStore: () => undefined,
+      getRpcCache: () => undefined,
+      getRpcInflight: () => undefined,
+      getUserMap: () => undefined,
+      getIdMap: () => undefined,
+      clear: clearSpy,
+      clearAuth: () => {}
+    });
+
+    let resolveMutation!: (res: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveMutation = resolve;
+        })
+    );
+
+    const mutPromise = anilist.AniList.query('mutation { SaveMediaListEntry(mediaId: 1, progress: 2) { id } }');
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    resolveMutation(jsonRes({ data: { SaveMediaListEntry: { id: 99 } } }));
+    expect(await mutPromise).toEqual({ SaveMediaListEntry: { id: 99 } });
+    expect(clearSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('AniList API — IMP-05: Waiter-isolated AbortSignal propagation & cancellation', () => {
+  it('isolates AbortSignal across shared inflight exact & entity waiters and aborts fetch only when zero waiters remain', async () => {
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    // Pre-aborted signal rejects without fetching
+    const preAc = new AbortController();
+    preAc.abort();
+    await expect(
+      anilist.AniList.query('query { Viewer { id } }', {}, { signal: preAc.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // Shared exact + superset/subset entity waiters: aborting A leaves B alive
+    let resolveFirst!: (res: Response) => void;
+    let firstInitSignal: AbortSignal | undefined;
+    fetchMock.mockImplementationOnce((_url: string, init: RequestInit) => {
+      firstInitSignal = init.signal ?? undefined;
+      return new Promise<Response>((resolve) => {
+        resolveFirst = resolve;
+      });
+    });
+
+    const acA = new AbortController();
+    const acB = new AbortController();
+    const supersetQ = 'query ($id: Int) { Media(id: $id) { id title { romaji english } episodes status } }';
+    const subsetQ = 'query ($id: Int) { Media(id: $id) { id title { romaji } } }';
+
+    const pA = anilist.AniList.query(supersetQ, { id: 501 }, { signal: acA.signal });
+    const pB = anilist.AniList.query(subsetQ, { id: 501 }, { signal: acB.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(firstInitSignal?.aborted).toBe(false);
+
+    acA.abort();
+    await expect(pA).rejects.toMatchObject({ name: 'AbortError' });
+    expect(firstInitSignal?.aborted).toBe(false);
+
+    resolveFirst(
+      jsonRes({
+        data: { Media: { id: 501, title: { romaji: 'Alive', english: 'Alive' }, episodes: 12, status: 'FINISHED' } }
+      })
+    );
+    const resB = await pB;
+    expect(resB.Media.title.romaji).toBe('Alive');
+
+    // When all waiters abort, shared fetch signal aborts and inflight entry is evicted cleanly
+    let secondInitSignal: AbortSignal | undefined;
+    fetchMock
+      .mockImplementationOnce((_url: string, init: RequestInit) => {
+        secondInitSignal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      })
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 502, title: { romaji: 'Recovered' } } } }));
+
+    const ac1 = new AbortController();
+    const ac2 = new AbortController();
+    const p1 = anilist.AniList.query(subsetQ, { id: 502 }, { signal: ac1.signal });
+    const p2 = anilist.AniList.query(subsetQ, { id: 502 }, { signal: ac2.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    ac1.abort();
+    await expect(p1).rejects.toMatchObject({ name: 'AbortError' });
+    expect(secondInitSignal?.aborted).toBe(false);
+
+    ac2.abort();
+    await expect(p2).rejects.toMatchObject({ name: 'AbortError' });
+    expect(secondInitSignal?.aborted).toBe(true);
+
+    const recovered = await anilist.AniList.query(subsetQ, { id: 502 });
+    expect(recovered.Media.title.romaji).toBe('Recovered');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('aborts retry backoff sleep immediately without waiting for remaining delay', async () => {
+    vi.useFakeTimers();
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error('transient'));
+    window.fetch = fetchMock as any;
+
+    const ac = new AbortController();
+    const pending = anilist.AniList.query('query { Media(id: 600) { id } }', {}, { retries: 3, signal: ac.signal });
+    const handled = pending.catch((e) => e);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    ac.abort();
+    const err = await handled;
+    expect(err?.name).toBe('AbortError');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('propagates AbortSignal through getMediaList and viewer', async () => {
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn(() => new Promise<Response>(() => {}));
+    window.fetch = fetchMock as any;
+    (window as any).__NUXT__ = { state: { auth: { user: { id: 100, name: 'Alice' } } } };
+
+    const acList = new AbortController();
+    const listPromise = anilist.AniList.getMediaList(100, 'ANIME', { signal: acList.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    acList.abort();
+    await expect(listPromise).rejects.toMatchObject({ name: 'AbortError' });
+
+    const acViewer = new AbortController();
+    const viewerPromise = anilist.AniList.viewer(true, { signal: acViewer.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    acViewer.abort();
+    await expect(viewerPromise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('AniList API — Cycle 2: BUG-13, BUG-14, BUG-15', () => {
+  it('BUG-13: bypasses incomplete entityCache MediaListCollection records from partial query() calls in getMediaList()', async () => {
+    const { anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonRes({
+          data: {
+            MediaListCollection: {
+              lists: [{ entries: [{ id: 101 }] }]
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonRes({
+          data: {
+            MediaListCollection: {
+              user: { id: 500, name: 'Alice' },
+              lists: [
+                {
+                  name: 'Completed',
+                  status: 'COMPLETED',
+                  entries: [{ id: 102, mediaId: 202, status: 'COMPLETED', score: 8, progress: 12 }]
+                }
+              ]
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(500, 'Alice', 303) } }));
+
+    // Minimal partial query caches MediaListCollection:ANIME:500 with incomplete fields
+    await anilist.AniList.query(
+      'query ($userId: Int, $type: MediaType) { MediaListCollection(userId: $userId, type: $type) { lists { entries { id } } } }',
+      { userId: 500, type: 'ANIME' }
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Partial query with >12 fields (isSuperset heuristic true) but still missing required fields like completedAt/media.title.native
+    await anilist.AniList.query(
+      'query ($userId: Int, $type: MediaType) { MediaListCollection(userId: $userId, type: $type) { user { id name } lists { name status entries { id mediaId status score progress repeat priority notes media { id format } } } } }',
+      { userId: 500, type: 'ANIME' }
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // getMediaList() must bypass the incomplete entityCache record and fetch the full list
+    const full = await anilist.AniList.getMediaList(500, 'ANIME');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(full.allEntries[0].mediaId).toBe(303);
+    expect(full.allEntries[0].media?.title?.userPreferred).toBe('Media 303');
+
+    // Subsequent getMediaList() now hits entityCache with complete fields
+    const cached = await anilist.AniList.getMediaList(500, 'ANIME');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(cached.allEntries[0].mediaId).toBe(303);
+  });
+
+  it('BUG-14: awaits identical shared rpcInflight flight at most once and falls back to /graphql on upstream AbortError', async () => {
+    vi.useFakeTimers();
+    const { bus, anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    const userMap = new Map<string, number>([['alice', 500]]);
+    const idMap = new Map<number, string>([[500, 'alice']]);
+    const sharedStalledFlight = { promise: new Promise<any>(() => {}) };
+    const rpcInflight = new Map<string, { promise: Promise<any> }>([
+      ['rpc:MediaListCollection:ANIME:500:{}', sharedStalledFlight],
+      ['rpc:MediaListCollection:ANIME:alice:{}', sharedStalledFlight],
+      ['rpc:MediaListCollection:ANIME:Alice:{}', sharedStalledFlight]
+    ]);
+
+    bus.CoreHooks.registerCacheBridge({
+      getGqlStore: () => undefined,
+      getRpcCache: () => undefined,
+      getRpcInflight: () => rpcInflight,
+      getUserMap: () => userMap,
+      getIdMap: () => idMap,
+      clear: () => {},
+      clearAuth: () => {}
+    });
+
+    fetchMock.mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(500, 'alice', 404) } }));
+
+    const listPromise = anilist.AniList.getMediaList(500, 'ANIME');
+    // Only a single 5000 ms timeout should be scheduled across all 3 matching keys sharing one flight
+    await vi.advanceTimersByTimeAsync(5000);
+    const res = await listPromise;
+    expect(res.allEntries[0].mediaId).toBe(404);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const inflightTimeouts = setTimeoutSpy.mock.calls.filter((c) => c[1] === 5000);
+    expect(inflightTimeouts).toHaveLength(1);
+
+    // Upstream FastLoad AbortError must fall back cleanly to /graphql when caller signal is not aborted
+    rpcInflight.clear();
+    const upstreamAbortFlight = {
+      promise: Promise.reject(new DOMException('FastLoad yielded', 'AbortError'))
+    };
+    rpcInflight.set('rpc:MediaListCollection:ANIME:501:{}', upstreamAbortFlight);
+    fetchMock.mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(501, 'bob', 505) } }));
+
+    const callerAc = new AbortController();
+    const fallbackRes = await anilist.AniList.getMediaList(501, 'ANIME', { signal: callerAc.signal });
+    expect(fallbackRes.allEntries[0].mediaId).toBe(505);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Caller's own AbortSignal still aborts getMediaList immediately without calling /graphql
+    rpcInflight.clear();
+    rpcInflight.set('rpc:MediaListCollection:ANIME:502:{}', { promise: new Promise<any>(() => {}) });
+    const abortAc = new AbortController();
+    const abortedPromise = anilist.AniList.getMediaList(502, 'ANIME', { signal: abortAc.signal });
+    const handledAbort = abortedPromise.catch((err) => err);
+    abortAc.abort();
+    const err = await handledAbort;
+    expect(err?.name).toBe('AbortError');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('BUG-15: clamps negative clock-skew resetDelay to 0 so HTTP 429 without Retry-After applies 60000 ms cooldown', async () => {
+    vi.useFakeTimers();
+    const now = 1_700_000_005_000;
+    vi.setSystemTime(now);
+
+    const { anilist } = await loadFreshAniList();
+    const limiterMod = await import('../src/utils/limiter');
+    const limitSpy = vi.spyOn(limiterMod.RateLimiter.prototype, 'limit');
+
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ errors: [{ message: 'Too Many Requests' }] }), {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-RateLimit-Reset': String(Math.floor((now - 5000) / 1000))
+          }
+        })
+      )
+      .mockResolvedValueOnce(jsonRes({ data: { Media: { id: 88 } } }));
+
+    const res = await anilist.AniList.query('query { Media(id: 88) { id } }', {}, { retries: 1 });
+    expect(res).toEqual({ Media: { id: 88 } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(limitSpy).toHaveBeenCalledWith(60000);
+    expect(anilist.AniList.resumeAt()).toBe(now + 60000);
+  });
+
+  it('BUG-25: rejects minimal or incomplete FastLoad MediaListCollection cache entries and falls back to /graphql', async () => {
+    const { bus, anilist } = await loadFreshAniList();
+    const fetchMock = vi.fn();
+    window.fetch = fetchMock as any;
+
+    const gqlStore = new Map<string, any>([
+      // Minimal { lists { name } } payload lacking entries array
+      [
+        'gql:MediaListCollection:ANIME:500:{}',
+        encodeGqlSnap({ data: { MediaListCollection: { lists: [{ name: 'Watching' }] } } })
+      ],
+      // Partial entry payload missing media & status
+      [
+        'gql:MediaListCollection:ANIME:502:{}',
+        encodeGqlSnap({
+          data: { MediaListCollection: { lists: [{ name: 'Watching', entries: [{ id: 1, mediaId: 42 }] }] } }
+        })
+      ]
+    ]);
+    const rpcCache = new Map<string, any>([
+      [
+        'rpc:MediaListCollection:ANIME:501:{}',
+        {
+          time: Date.now(),
+          msg: { result: { MediaListCollection: { lists: [{ name: 'Watching', entries: [{ id: 2, mediaId: 99 }] }] } } }
+        }
+      ]
+    ]);
+
+    bus.CoreHooks.registerCacheBridge({
+      getGqlStore: () => gqlStore,
+      getRpcCache: () => rpcCache,
+      getRpcInflight: () => undefined,
+      getUserMap: () => undefined,
+      getIdMap: () => undefined,
+      clear: () => {},
+      clearAuth: () => {}
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(500, 'Alice', 701) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(502, 'Bob', 702) } }))
+      .mockResolvedValueOnce(jsonRes({ data: { MediaListCollection: makeMlcPayload(501, 'Carol', 703) } }));
+
+    const r500 = await anilist.AniList.getMediaList(500, 'ANIME');
+    expect(r500.allEntries[0].mediaId).toBe(701);
+
+    const r502 = await anilist.AniList.getMediaList(502, 'ANIME');
+    expect(r502.allEntries[0].mediaId).toBe(702);
+
+    const r501 = await anilist.AniList.getMediaList(501, 'ANIME');
+    expect(r501.allEntries[0].mediaId).toBe(703);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

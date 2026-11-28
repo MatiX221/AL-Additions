@@ -1,5 +1,5 @@
 import { esc } from '../../utils/helpers';
-import { DEFAULT_TIERS, validateTiers, normalizeHexColor, type TierConfig } from './tiers';
+import { DEFAULT_TIERS, validateTiers, cssColorToHex, type TierConfig } from './tiers';
 import type { JsonEditorContext } from '../../types';
 
 const buildTierModalCss = (sel: string): string => `
@@ -65,31 +65,51 @@ export function openTierEditor(ctx: JsonEditorContext): void {
     `,
     footerHtml: `
       <button class="ala-btn ala-btn--primary" id="ala-tier-btn-save" type="button">Apply Tiers</button>
-      <button class="ala-btn" id="ala-tier-btn-cancel" type="button">Cancel</button>
+      <button class="ala-btn" id="ala-tier-btn-cancel" type="button" data-ala-close>Cancel</button>
       <span class="ala-tier-status" id="ala-tier-status" role="status"></span>
-    `
+    `,
+    style: buildTierModalCss
   });
-  ctx.addStyle('tier-modal', () => buildTierModalCss(`#${modal.backdrop.id}`));
   const { backdrop, close } = modal;
   const tbody = backdrop.querySelector('#ala-tier-tbody') as HTMLElement;
   const status = backdrop.querySelector('#ala-tier-status') as HTMLElement;
+  const onClick = (selector: string, fn: EventListener) => {
+    const el = backdrop.querySelector(selector);
+    if (el) modal.listen(el, 'click', fn);
+  };
 
   const setModalStatus = (msg: string, isError = false) => {
     status.textContent = msg;
     status.className = `ala-tier-status ${isError ? 'is-error' : ''}`;
   };
 
+  const getColorInputValue = (input: HTMLInputElement | null, fallback: string): string => {
+    if (!input) return fallback;
+    const rawColor = input.dataset.rawColor;
+    const pickerHex = input.dataset.pickerHex;
+    if (rawColor !== undefined && pickerHex !== undefined && input.value.toLowerCase() === pickerHex.toLowerCase()) {
+      return rawColor;
+    }
+    return input.value || fallback;
+  };
+
   const createRowHtml = (t: TierConfig, idx: number) => {
-    const badgeColor = normalizeHexColor(t.color) || '#000000';
-    const textColor = normalizeHexColor(t.textColor) || '#ffffff';
+    const rawBadgeColor = typeof t.color === 'string' ? t.color.trim() : '';
+    const rawTextColor = typeof t.textColor === 'string' ? t.textColor.trim() : '';
+    const pickerBadgeColor = cssColorToHex(rawBadgeColor) || '#000000';
+    const pickerTextColor = cssColorToHex(rawTextColor) || '#ffffff';
+    const previewBadgeColor = rawBadgeColor || pickerBadgeColor;
+    const previewTextColor = rawTextColor || pickerTextColor;
+    const minVal = Number.isFinite(t.min) ? String(t.min) : '';
+    const maxVal = Number.isFinite(t.max) ? String(t.max) : '';
     return `
     <tr data-idx="${idx}">
       <td><input type="text" class="ala-t-label" value="${esc(t.label)}" maxlength="20" placeholder="Label" style="width:100%"></td>
-      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${t.min}" style="width:100%"></td>
-      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${t.max}" style="width:100%"></td>
-      <td><input type="color" class="ala-t-color" value="${esc(badgeColor)}" title="Badge Background Color"></td>
-      <td><input type="color" class="ala-t-text-color" value="${esc(textColor)}" title="Badge Text Color"></td>
-      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(badgeColor)};color:${esc(textColor)}">${esc(t.label)}</span></td>
+      <td><input type="number" class="ala-t-min" min="0" max="100" step="0.1" value="${esc(minVal)}" style="width:100%"></td>
+      <td><input type="number" class="ala-t-max" min="0" max="100" step="0.1" value="${esc(maxVal)}" style="width:100%"></td>
+      <td><input type="color" class="ala-t-color" value="${esc(pickerBadgeColor)}" data-raw-color="${esc(rawBadgeColor)}" data-picker-hex="${esc(pickerBadgeColor)}" title="Badge Background Color"></td>
+      <td><input type="color" class="ala-t-text-color" value="${esc(pickerTextColor)}" data-raw-color="${esc(rawTextColor)}" data-picker-hex="${esc(pickerTextColor)}" title="Badge Text Color"></td>
+      <td><span class="ala-tier-badge ala-tier-badge--list ala-t-preview" style="background-color:${esc(previewBadgeColor)};color:${esc(previewTextColor)}">${esc(t.label)}</span></td>
       <td><button type="button" class="ala-icon-btn ala-tier-del-btn" title="Delete Tier">✕</button></td>
     </tr>
   `;
@@ -103,15 +123,17 @@ export function openTierEditor(ctx: JsonEditorContext): void {
     const rows = tbody.querySelectorAll<HTMLTableRowElement>('tr');
     const result: TierConfig[] = [];
     rows.forEach((tr) => {
-      const label = (tr.querySelector<HTMLInputElement>('.ala-t-label')?.value || '').trim();
-      const min = parseFloat(tr.querySelector<HTMLInputElement>('.ala-t-min')?.value || '0');
-      const max = parseFloat(tr.querySelector<HTMLInputElement>('.ala-t-max')?.value || '100');
-      const color = tr.querySelector<HTMLInputElement>('.ala-t-color')?.value || '#000000';
-      const textColor = tr.querySelector<HTMLInputElement>('.ala-t-text-color')?.value || '#ffffff';
+      const label = (tr.querySelector<HTMLInputElement>('.ala-t-label')?.value ?? '').trim();
+      const minRaw = (tr.querySelector<HTMLInputElement>('.ala-t-min')?.value ?? '').trim();
+      const maxRaw = (tr.querySelector<HTMLInputElement>('.ala-t-max')?.value ?? '').trim();
+      const min = minRaw === '' ? NaN : Number(minRaw);
+      const max = maxRaw === '' ? NaN : Number(maxRaw);
+      const color = getColorInputValue(tr.querySelector<HTMLInputElement>('.ala-t-color'), '#000000');
+      const textColor = getColorInputValue(tr.querySelector<HTMLInputElement>('.ala-t-text-color'), '#ffffff');
       result.push({
-        label: label || 'Tier',
-        min: isNaN(min) ? 0 : min,
-        max: isNaN(max) ? 100 : max,
+        label,
+        min,
+        max,
         color,
         textColor
       });
@@ -121,8 +143,8 @@ export function openTierEditor(ctx: JsonEditorContext): void {
 
   const updatePreview = (tr: HTMLTableRowElement) => {
     const label = tr.querySelector<HTMLInputElement>('.ala-t-label')?.value || '';
-    const color = tr.querySelector<HTMLInputElement>('.ala-t-color')?.value || '#000000';
-    const textColor = tr.querySelector<HTMLInputElement>('.ala-t-text-color')?.value || '#ffffff';
+    const color = getColorInputValue(tr.querySelector<HTMLInputElement>('.ala-t-color'), '#000000');
+    const textColor = getColorInputValue(tr.querySelector<HTMLInputElement>('.ala-t-text-color'), '#ffffff');
     const preview = tr.querySelector<HTMLElement>('.ala-t-preview');
     if (preview) {
       preview.textContent = label;
@@ -131,13 +153,24 @@ export function openTierEditor(ctx: JsonEditorContext): void {
     }
   };
 
-  tbody.addEventListener('input', (e) => {
-    const target = e.target as HTMLElement;
+  const handleRowColorOrInput = (target: HTMLElement) => {
+    if (target instanceof HTMLInputElement && target.matches('.ala-t-color, .ala-t-text-color')) {
+      delete target.dataset.rawColor;
+      delete target.dataset.pickerHex;
+    }
     const tr = target.closest<HTMLTableRowElement>('tr');
     if (tr) updatePreview(tr);
+  };
+
+  modal.listen(tbody, 'input', (e) => {
+    handleRowColorOrInput(e.target as HTMLElement);
   });
 
-  tbody.addEventListener('click', (e) => {
+  modal.listen(tbody, 'change', (e) => {
+    handleRowColorOrInput(e.target as HTMLElement);
+  });
+
+  modal.listen(tbody, 'click', (e) => {
     const target = e.target as HTMLElement;
     const btn = target.closest<HTMLButtonElement>('.ala-tier-del-btn');
     if (btn) {
@@ -149,14 +182,14 @@ export function openTierEditor(ctx: JsonEditorContext): void {
     }
   });
 
-  backdrop.querySelector('#ala-tier-btn-add')?.addEventListener('click', () => {
+  onClick('#ala-tier-btn-add', () => {
     const current = getRowsData();
     current.push({ min: 0, max: 0, label: 'New', color: '#3db4f2', textColor: '#ffffff' });
     renderTable(current);
     setModalStatus('Added new tier.');
   });
 
-  backdrop.querySelector('#ala-tier-btn-reset')?.addEventListener('click', () => {
+  onClick('#ala-tier-btn-reset', () => {
     renderTable(JSON.parse(JSON.stringify(DEFAULT_TIERS)));
     setModalStatus('Reset to default tiers.');
   });
@@ -164,7 +197,7 @@ export function openTierEditor(ctx: JsonEditorContext): void {
   const jsonWrap = backdrop.querySelector('#ala-tier-json-wrap') as HTMLElement;
   const jsonArea = backdrop.querySelector('#ala-tier-json-area') as HTMLTextAreaElement;
 
-  backdrop.querySelector('#ala-tier-btn-toggle-json')?.addEventListener('click', () => {
+  onClick('#ala-tier-btn-toggle-json', () => {
     const isHidden = jsonWrap.style.display === 'none';
     if (isHidden) {
       jsonArea.value = JSON.stringify(getRowsData(), null, 2);
@@ -174,7 +207,7 @@ export function openTierEditor(ctx: JsonEditorContext): void {
     }
   });
 
-  backdrop.querySelector('#ala-tier-btn-apply-json')?.addEventListener('click', () => {
+  onClick('#ala-tier-btn-apply-json', () => {
     try {
       const parsed = JSON.parse(jsonArea.value);
       const check = validateTiers(parsed);
@@ -190,9 +223,7 @@ export function openTierEditor(ctx: JsonEditorContext): void {
     }
   });
 
-  backdrop.querySelector('#ala-tier-btn-cancel')?.addEventListener('click', close);
-
-  backdrop.querySelector('#ala-tier-btn-save')?.addEventListener('click', () => {
+  onClick('#ala-tier-btn-save', () => {
     const data = getRowsData();
     const check = validateTiers(data);
     if (!check.valid || !check.tiers) {

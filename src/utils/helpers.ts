@@ -11,6 +11,8 @@ import {
 } from 'vite-plugin-monkey/dist/client';
 import {
   SETTING_PREFIX,
+  type CleanupFn,
+  type DebouncedFn,
   type HttpDownloadOptions,
   type Logger,
   type LoggerMeta,
@@ -18,9 +20,38 @@ import {
   type ModuleDebugDef
 } from '../types';
 
+export type { DebouncedFn };
+
 export const HOST = location.hostname;
 
-export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const MAX_TIMEOUT_MS = 0x7fffffff;
+
+/** Resolves after `ms` milliseconds, or rejects immediately with an AbortError if `signal` aborts. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(createAbortError(signal));
+  }
+  const delay = Number.isFinite(ms) ? Math.min(MAX_TIMEOUT_MS, Math.max(0, ms)) : 0;
+  if (!signal) {
+    return new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let done = false;
+    const onAbort = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(createAbortError(signal));
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delay);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 export const clean = (s: unknown): string => String(s || '').replace(/\s+/g, ' ').trim();
 
@@ -55,12 +86,154 @@ export function authError(service: string, message: string): AuthError {
   return e;
 }
 
-export function debounce<T extends (...args: any[]) => void>(fn: T, ms = 0): (...args: Parameters<T>) => void {
-  let t: ReturnType<typeof setTimeout> | 0 = 0;
-  return (...a: Parameters<T>) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...a), ms);
+export function composeAbortSignals(
+  a: AbortSignal,
+  b?: AbortSignal
+): { signal: AbortSignal; dispose: CleanupFn };
+export function composeAbortSignals(
+  a?: AbortSignal,
+  b?: AbortSignal
+): { signal: AbortSignal | undefined; dispose: CleanupFn };
+/**
+ * Composes two optional AbortSignals into a single signal that aborts when either aborts,
+ * falling back to manual abort-listener forwarding when AbortSignal.any is unavailable.
+ */
+export function composeAbortSignals(
+  a?: AbortSignal,
+  b?: AbortSignal
+): { signal: AbortSignal | undefined; dispose: CleanupFn } {
+  const noop = () => {};
+  if (!a) return { signal: b, dispose: noop };
+  if (!b || a === b) return { signal: a, dispose: noop };
+  if (a.aborted) return { signal: a, dispose: noop };
+  if (b.aborted) return { signal: b, dispose: noop };
+
+  const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyFn === 'function') {
+    return { signal: anyFn([a, b]), dispose: noop };
+  }
+
+  const ac = new AbortController();
+  const dispose = () => {
+    a.removeEventListener('abort', onAbortA);
+    b.removeEventListener('abort', onAbortB);
   };
+  const onAbortA = () => {
+    dispose();
+    ac.abort((a as { reason?: unknown }).reason);
+  };
+  const onAbortB = () => {
+    dispose();
+    ac.abort((b as { reason?: unknown }).reason);
+  };
+  a.addEventListener('abort', onAbortA, { once: true });
+  b.addEventListener('abort', onAbortB, { once: true });
+  return { signal: ac.signal, dispose };
+}
+
+/** Creates a standard AbortError, preserving an AbortError reason from the given signal when present. */
+export function createAbortError(signal?: AbortSignal): Error {
+  const reason = (signal as { reason?: unknown } | undefined)?.reason;
+  if (
+    (reason instanceof Error || (typeof DOMException !== 'undefined' && reason instanceof DOMException)) &&
+    reason.name === 'AbortError'
+  ) {
+    return reason as Error;
+  }
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException('Request aborted', 'AbortError');
+  }
+  const err = new Error('Request aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+/** Returns true when an error represents an abort/cancellation across DOMException and HttpClient aborts. */
+export function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: unknown; message?: unknown };
+  return (
+    e.name === 'AbortError' ||
+    e.message === 'Request aborted' ||
+    e.message === 'Download aborted'
+  );
+}
+
+/** Races `promise` against `signal`, suppressing unhandled rejections when aborted before settlement. */
+export function raceWithSignal<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+  createAbort: (signal?: AbortSignal) => Error = createAbortError
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    promise.catch(() => {});
+    return Promise.reject(createAbort(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      promise.catch(() => {});
+      reject(createAbort(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (val) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(val);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      }
+    );
+  });
+}
+
+/** Returns true when a GraphQL document contains a `mutation` operation outside comments and string literals. */
+export function isGqlMutation(q: string): boolean {
+  if (typeof q !== 'string') return false;
+  const stripped = q.replace(/#[^\n\r]*|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"/g, ' ');
+  return /\bmutation\b/i.test(stripped);
+}
+
+export function debounce<T extends (...args: any[]) => void>(fn: T, ms = 0): DebouncedFn<T> {
+  let t: ReturnType<typeof setTimeout> | 0 = 0;
+  let pendingArgs: Parameters<T> | null = null;
+
+  const cancel = () => {
+    clearTimeout(t);
+    t = 0;
+    pendingArgs = null;
+  };
+
+  const flush = () => {
+    if (!pendingArgs) return;
+    const args = pendingArgs;
+    cancel();
+    fn(...args);
+  };
+
+  const debounced = ((...a: Parameters<T>) => {
+    clearTimeout(t);
+    pendingArgs = a;
+    t = setTimeout(() => {
+      t = 0;
+      const args = pendingArgs;
+      pendingArgs = null;
+      if (args) fn(...args);
+    }, ms);
+  }) as DebouncedFn<T>;
+
+  debounced.cancel = cancel;
+  debounced.flush = flush;
+  return debounced;
 }
 
 const MEMO_MAX_ENTRIES = 1000;
@@ -103,11 +276,16 @@ export function memo<TArgs extends any[], TReturn>(
 }
 
 export function openTab(url: string): void {
+  const parent = typeof document !== 'undefined' ? document.body || document.documentElement : null;
+  if (!parent) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return;
+  }
   const a = document.createElement('a');
   a.href = url;
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
-  document.body.appendChild(a);
+  parent.appendChild(a);
   a.click();
   a.remove();
 }
@@ -245,10 +423,12 @@ export const store = {
     }
     return () => {
       if (id === undefined) return;
+      const listenerId = id;
+      id = undefined;
       const removeFn = resolveGm('GM_removeValueChangeListener', GM_removeValueChangeListener);
       if (!removeFn) return;
       try {
-        removeFn(id);
+        removeFn(listenerId);
       } catch {}
     };
   }
@@ -420,7 +600,7 @@ export const jsonSet = <T>(key: string, value: T): void => store.set(key, JSON.s
 export function persistent<T extends Record<string, any>>(
   key: string,
   prune?: (data: T) => void
-): { data: T; save: () => void } {
+): { data: T; save: () => void; cancel: () => void; flush: () => void } {
   let loaded = false;
   let cacheData = {} as T;
 
@@ -444,7 +624,9 @@ export function persistent<T extends Record<string, any>>(
       loaded = true;
       cacheData = val;
     },
-    save
+    save,
+    cancel: () => save.cancel(),
+    flush: () => save.flush()
   };
 }
 

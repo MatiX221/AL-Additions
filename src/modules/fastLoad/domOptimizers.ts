@@ -1,7 +1,11 @@
-import { win, doc, onNav } from './state';
+import type { AddStyleFn, CleanupFn } from '../../types';
+import { win, doc, navListeners, onNav } from './state';
 import { CFG, stats, attempt, idle } from './config';
 
-export function installLazyMedia() {
+const patchedCreateFns = new WeakSet<Function>();
+
+export function installLazyMedia(): CleanupFn {
+  const restores: Array<() => void> = [];
   const lazify = (el: any) => {
     if (!el || el.nodeType !== 1) return;
     switch (el.localName) {
@@ -18,10 +22,14 @@ export function installLazyMedia() {
     }
   };
 
+  const seenTargets = new Set<any>();
   const patchCreate = (target: any) => {
-    if (!target) return;
+    if (!target || seenTargets.has(target)) return;
+    seenTargets.add(target);
     const orig = target.createElement;
-    if (typeof orig !== 'function') return;
+    if (typeof orig !== 'function' || patchedCreateFns.has(orig)) return;
+    const hadOwn = Object.prototype.hasOwnProperty.call(target, 'createElement');
+    const origDesc = hadOwn ? Object.getOwnPropertyDescriptor(target, 'createElement') : undefined;
     const patched = function (this: any, tag: string, options?: ElementCreationOptions) {
       const el = orig.call(this, tag, options);
       try {
@@ -31,14 +39,48 @@ export function installLazyMedia() {
       }
       return el;
     };
+    patchedCreateFns.add(patched);
+    let installed = false;
     try {
       target.createElement = patched;
+      installed = target.createElement === patched;
     } catch {
       try {
         Object.defineProperty(target, 'createElement', { value: patched, writable: true, configurable: true });
+        installed = target.createElement === patched;
       } catch {
         /* ignore */
       }
+    }
+    if (installed) {
+      restores.push(() => {
+        if (target.createElement !== patched) return;
+        if (!hadOwn) {
+          try {
+            delete target.createElement;
+            return;
+          } catch {
+            /* fall through */
+          }
+        }
+        if (origDesc) {
+          try {
+            Object.defineProperty(target, 'createElement', origDesc);
+            return;
+          } catch {
+            /* fall through */
+          }
+        }
+        try {
+          target.createElement = orig;
+        } catch {
+          try {
+            Object.defineProperty(target, 'createElement', { value: orig, writable: true, configurable: true });
+          } catch {
+            /* ignore */
+          }
+        }
+      });
     }
   };
 
@@ -61,20 +103,28 @@ export function installLazyMedia() {
   attempt(() => {
     const desc = Object.getOwnPropertyDescriptor(ElementProto, 'innerHTML');
     if (!desc || !desc.set || !desc.configurable) return;
+    const patchedSet = function (this: Element, value: any) {
+      desc.set!.call(this, value);
+      if (typeof value === 'string' && MEDIA_TAG.test(value)) {
+        attempt(() => lazifyTree(this instanceof win.HTMLTemplateElement ? (this as HTMLTemplateElement).content : this));
+      }
+    };
     Object.defineProperty(ElementProto, 'innerHTML', {
       ...desc,
-      set(this: Element, value: any) {
-        desc.set!.call(this, value);
-        if (typeof value === 'string' && MEDIA_TAG.test(value)) {
-          attempt(() => lazifyTree(this instanceof win.HTMLTemplateElement ? (this as HTMLTemplateElement).content : this));
-        }
+      set: patchedSet
+    });
+    restores.push(() => {
+      const current = Object.getOwnPropertyDescriptor(ElementProto, 'innerHTML');
+      if (current?.set === patchedSet) {
+        Object.defineProperty(ElementProto, 'innerHTML', desc);
       }
     });
   });
 
   attempt(() => {
     const native = ElementProto.insertAdjacentHTML;
-    ElementProto.insertAdjacentHTML = function (this: Element, position: InsertPosition, html: string) {
+    if (typeof native !== 'function') return;
+    const patchedInsert = function (this: Element, position: InsertPosition, html: string) {
       const r = native.call(this, position, html);
       if (typeof html === 'string' && MEDIA_TAG.test(html)) {
         const outer = /^(?:beforebegin|afterend)$/i.test(position);
@@ -82,7 +132,19 @@ export function installLazyMedia() {
       }
       return r;
     };
+    ElementProto.insertAdjacentHTML = patchedInsert;
+    restores.push(() => {
+      if (ElementProto.insertAdjacentHTML === patchedInsert) {
+        ElementProto.insertAdjacentHTML = native;
+      }
+    });
   });
+
+  return () => {
+    for (let i = restores.length - 1; i >= 0; i--) {
+      attempt(restores[i]);
+    }
+  };
 }
 
 const ROW_GROUPS = [
@@ -91,13 +153,17 @@ const ROW_GROUPS = [
   { selector: '.activity-entry', h: 160 }
 ];
 
-function injectCSS(text: string) {
+function injectCSS(text: string): CleanupFn {
   try {
     if ('adoptedStyleSheets' in doc && typeof win.CSSStyleSheet !== 'undefined') {
       const sheet = new win.CSSStyleSheet();
       sheet.replaceSync(text);
       (doc as any).adoptedStyleSheets = [...(doc as any).adoptedStyleSheets, sheet];
-      return;
+      return () => {
+        attempt(() => {
+          (doc as any).adoptedStyleSheets = ((doc as any).adoptedStyleSheets || []).filter((s: any) => s !== sheet);
+        });
+      };
     }
   } catch {
     /* fall through */
@@ -105,9 +171,16 @@ function injectCSS(text: string) {
   const style = doc.createElement('style');
   style.textContent = text;
   (doc.head || doc.documentElement).appendChild(style);
+  return () => {
+    attempt(() => style.remove());
+  };
 }
 
-export function installRowSkipping() {
+export function installRowSkipping(deps?: {
+  addStyle?: AddStyleFn;
+  listen?: (t: EventTarget, type: string, fn: any, opts?: any) => CleanupFn;
+}): CleanupFn {
+  let disposed = false;
   const rules = ROW_GROUPS.map(
     ({ selector, h }, i) => `
         ${selector} {
@@ -121,12 +194,22 @@ export function installRowSkipping() {
         }`
   ).join('\n');
 
-  injectCSS(`@supports (content-visibility: auto) and (contain-intrinsic-height: auto 1px) { ${rules} }`);
+  const cssText = `@supports (content-visibility: auto) and (contain-intrinsic-height: auto 1px) { ${rules} }`;
+  const removeStyle = deps?.addStyle ? deps.addStyle(cssText) : injectCSS(cssText);
+
+  const addListener =
+    deps?.listen ??
+    ((t: EventTarget, type: string, fn: any, opts?: any): CleanupFn => {
+      t.addEventListener(type, fn, opts);
+      return () => t.removeEventListener(type, fn, opts);
+    });
 
   const measuredFor = ROW_GROUPS.map(() => '');
   let timers: any[] = [];
+  let resizeTimer: any = 0;
 
   function measure() {
+    if (disposed) return;
     const path = win.location.pathname;
     const vh = win.innerHeight || doc.documentElement.clientHeight;
     ROW_GROUPS.forEach(({ selector }, i) => {
@@ -155,11 +238,13 @@ export function installRowSkipping() {
 
   function schedule() {
     timers.forEach(clearTimeout);
+    timers = [];
+    if (disposed) return;
     timers = [500, 1800, 4500].map((ms) =>
       setTimeout(
         () =>
           idle(win, () => {
-            if (!doc.hidden) measure();
+            if (!disposed && !doc.hidden) measure();
           }),
         ms
       )
@@ -167,27 +252,49 @@ export function installRowSkipping() {
   }
 
   onNav(schedule);
+  const listenerCleanups: CleanupFn[] = [];
   if (doc.readyState !== 'loading') schedule();
-  else doc.addEventListener('DOMContentLoaded', schedule, { once: true });
-  win.addEventListener('load', schedule, { once: true });
+  else listenerCleanups.push(addListener(doc, 'DOMContentLoaded', schedule, { once: true }));
+  listenerCleanups.push(addListener(win, 'load', schedule, { once: true }));
 
-  let resizeTimer: any = 0;
   const onResize = () => {
     clearTimeout(resizeTimer);
+    if (disposed) return;
     resizeTimer = setTimeout(() => {
+      resizeTimer = 0;
+      if (disposed) return;
       measuredFor.fill('');
       schedule();
     }, 200);
   };
-  win.addEventListener('resize', onResize, { passive: true });
-  win.addEventListener('orientationchange', onResize, { passive: true });
+  listenerCleanups.push(addListener(win, 'resize', onResize, { passive: true }));
+  listenerCleanups.push(addListener(win, 'orientationchange', onResize, { passive: true }));
+
+  return () => {
+    disposed = true;
+    timers.forEach(clearTimeout);
+    timers = [];
+    clearTimeout(resizeTimer);
+    resizeTimer = 0;
+    const navIdx = navListeners.indexOf(schedule);
+    if (navIdx >= 0) navListeners.splice(navIdx, 1);
+    for (const unsub of listenerCleanups) attempt(unsub);
+    attempt(removeStyle);
+    attempt(() => {
+      for (let i = 0; i < ROW_GROUPS.length; i++) {
+        doc.documentElement?.style?.removeProperty(`--alfast-h${i}`);
+      }
+    });
+  };
 }
 
-export function installObserverCoalescing() {
+export function installObserverCoalescing(): CleanupFn {
   const Native = win.MutationObserver;
-  if (typeof Native !== 'function') return;
+  if (typeof Native !== 'function') return () => {};
 
+  let disposed = false;
   const states = new WeakMap();
+  const activeTimers = new Set<any>();
 
   const ignoresRecords = (fn: any) => {
     if (typeof fn !== 'function' || fn.length !== 0) return false;
@@ -204,11 +311,12 @@ export function installObserverCoalescing() {
   const isPageRoot = (t: any) => t === doc || t === doc.documentElement || t === doc.body;
 
   function schedule(st: any) {
-    if (st.timer) return;
+    if (disposed || st.timer) return;
     const wait = Math.max(0, st.last + CFG.observerBatchMs - performance.now());
-    st.timer = setTimeout(() => {
+    const handle = setTimeout(() => {
+      activeTimers.delete(handle);
       st.timer = 0;
-      if (!st.queue.length) return;
+      if (disposed || !st.queue.length) return;
       const records = st.queue.splice(0);
       stats.observerBatches++;
       stats.observerRecordsMerged += records.length;
@@ -221,6 +329,8 @@ export function installObserverCoalescing() {
       }
       st.last = performance.now();
     }, wait);
+    st.timer = handle;
+    activeTimers.add(handle);
   }
 
   class CoalescedMutationObserver extends (Native as typeof MutationObserver) {
@@ -237,7 +347,7 @@ export function installObserverCoalescing() {
       super(
         typeof callback === 'function'
           ? (records: MutationRecord[]) => {
-              if (!st.on) return callback.call(st.self, records, st.self);
+              if (disposed || !st.on) return callback.call(st.self, records, st.self);
               for (const r of records) st.queue.push(r);
               schedule(st);
             }
@@ -248,12 +358,17 @@ export function installObserverCoalescing() {
     }
     override observe(target: Node, options?: MutationObserverInit) {
       const st = states.get(this);
-      if (st && st.eligible && options && options.subtree && isPageRoot(target)) st.on = true;
+      if (st && !disposed && st.eligible && options && options.subtree && isPageRoot(target)) st.on = true;
       return super.observe(target, options);
     }
     override disconnect() {
       const st = states.get(this);
       if (st) {
+        if (st.timer) {
+          clearTimeout(st.timer);
+          activeTimers.delete(st.timer);
+          st.timer = 0;
+        }
         st.queue.length = 0;
         st.on = false;
       }
@@ -275,4 +390,23 @@ export function installObserverCoalescing() {
   } catch {
     win.MutationObserver = CoalescedMutationObserver;
   }
+
+  return () => {
+    disposed = true;
+    for (const t of activeTimers) {
+      clearTimeout(t);
+    }
+    activeTimers.clear();
+    if (win.MutationObserver === CoalescedMutationObserver) {
+      try {
+        Object.defineProperty(win, 'MutationObserver', {
+          value: Native,
+          writable: true,
+          configurable: true
+        });
+      } catch {
+        win.MutationObserver = Native;
+      }
+    }
+  };
 }

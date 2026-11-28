@@ -39,11 +39,14 @@ export let bytes = 0;
 export let epoch = 0;
 export let pausedUntil = 0;
 export let freshFloor = 0;
+export let lastAuth = '';
 
 export function setBytes(val: number) { bytes = val; }
 export function incEpoch() { epoch++; }
 export function setPausedUntil(val: number) { pausedUntil = val; }
 export function setFreshFloor(val: number) { freshFloor = val; }
+export function setLastAuth(val: string) { lastAuth = val; }
+export function clearLastAuth() { lastAuth = ''; }
 
 export const rpcCache = new Map<string, { time: number; msg: any }>();
 export const rpcInflight = new Map<string, {
@@ -53,6 +56,16 @@ export const rpcInflight = new Map<string, {
 }>();
 export let rpcEpoch = 0;
 export function incRpcEpoch() { rpcEpoch++; }
+
+const rpcClearListeners = new Set<() => void>();
+export function onRpcClear(fn: () => void): void {
+  rpcClearListeners.add(fn);
+}
+
+const cacheClearListeners = new Set<() => void>();
+export function onCacheClear(fn: () => void): void {
+  cacheClearListeners.add(fn);
+}
 
 export const clearAll = () => {
   epoch++;
@@ -66,12 +79,23 @@ export const clearRpc = () => {
   freshFloor = Date.now();
   rpcCache.clear();
   rpcInflight.clear();
+  for (const fn of rpcClearListeners) attempt(fn);
 };
 
 export const clearGlobalCache = () => {
   clearAll();
   clearRpc();
+  for (const fn of cacheClearListeners) attempt(fn);
 };
+
+export function resetRuntimeState(): void {
+  clearGlobalCache();
+  userMap.clear();
+  idToUserMap.clear();
+  pausedUntil = 0;
+  freshFloor = 0;
+  lastAuth = '';
+}
 
 export function rememberUser(name: string, id: number) {
   if (!name || !id || typeof id !== 'number') return;
@@ -147,4 +171,14 @@ export function registerGlobalBridges() {
   win.__ALFL_RPC_INFLIGHT__ = rpcInflight;
   win.__ALFL_USER_MAP__ = userMap;
   win.__ALFL_ID_MAP__ = idToUserMap;
+}
+
+export function unregisterGlobalBridges() {
+  if (win.__ALFL_STATS__ === stats) delete win.__ALFL_STATS__;
+  if (win.__ALFL_CLEAR__ === clearGlobalCache) delete win.__ALFL_CLEAR__;
+  if (win.__ALFL_GQL_STORE__ === store) delete win.__ALFL_GQL_STORE__;
+  if (win.__ALFL_RPC_CACHE__ === rpcCache) delete win.__ALFL_RPC_CACHE__;
+  if (win.__ALFL_RPC_INFLIGHT__ === rpcInflight) delete win.__ALFL_RPC_INFLIGHT__;
+  if (win.__ALFL_USER_MAP__ === userMap) delete win.__ALFL_USER_MAP__;
+  if (win.__ALFL_ID_MAP__ === idToUserMap) delete win.__ALFL_ID_MAP__;
 }

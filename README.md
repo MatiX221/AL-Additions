@@ -259,8 +259,8 @@ The project is maintained as a modular TypeScript codebase and uses Vite with `v
 
 For a release:
 
-1. Update `@version` in `al-additions.user.js`.
-2. Add release notes to [`CHANGELOG.md`](./CHANGELOG.md) and update the README version.
+1. Add release notes to [`CHANGELOG.md`](./CHANGELOG.md) and update the version references in `README.md`.
+2. Run `npm run bump <version>` (for example `patch`, `minor`, `major`, or an explicit semver like `0.9.2`) to run type-checking and tests, update `package.json`, and rebuild `al-additions.user.js` with the updated `@version`.
 3. Push to `main`; the userscript metadata points updates to the GitHub-hosted script.
 
 Keep the userscript metadata (`@match`, `@grant`, `@connect`, `@license`, `@homepageURL`, `@downloadURL`, and `@updateURL`) consistent when publishing.

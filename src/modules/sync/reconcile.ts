@@ -116,15 +116,6 @@ export function reconcile(type: SyncMediaType, entry: AniListSyncEntry, mal: any
 }
 
 export function fallbackPatch(type: SyncMediaType, patch: Record<string, any>, mal: any, tried: Set<string>): Record<string, any> | null {
-  if (!tried.has('dates')) {
-    tried.add('dates');
-    if ('start_date' in patch || 'finish_date' in patch) {
-      const out = { ...patch };
-      delete out.start_date;
-      delete out.finish_date;
-      if (Object.keys(out).length) return out;
-    }
-  }
   if (!tried.has('cap')) {
     tried.add('cap');
     const caps: Record<string, any> =
@@ -140,6 +131,15 @@ export function fallbackPatch(type: SyncMediaType, patch: Record<string, any>, m
       }
     }
     if (changed) return out;
+  }
+  if (!tried.has('dates')) {
+    tried.add('dates');
+    if ('start_date' in patch || 'finish_date' in patch) {
+      const out = { ...patch };
+      delete out.start_date;
+      delete out.finish_date;
+      if (Object.keys(out).length) return out;
+    }
   }
   return null;
 }

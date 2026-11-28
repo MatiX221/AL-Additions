@@ -275,11 +275,18 @@ function normalizeGqlVariables(variables: unknown): Record<string, any> {
   return variables && typeof variables === 'object' && !Array.isArray(variables) ? variables : {};
 }
 
+function normalizeBearerHeader(header: unknown): string | null {
+  if (typeof header !== 'string') return null;
+  const trimmed = header.trim();
+  return /^Bearer\s+\S/i.test(trimmed) ? trimmed : null;
+}
+
 export const CoreHooks: CoreHooksApi = (() => {
   let clearingDepth = 0;
   let cacheBridge: FastLoadCacheBridge | null = null;
   let cacheBridgeOwner: symbol | null = null;
-  let fetchOwnerActive = false;
+  const fetchOwners = new Set<symbol>();
+  const isFetchOwned = (): boolean => fetchOwners.size > 0;
   const gqlListeners = new Set<HookEntry<GqlFetchListener>>();
   const rpcBlockers = new Set<HookEntry<RpcBlocker>>();
   const prefetchTokens = new Set<symbol>();
@@ -295,7 +302,7 @@ export const CoreHooks: CoreHooksApi = (() => {
       const win = resolvePageWindow() as any;
       const snapshot = {
         sessionClearing: clearingDepth > 0,
-        fetchOwner: fetchOwnerActive,
+        fetchOwner: isFetchOwned(),
         hasCacheBridge: !!cacheBridge,
         rpcBlockers: rpcBlockers.size,
         prefetchSuppressed: prefetchTokens.size > 0,
@@ -317,7 +324,7 @@ export const CoreHooks: CoreHooksApi = (() => {
   function installFallbackFetch(): void {
     const win = resolvePageWindow() as any;
     const host = win?.location?.hostname || location.hostname;
-    if (fallbackInstalled || fetchOwnerActive || gqlListeners.size === 0) return;
+    if (fallbackInstalled || isFetchOwned() || gqlListeners.size === 0) return;
     if (host !== 'anilist.co') return;
 
     const currentFetch = typeof win.fetch === 'function' ? win.fetch : typeof fetch === 'function' ? fetch : null;
@@ -327,7 +334,7 @@ export const CoreHooks: CoreHooksApi = (() => {
     let instanceActive = true;
     const canIntercept = (): boolean => {
       const curHost = win?.location?.hostname || location.hostname;
-      return instanceActive && !fetchOwnerActive && gqlListeners.size > 0 && curHost === 'anilist.co';
+      return instanceActive && !isFetchOwned() && gqlListeners.size > 0 && curHost === 'anilist.co';
     };
 
     origFetch = localOrig;
@@ -396,10 +403,12 @@ export const CoreHooks: CoreHooksApi = (() => {
 
       if (query && canIntercept()) {
         let data: any = undefined;
+        let errors: GqlFetchEvent['errors'] = undefined;
         if (res && !res.bodyUsed && typeof res.clone === 'function') {
           try {
             const json = await res.clone().json();
             data = json?.data;
+            errors = Array.isArray(json?.errors) ? json.errors : undefined;
           } catch {}
         }
         if (canIntercept()) {
@@ -411,7 +420,8 @@ export const CoreHooks: CoreHooksApi = (() => {
             operationName,
             status: res.status,
             ok: res.ok,
-            data
+            data,
+            errors
           });
         }
       }
@@ -471,11 +481,7 @@ export const CoreHooks: CoreHooksApi = (() => {
       return clearingDepth > 0;
     },
     getAuthHeader(): string | null {
-      const val = store.get<unknown>('al_token_auth', null);
-      if (typeof val !== 'string') return null;
-      const trimmed = val.trim();
-      const stripped = trimmed.replace(/^Bearer(?:\s+|$)/i, '').trim();
-      return stripped ? trimmed : null;
+      return normalizeBearerHeader(store.get<unknown>('al_token_auth', null));
     },
     setAuthHeader(header: string | null): void {
       if (clearingDepth > 0) return;
@@ -483,11 +489,9 @@ export const CoreHooks: CoreHooksApi = (() => {
         store.del('al_token_auth');
         return;
       }
-      if (typeof header !== 'string') return;
-      const trimmed = header.trim();
-      const stripped = trimmed.replace(/^Bearer(?:\s+|$)/i, '').trim();
-      if (!stripped) return;
-      store.set('al_token_auth', trimmed);
+      const valid = normalizeBearerHeader(header);
+      if (!valid) return;
+      store.set('al_token_auth', valid);
     },
     clearAuth(): void {
       try {
@@ -520,14 +524,28 @@ export const CoreHooks: CoreHooksApi = (() => {
     getCacheBridge(): FastLoadCacheBridge | null {
       return cacheBridge;
     },
-    markFetchOwner(active: boolean): void {
-      fetchOwnerActive = !!active;
-      if (fetchOwnerActive) {
-        uninstallFallbackFetch();
-      } else if (gqlListeners.size > 0) {
-        installFallbackFetch();
+    markFetchOwner(active: boolean): CleanupFn {
+      if (!active) {
+        if (!isFetchOwned() && gqlListeners.size > 0) {
+          installFallbackFetch();
+        }
+        syncMirror();
+        return () => {};
       }
+      let released = false;
+      const token = Symbol('fetch-owner');
+      fetchOwners.add(token);
+      uninstallFallbackFetch();
       syncMirror();
+      return () => {
+        if (released) return;
+        released = true;
+        fetchOwners.delete(token);
+        if (!isFetchOwned() && gqlListeners.size > 0) {
+          installFallbackFetch();
+        }
+        syncMirror();
+      };
     },
     hasGqlFetchSubscribers(): boolean {
       return gqlListeners.size > 0;

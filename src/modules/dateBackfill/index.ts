@@ -1,5 +1,12 @@
 import type { MediaListResult } from "../../api/anilist";
 import { defineModule } from "../../core/registry";
+import {
+  composeAbortSignals,
+  createAbortError,
+  esc,
+  isAbortError,
+  sleep,
+} from "../../utils/helpers";
 
 const TARGETED_BATCH_SIZE = 10;
 
@@ -133,6 +140,15 @@ export function compareFuzzyDates(a: FuzzyDate, b: FuzzyDate): number {
   return (a.day ?? 0) - (b.day ?? 0);
 }
 
+export function compareFuzzyDatesCompatible(a: FuzzyDate, b: FuzzyDate): number {
+  if (a.year == null || b.year == null) return 0;
+  if (a.year !== b.year) return a.year - b.year;
+  if (a.month == null || b.month == null) return 0;
+  if (a.month !== b.month) return a.month - b.month;
+  if (a.day == null || b.day == null) return 0;
+  return a.day - b.day;
+}
+
 export function isFirstProgress(progress: string | null): boolean {
   if (!progress) return false;
   return /^1(?:\s*-|$)/.test(progress.trim());
@@ -226,7 +242,7 @@ export function inferDatesFromActivities(
     const candidateFinish = fuzzyDateFromTimestamp(earliestCompleted.createdAt);
     if (
       isDateEmpty(entry.startedAt) ||
-      compareFuzzyDates(entry.startedAt, candidateFinish) <= 0
+      compareFuzzyDatesCompatible(entry.startedAt, candidateFinish) <= 0
     ) {
       newCompletedAt = candidateFinish;
     }
@@ -242,7 +258,7 @@ export function inferDatesFromActivities(
       const effectiveFinish = newCompletedAt ?? entry.completedAt;
       if (
         isDateEmpty(effectiveFinish) ||
-        compareFuzzyDates(candidateStart, effectiveFinish) <= 0
+        compareFuzzyDatesCompatible(candidateStart, effectiveFinish) <= 0
       ) {
         newStartedAt = candidateStart;
         startSource =
@@ -277,7 +293,11 @@ export function assumeStartFromFinish(
     : !isDateEmpty(entry.completedAt);
 
   if (!hasUsableFinish) return null;
-  if (compareFuzzyDates(entry.startedAt, entry.completedAt) === 0) return null;
+  const isSingleDay =
+    isDateComplete(entry.startedAt) &&
+    isDateComplete(entry.completedAt) &&
+    compareFuzzyDates(entry.startedAt, entry.completedAt) === 0;
+  if (isSingleDay) return null;
 
   return {
     entry,
@@ -333,6 +353,107 @@ function isAssumedProposal(p: ProposedDateUpdate): boolean {
   return Boolean(p.startSource?.startsWith("assumed"));
 }
 
+const buildDateBackfillModalCss = (sel: string): string =>
+  `@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
+      @keyframes alaDbfIndeterminate {0%{transform:translateX(-100%);}100%{transform:translateX(350%);}}
+      @keyframes alaDbfPulse {0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.85);}}
+      ${sel} .ala-core-sheet {max-height:88vh;border:1px solid rgba(var(--color-text),0.1);font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
+      ${sel} .ala-core-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);align-items:flex-start;}
+      ${sel} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
+      ${sel} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
+      ${sel} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
+      ${sel} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
+      ${sel} .ala-core-body {padding:18px 22px;}
+      ${sel} .ala-core-body::-webkit-scrollbar {width:8px;}
+      ${sel} .ala-core-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
+      ${sel} .ala-core-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
+      ${sel} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+      ${sel} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
+      ${sel} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
+      ${sel} .ala-dbf-mode-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;}
+      ${sel} .ala-dbf-mode-card {display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:8px;width:100%;padding:16px 18px;border-radius:8px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.1);color:rgb(var(--color-text));cursor:pointer;transition:border-color 0.15s,transform 0.12s,background 0.15s;}
+      ${sel} .ala-dbf-mode-card:hover {border-color:rgb(var(--color-blue));background:rgba(var(--color-blue),0.06);transform:translateY(-1px);}
+      ${sel} .ala-dbf-mode-card-head {display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;flex-wrap:wrap;}
+      ${sel} .ala-dbf-mode-card-title {font-size:1.4rem;font-weight:700;color:rgb(var(--color-text));}
+      ${sel} .ala-dbf-mode-badge {padding:2px 8px;border-radius:999px;font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;background:rgba(var(--color-blue),0.16);color:rgb(var(--color-blue));}
+      ${sel} .ala-dbf-mode-desc {font-size:1.2rem;line-height:1.45;color:rgb(var(--color-text-lighter));font-weight:400;}
+      ${sel} .ala-dbf-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;}
+      ${sel} .ala-dbf-stat-card {padding:10px 14px;border-radius:7px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.07);display:flex;flex-direction:column;gap:3px;min-width:0;}
+      ${sel} .ala-dbf-stat-label {font-size:1.1rem;text-transform:uppercase;letter-spacing:0.04em;color:rgb(var(--color-text-lighter));font-weight:600;}
+      ${sel} .ala-dbf-stat-val {font-size:1.65rem;font-weight:700;font-variant-numeric:tabular-nums;}
+      ${sel} .ala-dbf-stat-val.green {color:rgb(var(--color-green));}
+      ${sel} .ala-dbf-stat-val.blue {color:rgb(var(--color-blue));}
+      ${sel} .ala-dbf-toolbar {display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
+      ${sel} .ala-dbf-search {flex:1;min-width:180px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(var(--color-text),0.14);background:rgb(var(--color-background));color:rgb(var(--color-text));font-size:1.25rem;outline:none;transition:border-color 0.15s;}
+      ${sel} .ala-dbf-search:focus {border-color:rgb(var(--color-blue));}
+      ${sel} .ala-dbf-section {margin-bottom:16px;border:1px solid rgba(var(--color-text),0.08);border-radius:8px;background:rgb(var(--color-background));overflow-x:hidden;}
+      ${sel} .ala-dbf-section:last-child {margin-bottom:0;}
+      ${sel} .ala-dbf-section-head {padding:10px 14px;background:rgba(var(--color-foreground),0.55);border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-weight:700;font-size:1.3rem;}
+      ${sel} .ala-dbf-section-head.collapsible {cursor:pointer;user-select:none;}
+      ${sel} .ala-dbf-section-head.collapsible:hover {background:rgba(var(--color-text),0.05);}
+      ${sel} .ala-dbf-table-wrap {width:100%;overflow-x:hidden;}
+      ${sel} table {width:100%;table-layout:fixed;border-collapse:collapse;font-size:1.25rem;}
+      ${sel} thead th {background:rgb(var(--color-background));color:rgb(var(--color-text-lighter));font-size:1.1rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:9px 12px;border-bottom:1px solid rgba(var(--color-text),0.12);text-align:left;}
+      ${sel} tbody td {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.06);vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;}
+      ${sel} tbody tr:last-child td {border-bottom:none;}
+      ${sel} tbody tr {transition:background 0.12s,opacity 0.12s;}
+      ${sel} tbody tr:hover {background:rgba(var(--color-text),0.035);}
+      ${sel} tbody tr.is-selected {background:rgba(var(--color-blue),0.055);}
+      ${sel} tbody tr.is-unselected {opacity:0.72;}
+      ${sel} input[type="checkbox"] {width:16px;height:16px;accent-color:rgb(var(--color-blue));cursor:pointer;vertical-align:middle;}
+      ${sel} .ala-dbf-media-link {color:rgb(var(--color-text));text-decoration:none;font-weight:600;transition:color 0.12s;}
+      ${sel} .ala-dbf-media-link:hover {color:rgb(var(--color-blue));text-decoration:underline;}
+      ${sel} .ala-dbf-type-badge {display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:1rem;font-weight:700;letter-spacing:0.03em;background:rgba(var(--color-blue),0.15);color:rgb(var(--color-blue));vertical-align:middle;}
+      ${sel} .ala-dbf-type-badge.manga {background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));}
+      ${sel} .ala-dbf-date-diff {display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;font-variant-numeric:tabular-nums;}
+      ${sel} .ala-dbf-old-date {color:rgb(var(--color-text-lighter));}
+      ${sel} .ala-dbf-arrow {color:rgb(var(--color-text-lighter));font-size:1.1rem;}
+      ${sel} .ala-dbf-new-date {display:inline-block;padding:2px 7px;border-radius:4px;background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));font-weight:700;}
+      ${sel} .ala-dbf-new-date.assumed {background:rgba(235,168,52,0.16);color:rgb(235,168,52);}
+      ${sel} .ala-dbf-source {margin-top:3px;font-size:1.1rem;color:rgb(var(--color-text-lighter));}
+      ${sel} .ala-dbf-source.assumed {color:rgb(235,168,52);}
+      ${sel} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
+      ${sel} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
+      ${sel} .ala-core-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);justify-content:space-between;gap:12px;flex-wrap:wrap;}
+      ${sel} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
+      ${sel} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
+      ${sel} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
+      ${sel} .ala-dbf-dot.paused {background:rgb(235,168,52);}
+      ${sel} .ala-dbf-dot.done {background:rgb(var(--color-green));}
+      ${sel} .ala-dbf-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      ${sel} .ala-dbf-actions[hidden] {display:none;}
+      ${sel} button.ala-dbf-btn {padding:7px 14px;border:1px solid transparent;border-radius:6px;cursor:pointer;font-size:1.25rem;font-weight:600;background:rgb(var(--color-blue));color:#fff;transition:filter 0.14s,background 0.14s,opacity 0.14s;}
+      ${sel} button.ala-dbf-btn:hover:not(:disabled) {filter:brightness(1.08);}
+      ${sel} button.ala-dbf-btn.secondary {background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
+      ${sel} button.ala-dbf-btn.secondary:hover:not(:disabled) {background:rgba(var(--color-text),0.16);}
+      ${sel} button.ala-dbf-btn.apply {background:rgb(var(--color-green));color:#fff;}
+      ${sel} button.ala-dbf-btn.mini {padding:5px 10px;font-size:1.15rem;}
+      ${sel} button:disabled {opacity:0.45;cursor:not-allowed;}
+      @media (max-width:640px) {
+        ${sel} {padding:10px;}
+        ${sel} .ala-core-sheet {max-height:92vh;}
+        ${sel} .ala-core-head {padding:12px 14px;}
+        ${sel} .ala-core-body {padding:12px 14px;}
+        ${sel} .ala-dbf-mode-grid {grid-template-columns:1fr;}
+        ${sel} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
+        ${sel} .ala-dbf-search {font-size:16px;}
+        ${sel} .ala-core-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
+        ${sel} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
+        ${sel} .ala-dbf-actions[hidden] {display:none;}
+        ${sel} .ala-core-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
+        ${sel} table,${sel} tbody,${sel} tr,${sel} td {display:block;width:100%;}
+        ${sel} thead {display:none;}
+        ${sel} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
+        ${sel} tbody tr:last-child {border-bottom:none;}
+        ${sel} tbody td {padding:4px 0;border-bottom:none;}
+        ${sel} tbody td.ala-dbf-check-cell {float:left;width:28px;padding-top:2px;}
+        ${sel} tbody td.ala-dbf-title-cell {padding-left:28px;margin-bottom:4px;}
+        ${sel} tbody td.ala-dbf-unresolved-title {margin-bottom:4px;}
+        ${sel} tbody td[data-label] {display:flex;align-items:baseline;gap:8px;padding-left:28px;font-size:1.2rem;}
+        ${sel} tbody td.ala-dbf-unresolved-meta[data-label] {padding-left:0;}
+        ${sel} tbody td[data-label]::before {content:attr(data-label);flex-shrink:0;min-width:54px;font-size:1.1rem;font-weight:700;text-transform:uppercase;color:rgb(var(--color-text-lighter));}
+      }`;
+
 defineModule({
   id: "dateBackfill",
   key: "dateBackfillEnabled",
@@ -387,135 +508,17 @@ defineModule({
     help: "Log list scans, activity pagination, and entry updates.",
   },
   setup(ctx) {
-    const MODAL_ID = ctx.getId("modal");
-    let activeModalAbort: AbortController | null = null;
-
-    ctx.onCleanup(() => {
-      activeModalAbort?.abort();
-      activeModalAbort = null;
-    });
-
-    ctx.addStyle(
-      `@keyframes alaDbfModalIn {from{opacity:0;transform:translateY(8px) scale(0.985);}to{opacity:1;transform:translateY(0) scale(1);}}
-      @keyframes alaDbfIndeterminate {0%{transform:translateX(-100%);}100%{transform:translateX(350%);}}
-      @keyframes alaDbfPulse {0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.4;transform:scale(0.85);}}
-      #${MODAL_ID} .ala-core-sheet {max-height:88vh;border:1px solid rgba(var(--color-text),0.1);font-size:1.3rem;animation:alaDbfModalIn 0.16s ease-out;}
-      #${MODAL_ID} .ala-core-head {padding:16px 22px;background:rgb(var(--color-background));border-bottom:1px solid rgba(var(--color-text),0.08);align-items:flex-start;}
-      #${MODAL_ID} .ala-dbf-title-wrap {display:flex;flex-direction:column;gap:4px;min-width:0;}
-      #${MODAL_ID} .ala-dbf-subtitle {font-size:1.2rem;color:rgb(var(--color-text-lighter));line-height:1.35;}
-      #${MODAL_ID} .ala-dbf-progress-track {height:3px;width:100%;background:rgba(var(--color-text),0.07);overflow:hidden;position:relative;flex-shrink:0;}
-      #${MODAL_ID} .ala-dbf-progress-fill {height:100%;width:0%;background:rgb(var(--color-blue));transition:width 0.25s ease;}
-      #${MODAL_ID} .ala-dbf-progress-fill.indeterminate {width:30%;animation:alaDbfIndeterminate 1.35s infinite ease-in-out;}
-      #${MODAL_ID} .ala-dbf-progress-fill.applying {background:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-core-body {padding:18px 22px;}
-      #${MODAL_ID} .ala-core-body::-webkit-scrollbar {width:8px;}
-      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb {background:rgba(var(--color-text),0.18);border-radius:4px;}
-      #${MODAL_ID} .ala-core-body::-webkit-scrollbar-thumb:hover {background:rgba(var(--color-text),0.3);}
-      #${MODAL_ID} .ala-dbf-config-bar {display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
-      #${MODAL_ID} .ala-dbf-config-chip {display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:1.15rem;background:rgba(var(--color-text),0.07);color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID} .ala-dbf-config-chip strong {color:rgb(var(--color-text));font-weight:600;}
-      #${MODAL_ID} .ala-dbf-mode-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;}
-      #${MODAL_ID} .ala-dbf-mode-card {display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:8px;width:100%;padding:16px 18px;border-radius:8px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.1);color:rgb(var(--color-text));cursor:pointer;transition:border-color 0.15s,transform 0.12s,background 0.15s;}
-      #${MODAL_ID} .ala-dbf-mode-card:hover {border-color:rgb(var(--color-blue));background:rgba(var(--color-blue),0.06);transform:translateY(-1px);}
-      #${MODAL_ID} .ala-dbf-mode-card-head {display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-mode-card-title {font-size:1.4rem;font-weight:700;color:rgb(var(--color-text));}
-      #${MODAL_ID} .ala-dbf-mode-badge {padding:2px 8px;border-radius:999px;font-size:1.05rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;background:rgba(var(--color-blue),0.16);color:rgb(var(--color-blue));}
-      #${MODAL_ID} .ala-dbf-mode-desc {font-size:1.2rem;line-height:1.45;color:rgb(var(--color-text-lighter));font-weight:400;}
-      #${MODAL_ID} .ala-dbf-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;}
-      #${MODAL_ID} .ala-dbf-stat-card {padding:10px 14px;border-radius:7px;background:rgb(var(--color-background));border:1px solid rgba(var(--color-text),0.07);display:flex;flex-direction:column;gap:3px;min-width:0;}
-      #${MODAL_ID} .ala-dbf-stat-label {font-size:1.1rem;text-transform:uppercase;letter-spacing:0.04em;color:rgb(var(--color-text-lighter));font-weight:600;}
-      #${MODAL_ID} .ala-dbf-stat-val {font-size:1.65rem;font-weight:700;font-variant-numeric:tabular-nums;}
-      #${MODAL_ID} .ala-dbf-stat-val.green {color:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-stat-val.blue {color:rgb(var(--color-blue));}
-      #${MODAL_ID} .ala-dbf-toolbar {display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-search {flex:1;min-width:180px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(var(--color-text),0.14);background:rgb(var(--color-background));color:rgb(var(--color-text));font-size:1.25rem;outline:none;transition:border-color 0.15s;}
-      #${MODAL_ID} .ala-dbf-search:focus {border-color:rgb(var(--color-blue));}
-      #${MODAL_ID} .ala-dbf-section {margin-bottom:16px;border:1px solid rgba(var(--color-text),0.08);border-radius:8px;background:rgb(var(--color-background));overflow-x:hidden;}
-      #${MODAL_ID} .ala-dbf-section:last-child {margin-bottom:0;}
-      #${MODAL_ID} .ala-dbf-section-head {padding:10px 14px;background:rgba(var(--color-foreground),0.55);border-bottom:1px solid rgba(var(--color-text),0.08);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-weight:700;font-size:1.3rem;}
-      #${MODAL_ID} .ala-dbf-section-head.collapsible {cursor:pointer;user-select:none;}
-      #${MODAL_ID} .ala-dbf-section-head.collapsible:hover {background:rgba(var(--color-text),0.05);}
-      #${MODAL_ID} .ala-dbf-table-wrap {width:100%;overflow-x:hidden;}
-      #${MODAL_ID} table {width:100%;table-layout:fixed;border-collapse:collapse;font-size:1.25rem;}
-      #${MODAL_ID} thead th {background:rgb(var(--color-background));color:rgb(var(--color-text-lighter));font-size:1.1rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:9px 12px;border-bottom:1px solid rgba(var(--color-text),0.12);text-align:left;}
-      #${MODAL_ID} tbody td {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.06);vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;}
-      #${MODAL_ID} tbody tr:last-child td {border-bottom:none;}
-      #${MODAL_ID} tbody tr {transition:background 0.12s,opacity 0.12s;}
-      #${MODAL_ID} tbody tr:hover {background:rgba(var(--color-text),0.035);}
-      #${MODAL_ID} tbody tr.is-selected {background:rgba(var(--color-blue),0.055);}
-      #${MODAL_ID} tbody tr.is-unselected {opacity:0.72;}
-      #${MODAL_ID} input[type="checkbox"] {width:16px;height:16px;accent-color:rgb(var(--color-blue));cursor:pointer;vertical-align:middle;}
-      #${MODAL_ID} .ala-dbf-media-link {color:rgb(var(--color-text));text-decoration:none;font-weight:600;transition:color 0.12s;}
-      #${MODAL_ID} .ala-dbf-media-link:hover {color:rgb(var(--color-blue));text-decoration:underline;}
-      #${MODAL_ID} .ala-dbf-type-badge {display:inline-block;margin-left:6px;padding:1px 6px;border-radius:4px;font-size:1rem;font-weight:700;letter-spacing:0.03em;background:rgba(var(--color-blue),0.15);color:rgb(var(--color-blue));vertical-align:middle;}
-      #${MODAL_ID} .ala-dbf-type-badge.manga {background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-date-diff {display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;font-variant-numeric:tabular-nums;}
-      #${MODAL_ID} .ala-dbf-old-date {color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID} .ala-dbf-arrow {color:rgb(var(--color-text-lighter));font-size:1.1rem;}
-      #${MODAL_ID} .ala-dbf-new-date {display:inline-block;padding:2px 7px;border-radius:4px;background:rgba(var(--color-green),0.15);color:rgb(var(--color-green));font-weight:700;}
-      #${MODAL_ID} .ala-dbf-new-date.assumed {background:rgba(235,168,52,0.16);color:rgb(235,168,52);}
-      #${MODAL_ID} .ala-dbf-source {margin-top:3px;font-size:1.1rem;color:rgb(var(--color-text-lighter));}
-      #${MODAL_ID} .ala-dbf-source.assumed {color:rgb(235,168,52);}
-      #${MODAL_ID} .ala-dbf-pill {display:inline-block;padding:2px 8px;border-radius:4px;font-size:1.1rem;font-weight:600;background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
-      #${MODAL_ID} .ala-dbf-empty-note {padding:16px 14px;margin:0;color:rgb(var(--color-text-lighter));font-size:1.25rem;}
-      #${MODAL_ID} .ala-core-foot {padding:13px 22px;background:rgb(var(--color-background));border-top:1px solid rgba(var(--color-text),0.08);justify-content:space-between;gap:12px;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-status {display:inline-flex;align-items:center;gap:8px;color:rgb(var(--color-text-lighter));font-size:1.2rem;min-width:0;}
-      #${MODAL_ID} .ala-dbf-dot {width:8px;height:8px;border-radius:50%;background:rgb(var(--color-text-lighter));flex-shrink:0;}
-      #${MODAL_ID} .ala-dbf-dot.active {background:rgb(var(--color-blue));animation:alaDbfPulse 1.1s infinite ease-in-out;}
-      #${MODAL_ID} .ala-dbf-dot.paused {background:rgb(235,168,52);}
-      #${MODAL_ID} .ala-dbf-dot.done {background:rgb(var(--color-green));}
-      #${MODAL_ID} .ala-dbf-actions {display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-      #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
-      #${MODAL_ID} button.ala-dbf-btn {padding:7px 14px;border:1px solid transparent;border-radius:6px;cursor:pointer;font-size:1.25rem;font-weight:600;background:rgb(var(--color-blue));color:#fff;transition:filter 0.14s,background 0.14s,opacity 0.14s;}
-      #${MODAL_ID} button.ala-dbf-btn:hover:not(:disabled) {filter:brightness(1.08);}
-      #${MODAL_ID} button.ala-dbf-btn.secondary {background:rgba(var(--color-text),0.1);color:rgb(var(--color-text));}
-      #${MODAL_ID} button.ala-dbf-btn.secondary:hover:not(:disabled) {background:rgba(var(--color-text),0.16);}
-      #${MODAL_ID} button.ala-dbf-btn.apply {background:rgb(var(--color-green));color:#fff;}
-      #${MODAL_ID} button.ala-dbf-btn.mini {padding:5px 10px;font-size:1.15rem;}
-      #${MODAL_ID} button:disabled {opacity:0.45;cursor:not-allowed;}
-      @media (max-width:640px) {
-        #${MODAL_ID} {padding:10px;}
-        #${MODAL_ID} .ala-core-sheet {max-height:92vh;}
-        #${MODAL_ID} .ala-core-head {padding:12px 14px;}
-        #${MODAL_ID} .ala-core-body {padding:12px 14px;}
-        #${MODAL_ID} .ala-dbf-mode-grid {grid-template-columns:1fr;}
-        #${MODAL_ID} .ala-dbf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
-        #${MODAL_ID} .ala-dbf-search {font-size:16px;}
-        #${MODAL_ID} .ala-core-foot {padding:12px 14px;flex-direction:column;align-items:stretch;}
-        #${MODAL_ID} .ala-dbf-actions {display:flex;flex-direction:column;width:100%;}
-        #${MODAL_ID} .ala-dbf-actions[hidden] {display:none;}
-        #${MODAL_ID} .ala-core-foot button.ala-dbf-btn {width:100%;padding:10px 14px;text-align:center;}
-        #${MODAL_ID} table,#${MODAL_ID} tbody,#${MODAL_ID} tr,#${MODAL_ID} td {display:block;width:100%;}
-        #${MODAL_ID} thead {display:none;}
-        #${MODAL_ID} tbody tr {padding:10px 12px;border-bottom:1px solid rgba(var(--color-text),0.08);}
-        #${MODAL_ID} tbody tr:last-child {border-bottom:none;}
-        #${MODAL_ID} tbody td {padding:4px 0;border-bottom:none;}
-        #${MODAL_ID} tbody td.ala-dbf-check-cell {float:left;width:28px;padding-top:2px;}
-        #${MODAL_ID} tbody td.ala-dbf-title-cell {padding-left:28px;margin-bottom:4px;}
-        #${MODAL_ID} tbody td.ala-dbf-unresolved-title {margin-bottom:4px;}
-        #${MODAL_ID} tbody td[data-label] {display:flex;align-items:baseline;gap:8px;padding-left:28px;font-size:1.2rem;}
-        #${MODAL_ID} tbody td.ala-dbf-unresolved-meta[data-label] {padding-left:0;}
-        #${MODAL_ID} tbody td[data-label]::before {content:attr(data-label);flex-shrink:0;min-width:54px;font-size:1.1rem;font-weight:700;text-transform:uppercase;color:rgb(var(--color-text-lighter));}
-      }`,
-    );
-
-    async function resolveUserId(): Promise<number | null> {
+    async function resolveUserId(signal?: AbortSignal): Promise<number | null> {
       if (ctx.session.userId) return ctx.session.userId;
       if (!ctx.session.hasAuth()) return null;
-      const viewer = await ctx.api.viewer();
+      const viewer = await ctx.api.viewer(false, { signal });
       return viewer?.id ?? null;
     }
 
     function openModal() {
-      activeModalAbort?.abort();
-      const modalAbort = new AbortController();
-      activeModalAbort = modalAbort;
-
       let activeScanAbort: AbortController | null = null;
-      modalAbort.signal.addEventListener("abort", () => {
-        activeScanAbort?.abort();
-        activeScanAbort = null;
-      });
+      let scanStarting = false;
+      let isApplying = false;
 
       const renderIdleScreenHtml = () => {
         const scopeSetting = ctx.get<string>("dateBackfillScope");
@@ -560,9 +563,11 @@ defineModule({
       };
 
       const modal = ctx.modal({
-        id: MODAL_ID,
+        id: "modal",
         title: "Missing Date Backfill",
+        subtitle: "Recover missing start and completion dates from your AniList activity logs",
         maxWidth: "960px",
+        style: buildDateBackfillModalCss,
         bodyHtml: renderIdleScreenHtml(),
         footerHtml: `
           <div class="ala-dbf-status">
@@ -574,7 +579,10 @@ defineModule({
             <button type="button" class="ala-dbf-btn apply" data-act="apply" disabled>Apply Selected (0)</button>
           </div>
         `,
-        onClose: () => modalAbort.abort(),
+      });
+      modal.onCleanup(() => {
+        activeScanAbort?.abort();
+        activeScanAbort = null;
       });
 
       const overlay = modal.backdrop;
@@ -582,19 +590,6 @@ defineModule({
       const statusEl = modal.footer.querySelector('[data-role="status"]') as HTMLElement;
       const dotEl = modal.footer.querySelector('[data-role="dot"]') as HTMLElement;
       const footerActionsEl = modal.footer.querySelector('[data-role="footer-actions"]') as HTMLElement;
-
-      const headEl = modal.sheet.querySelector(".ala-core-head");
-      const h2 = headEl?.querySelector("h2");
-      if (h2) {
-        const wrap = document.createElement("div");
-        wrap.className = "ala-dbf-title-wrap";
-        h2.parentNode?.insertBefore(wrap, h2);
-        wrap.appendChild(h2);
-        const sub = document.createElement("div");
-        sub.className = "ala-dbf-subtitle";
-        sub.textContent = "Recover missing start and completion dates from your AniList activity logs";
-        wrap.appendChild(sub);
-      }
 
       const track = document.createElement("div");
       track.className = "ala-dbf-progress-track";
@@ -650,43 +645,35 @@ defineModule({
         statusEl.textContent = text;
       };
 
-      const sleepInterruptible = (ms: number, signal: AbortSignal) =>
-        new Promise<void>((resolve, reject) => {
-          if (signal.aborted) {
-            reject(new DOMException("Aborted", "AbortError"));
+      const sleepInterruptible = async (ms: number, signal: AbortSignal): Promise<void> => {
+        if (signal.aborted) {
+          throw createAbortError(signal);
+        }
+        if (ms <= 0 || pauseRequested) {
+          return;
+        }
+        const wakeAc = new AbortController();
+        const { signal: combinedSignal, dispose } = composeAbortSignals(signal, wakeAc.signal);
+        wakeSleepFn = () => {
+          wakeAc.abort();
+        };
+        try {
+          await sleep(ms, combinedSignal);
+        } catch (err) {
+          if (!signal.aborted && wakeAc.signal.aborted) {
             return;
           }
-          if (ms <= 0 || pauseRequested) {
-            resolve();
-            return;
-          }
-          let done = false;
-          const finish = () => {
-            if (done) return;
-            done = true;
-            wakeSleepFn = null;
-            signal.removeEventListener("abort", onAbort);
-            resolve();
-          };
-          const cancelTimer = ctx.timeout(finish, ms);
-          const onAbort = () => {
-            if (done) return;
-            done = true;
-            wakeSleepFn = null;
-            cancelTimer();
-            reject(new DOMException("Aborted", "AbortError"));
-          };
-          wakeSleepFn = () => {
-            cancelTimer();
-            finish();
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
+          throw err;
+        } finally {
+          wakeSleepFn = null;
+          dispose();
+        }
+      };
 
       const waitIfPaused = (signal: AbortSignal) =>
         new Promise<void>((resolve, reject) => {
           if (signal.aborted) {
-            reject(new DOMException("Aborted", "AbortError"));
+            reject(createAbortError(signal));
             return;
           }
           if (!pauseRequested) {
@@ -703,7 +690,7 @@ defineModule({
 
           const onAbort = () => {
             resumeResolver = null;
-            reject(new DOMException("Aborted", "AbortError"));
+            reject(createAbortError(signal));
           };
           resumeResolver = () => {
             signal.removeEventListener("abort", onAbort);
@@ -716,6 +703,16 @@ defineModule({
         });
 
       const updateButtons = () => {
+        const backBtn = bodyEl.querySelector<HTMLButtonElement>(
+          '[data-act="back-idle"]',
+        );
+        const selectionBtns = bodyEl.querySelectorAll<HTMLButtonElement>(
+          '[data-act="toggle-all"], [data-act="select-confirmed"]',
+        );
+        const checkboxes = bodyEl.querySelectorAll<HTMLInputElement>(
+          'input[type="checkbox"][data-media-id]',
+        );
+
         if (scanState === "idle") {
           footerActionsEl.hidden = true;
           return;
@@ -726,22 +723,28 @@ defineModule({
         applyBtn.textContent = `Apply Selected (${selectedCount})`;
 
         if (scanState === "scanning") {
-          primaryActionBtn.disabled = pauseRequested;
+          primaryActionBtn.disabled = isApplying || pauseRequested;
           primaryActionBtn.textContent = pauseRequested ? "Pausing..." : "Pause";
           primaryActionBtn.className = "ala-dbf-btn secondary";
           applyBtn.disabled = true;
         } else if (scanState === "paused") {
-          primaryActionBtn.disabled = false;
+          primaryActionBtn.disabled = isApplying;
           primaryActionBtn.textContent = "Resume Scan";
           primaryActionBtn.className = "ala-dbf-btn";
-          applyBtn.disabled = selectedCount === 0;
+          applyBtn.disabled = isApplying || selectedCount === 0;
         } else {
-          primaryActionBtn.disabled = false;
+          primaryActionBtn.disabled = isApplying;
           primaryActionBtn.textContent =
             activeMode === "TARGETED" ? "Full Feed Scan" : "Fast Scan";
           primaryActionBtn.className = "ala-dbf-btn";
-          applyBtn.disabled = selectedCount === 0;
+          applyBtn.disabled = isApplying || selectedCount === 0;
         }
+
+        if (backBtn) {
+          backBtn.disabled = isApplying || scanState === "scanning";
+        }
+        for (const btn of selectionBtns) btn.disabled = isApplying;
+        for (const cb of checkboxes) cb.disabled = isApplying;
       };
 
       const setScanState = (next: ScanState) => {
@@ -750,8 +753,10 @@ defineModule({
       };
 
       const resetToIdleScreen = () => {
+        if (isApplying) return;
         activeScanAbort?.abort();
         activeScanAbort = null;
+        scanStarting = false;
         pauseRequested = false;
         resumeResolver = null;
         wakeSleepFn = null;
@@ -785,7 +790,7 @@ defineModule({
                 type="button"
                 class="ala-dbf-btn secondary mini"
                 data-act="back-idle"
-                ${scanState === "scanning" ? "disabled" : ""}
+                ${isApplying || scanState === "scanning" ? "disabled" : ""}
                 title="Return to scan mode selection"
               >← Modes</button>
               <input
@@ -793,7 +798,7 @@ defineModule({
                 class="ala-dbf-search"
                 data-role="filter"
                 placeholder="Filter entries by title..."
-                value="${escapeHtml(filterQuery)}"
+                value="${esc(filterQuery)}"
               />
             </div>
             <div data-role="results"></div>
@@ -805,7 +810,7 @@ defineModule({
           const backBtn = bodyEl.querySelector(
             '[data-act="back-idle"]',
           ) as HTMLButtonElement | null;
-          if (backBtn) backBtn.disabled = scanState === "scanning";
+          if (backBtn) backBtn.disabled = isApplying || scanState === "scanning";
         }
         return resultsContainer;
       };
@@ -827,7 +832,7 @@ defineModule({
         updateButtons();
       };
 
-      ctx.listen(overlay, "click", (ev) => {
+      modal.listen(overlay, "click", (ev) => {
         const target = (ev.target as HTMLElement).closest(
           "[data-act]",
         ) as HTMLElement | null;
@@ -838,10 +843,11 @@ defineModule({
         } else if (act === "scan-full") {
           void runScan("FEED");
         } else if (act === "back-idle") {
-          if (scanState !== "scanning") {
+          if (!isApplying && scanState !== "scanning" && !scanStarting) {
             resetToIdleScreen();
           }
         } else if (act === "primary-action") {
+          if (isApplying) return;
           if (scanState === "scanning" && !pauseRequested) {
             pauseRequested = true;
             updateButtons();
@@ -856,6 +862,7 @@ defineModule({
         } else if (act === "apply") {
           void runApply();
         } else if (act === "toggle-all") {
+          if (isApplying) return;
           const allSelected =
             proposals.length > 0 && proposals.every((p) => p.selected);
           const nextVal = !allSelected;
@@ -866,6 +873,7 @@ defineModule({
           renderResults();
           updateButtons();
         } else if (act === "select-confirmed") {
+          if (isApplying) return;
           for (const p of proposals) {
             const nextVal = !isAssumedProposal(p);
             p.selected = nextVal;
@@ -879,7 +887,7 @@ defineModule({
         }
       });
 
-      ctx.listen(overlay, "input", (ev) => {
+      modal.listen(overlay, "input", (ev) => {
         const input = ev.target as HTMLInputElement;
         if (input.dataset.role === "filter") {
           filterQuery = input.value;
@@ -887,7 +895,8 @@ defineModule({
         }
       });
 
-      ctx.listen(overlay, "change", (ev) => {
+      modal.listen(overlay, "change", (ev) => {
+        if (isApplying) return;
         const input = ev.target as HTMLInputElement;
         if (input.type === "checkbox" && input.dataset.mediaId !== undefined) {
           const mediaId = Number(input.dataset.mediaId);
@@ -913,14 +922,65 @@ defineModule({
       };
 
       async function runScan(mode: ScanMode) {
+        if (
+          isApplying ||
+          scanStarting ||
+          scanState === "scanning" ||
+          modal.signal.aborted
+        ) {
+          return;
+        }
+
+        scanStarting = true;
+        const modeButtons = Array.from(
+          bodyEl.querySelectorAll<HTMLButtonElement>(
+            '[data-act="scan-fast"], [data-act="scan-full"]',
+          ),
+        );
+        const backBtn = bodyEl.querySelector<HTMLButtonElement>(
+          '[data-act="back-idle"]',
+        );
+        for (const btn of modeButtons) btn.disabled = true;
+        if (backBtn) backBtn.disabled = true;
+        primaryActionBtn.disabled = true;
+
         activeScanAbort?.abort();
         const scanAbort = new AbortController();
         activeScanAbort = scanAbort;
         const signal = scanAbort.signal;
 
-        const userId = await resolveUserId();
-        if (signal.aborted) return;
+        const restorePreScanButtons = () => {
+          for (const btn of modeButtons) btn.disabled = false;
+          if (backBtn) backBtn.disabled = scanState === "scanning";
+          updateButtons();
+        };
+
+        let userId: number | null = null;
+        try {
+          userId = await resolveUserId(modal.signal);
+        } catch (err) {
+          scanStarting = false;
+          if (signal.aborted || modal.signal.aborted || isAbortError(err)) {
+            return;
+          }
+          ctx.log.error("Failed to resolve AniList user:", err);
+          if (activeScanAbort === scanAbort) activeScanAbort = null;
+          restorePreScanButtons();
+          ctx.toast.error("Date backfill scan failed.");
+          return;
+        }
+
+        scanStarting = false;
+        if (signal.aborted || modal.signal.aborted) {
+          if (!modal.signal.aborted) {
+            if (activeScanAbort === scanAbort) activeScanAbort = null;
+            restorePreScanButtons();
+          }
+          return;
+        }
         if (!userId) {
+          if (activeScanAbort === scanAbort) activeScanAbort = null;
+          restorePreScanButtons();
           ctx.toast.error("Please log in to AniList first.");
           return;
         }
@@ -962,6 +1022,7 @@ defineModule({
             const listRes: MediaListResult = await ctx.api.getMediaList(
               userId,
               type,
+              { signal },
             );
             if (signal.aborted) return;
 
@@ -1044,7 +1105,7 @@ defineModule({
               if (effectiveOrder === "ASC") {
                 if (
                   !isDateEmpty(cand.completedAt) &&
-                  compareFuzzyDates(
+                  compareFuzzyDatesCompatible(
                     fuzzyDateFromTimestamp(act.createdAt),
                     cand.completedAt,
                   ) > 0
@@ -1177,13 +1238,17 @@ defineModule({
                       media?: { id: number };
                     }>;
                   };
-                }>(ACTIVITY_PAGE_QUERY, {
-                  userId,
-                  page: queryPage,
-                  types: activityTypes,
-                  mediaIds: activeIds,
-                  sort: [querySort === "DESC" ? "ID_DESC" : "ID"],
-                });
+                }>(
+                  ACTIVITY_PAGE_QUERY,
+                  {
+                    userId,
+                    page: queryPage,
+                    types: activityTypes,
+                    mediaIds: activeIds,
+                    sort: [querySort === "DESC" ? "ID_DESC" : "ID"],
+                  },
+                  { signal },
+                );
 
                 if (signal.aborted) return;
 
@@ -1248,12 +1313,16 @@ defineModule({
                     media?: { id: number };
                   }>;
                 };
-              }>(ACTIVITY_PAGE_QUERY, {
-                userId,
-                page,
-                types: activityTypes,
-                sort: [sortDir],
-              });
+              }>(
+                ACTIVITY_PAGE_QUERY,
+                {
+                  userId,
+                  page,
+                  types: activityTypes,
+                  sort: [sortDir],
+                },
+                { signal },
+              );
 
               if (signal.aborted) return;
 
@@ -1292,7 +1361,13 @@ defineModule({
             `${modeLabel(mode)} complete: ${proposals.length} found, ${unresolved.length} without matching logs.`,
           );
         } catch (err) {
-          if ((err as Error)?.name === "AbortError") return;
+          if (
+            signal.aborted ||
+            modal.signal.aborted ||
+            isAbortError(err)
+          ) {
+            return;
+          }
           ctx.log.error("Scan failed:", err);
           setScanState("done");
           setProgress(0, "idle");
@@ -1351,7 +1426,7 @@ defineModule({
         if (filteredProposals.length > 0) {
           const allSelected = proposals.every((p) => p.selected);
           const confirmedOnlyBtn = hasAssumed
-            ? `<button type="button" class="ala-dbf-btn secondary mini" data-act="select-confirmed" title="Select only entries backed by activity logs">Confirmed Only</button>`
+            ? `<button type="button" class="ala-dbf-btn secondary mini" data-act="select-confirmed" title="Select only entries backed by activity logs" ${isApplying ? "disabled" : ""}>Confirmed Only</button>`
             : "";
 
           const rows = filteredProposals
@@ -1370,7 +1445,7 @@ defineModule({
                       <span class="ala-dbf-arrow">→</span>
                       <span class="ala-dbf-new-date ${assumed ? "assumed" : ""}">${formatFuzzyDate(p.newStartedAt)}</span>
                     </div>
-                    <div class="ala-dbf-source ${assumed ? "assumed" : ""}">${escapeHtml(p.startSource ?? "")}</div>
+                    <div class="ala-dbf-source ${assumed ? "assumed" : ""}">${esc(p.startSource ?? "")}</div>
                   </div>`
                 : `<span class="ala-dbf-old-date">${formatFuzzyDate(p.entry.startedAt)}</span>`;
 
@@ -1384,9 +1459,9 @@ defineModule({
 
               return `
                 <tr class="${p.selected ? "is-selected" : "is-unselected"}">
-                  <td class="ala-dbf-check-cell"><input type="checkbox" data-media-id="${p.entry.mediaId}" ${p.selected ? "checked" : ""} /></td>
+                  <td class="ala-dbf-check-cell"><input type="checkbox" data-media-id="${p.entry.mediaId}" ${p.selected ? "checked" : ""} ${isApplying ? "disabled" : ""} /></td>
                   <td class="ala-dbf-title-cell">
-                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(p.entry.title)}</a>
+                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${esc(p.entry.title)}</a>
                     <span class="${typeClass}">${p.entry.mediaType}</span>
                   </td>
                   <td data-label="Start">${startCell}</td>
@@ -1402,7 +1477,7 @@ defineModule({
                 <span>Found Entries (${filteredProposals.length}${query ? ` of ${proposals.length}` : ""})</span>
                 <div class="ala-dbf-actions">
                   ${confirmedOnlyBtn}
-                  <button type="button" class="ala-dbf-btn secondary mini" data-act="toggle-all">
+                  <button type="button" class="ala-dbf-btn secondary mini" data-act="toggle-all" ${isApplying ? "disabled" : ""}>
                     ${allSelected ? "Unselect All" : "Select All"}
                   </button>
                 </div>
@@ -1453,7 +1528,7 @@ defineModule({
                   ? "ala-dbf-type-badge manga"
                   : "ala-dbf-type-badge";
               const statusNote = u.ruledOutReason
-                ? escapeHtml(u.ruledOutReason)
+                ? esc(u.ruledOutReason)
                 : isSearching
                   ? "Still scanning..."
                   : "No matching activity in history";
@@ -1461,11 +1536,11 @@ defineModule({
               return `
                 <tr>
                   <td class="ala-dbf-unresolved-title">
-                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.entry.title)}</a>
+                    <a class="ala-dbf-media-link" href="${mediaUrl}" target="_blank" rel="noopener noreferrer">${esc(u.entry.title)}</a>
                     <span class="${typeClass}">${u.entry.mediaType}</span>
                   </td>
-                  <td class="ala-dbf-unresolved-meta" data-label="Status"><span class="ala-dbf-pill">${escapeHtml(u.entry.status)}</span></td>
-                  <td class="ala-dbf-unresolved-meta" data-label="Missing">${escapeHtml(u.missingLabel)}</td>
+                  <td class="ala-dbf-unresolved-meta" data-label="Status"><span class="ala-dbf-pill">${esc(u.entry.status)}</span></td>
+                  <td class="ala-dbf-unresolved-meta" data-label="Missing">${esc(u.missingLabel)}</td>
                   <td class="ala-dbf-unresolved-meta" data-label="Scan" style="color:rgb(var(--color-text-lighter));font-size:1.15rem;">${statusNote}</td>
                 </tr>
               `;
@@ -1506,19 +1581,16 @@ defineModule({
       }
 
       async function runApply() {
+        if (isApplying || modal.signal.aborted) return;
         const chosen = proposals.filter((p) => p.selected);
         if (chosen.length === 0) return;
 
+        isApplying = true;
         const previousState = scanState;
-        primaryActionBtn.disabled = true;
-        applyBtn.disabled = true;
-        const backBtn = bodyEl.querySelector(
-          '[data-act="back-idle"]',
-        ) as HTMLButtonElement | null;
-        if (backBtn) backBtn.disabled = true;
+        updateButtons();
 
         const delayMs = ctx.get<number>("dateBackfillDelayMs");
-        const signal = modalAbort.signal;
+        const signal = modal.signal;
 
         let saved = 0;
         try {
@@ -1537,7 +1609,8 @@ defineModule({
             if (item.newStartedAt) vars.startedAt = item.newStartedAt;
             if (item.newCompletedAt) vars.completedAt = item.newCompletedAt;
 
-            await ctx.api.query(SAVE_ENTRY_MUTATION, vars);
+            await ctx.api.query(SAVE_ENTRY_MUTATION, vars, { signal });
+            if (signal.aborted) return;
 
             candidates.delete(item.entry.mediaId);
             activitiesByMedia.delete(item.entry.mediaId);
@@ -1548,9 +1621,11 @@ defineModule({
 
             if (saved < chosen.length) {
               await sleepInterruptible(delayMs, signal);
+              if (signal.aborted) return;
             }
           }
 
+          if (signal.aborted) return;
           setProgress(100, "applying");
           refreshSnapshotAndRender();
           if (previousState === "paused") {
@@ -1563,7 +1638,7 @@ defineModule({
           }
           ctx.toast.success(`Updated dates on ${saved} AniList entries.`);
         } catch (err) {
-          if ((err as Error)?.name === "AbortError") return;
+          if (signal.aborted || isAbortError(err)) return;
           ctx.log.error("Update failed:", err);
           setProgress(0, "idle");
           refreshSnapshotAndRender();
@@ -1573,12 +1648,9 @@ defineModule({
           );
           ctx.toast.error("Failed while saving updates.");
         } finally {
-          setScanState(previousState);
-          const refreshedBackBtn = bodyEl.querySelector(
-            '[data-act="back-idle"]',
-          ) as HTMLButtonElement | null;
-          if (refreshedBackBtn) {
-            refreshedBackBtn.disabled = previousState === "scanning";
+          isApplying = false;
+          if (!signal.aborted) {
+            setScanState(previousState);
           }
         }
       }
@@ -1587,11 +1659,3 @@ defineModule({
     ctx.menuCommand("Backfill Missing Media Dates", () => openModal());
   },
 });
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}

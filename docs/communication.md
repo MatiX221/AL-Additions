@@ -134,12 +134,12 @@ const stop = ctx.hooks.onGqlFetch((ev) => {
 });
 ```
 
-A `GqlFetchEvent` has `phase` (`'request'` or `'response'`), `url`, `query`, `variables`, optional `operationName`, and on responses `status`, `ok`, and the parsed `data` when available.
+A `GqlFetchEvent` has `phase` (`'request'` or `'response'`), `url`, `query`, `variables`, optional `operationName`, and on responses `status`, `ok`, the parsed `data` when available, and `errors?: readonly { message?: string; [key: string]: any }[]` when the response carries top-level GraphQL `errors` (or a worker `error`). Because GraphQL often returns HTTP `200` (`ok: true`) with an `errors` array, response handlers checking for success should verify `ev.ok === true && !ev.errors?.length`.
 
 Events come from one of two places:
 
-- If a module has claimed fetch ownership with `markFetchOwner(true)` (the Fast Load feature does), that module reports each request itself through `emitGqlFetch`.
-- Otherwise, as soon as someone subscribes on `anilist.co`, the kernel installs a single shared wrapper around `fetch`. It is removed when the last subscriber leaves, or when a module claims ownership.
+- If a module has claimed fetch ownership with `markFetchOwner(true)` (the Fast Load feature does), that module reports each request itself through `emitGqlFetch`. `markFetchOwner(true)` allocates a per-owner token lease and returns an idempotent `CleanupFn` that releases only that caller's lease (and `ctx.hooks.markFetchOwner(true)` is tracked automatically via `whenAlive`, releasing on module unload or when `markFetchOwner(false)` releases that context's active leases).
+- Otherwise, as soon as someone subscribes on `anilist.co`, the kernel installs a single shared wrapper around `fetch`. It is removed when the last subscriber leaves, or while any fetch owner holds an active lease.
 
 Responses to AniList's own Web Worker requests are reported for mutations. `hasGqlFetchSubscribers()` tells an owner whether anyone is listening.
 
@@ -147,6 +147,7 @@ Responses to AniList's own Web Worker requests are reported for mutations. `hasG
 
 | Member | Description |
 | :--- | :--- |
+| `markFetchOwner(active)` | Pass `true` to claim fetch ownership and suppress the kernel's fallback `fetch` wrapper; returns an idempotent `CleanupFn` releasing only that token lease (re-installing the fallback wrapper if subscribers remain and no other owner holds a lease). Passing `false` releases any active leases owned by that `ctx` and returns a no-op cleanup. |
 | `blockRpc(predicate)` | Register `(query, variables) => boolean`. When any predicate returns `true`, the matching request is answered with an empty page instead of reaching the network. Returns a cleanup. A throwing predicate counts as `false`. |
 | `isRpcBlocked(query, variables)` | Ask whether a request would be blocked. Used by whoever performs requests. |
 | `setPrefetchPaused(paused)` | Pass `true` to stop background hover and navigation prefetching. Returns a release function. Prefetching resumes when every holder has released. |
@@ -156,12 +157,18 @@ Responses to AniList's own Web Worker requests are reported for mutations. `hasG
 
 `registerCacheBridge(bridge)` lets the module that owns AniList response caches share read access with the API client and other features, without page globals. A bridge provides `getGqlStore`, `getRpcCache`, `getRpcInflight`, `getUserMap`, `getIdMap`, `clear`, and `clearAuth`. `getCacheBridge()` returns the current bridge or `null`. Registering again replaces the bridge, and releasing an older registration never removes a newer one.
 
+In Fast Load's caches:
+
+- **Cache keys:** Both `modules/fastLoad/graphql.ts` and `modules/fastLoad/worker.ts` build keys through `buildQueryCacheKey` (and check blockers via `isRpcBlocked`) in `modules/fastLoad/helpers.ts`, resolving `userName` via `userMap` and falling back to `getViewerFromWindow().id || 'me'` symmetrically. Single-root, unfiltered, complete (`hasNextChunk !== true`) `MediaListCollection` responses (with valid variable or inline `type`/`userId`/`userName` arguments) are keyed as `gql:MediaListCollection:<TYPE>:<who>:{}` and `rpc:MediaListCollection:<TYPE>:<who>:{}`. Filtered, multi-root, aliased, conflicting-argument, or chunked `MediaListCollection` queries append query/variable suffixes and are skipped by `ctx.api.getMediaList` (which also validates required `mediaId`, `media`, and `status` entry fields), while `Taxonomy` and `Viewer` keys are scoped by query kind/hash, variables, and auth identity so distinct queries or accounts never collide.
+- **Page-global cleanup:** Fast Load mirrors its bridge onto legacy `win.__ALFL_*` globals (`__ALFL_STATS__`, `__ALFL_CLEAR__`, `__ALFL_GQL_STORE__`, `__ALFL_RPC_CACHE__`, `__ALFL_RPC_INFLIGHT__`, `__ALFL_USER_MAP__`, `__ALFL_ID_MAP__`) for standalone/console compatibility. On module disposal or yielding to a standalone script (`ctx.setStandalonePaused(true)`), its cleanups unregister the cache bridge and delete only its own `win.__ALFL_*` references (and `win.__ALA_FAST_LOAD__`) via identity checks so another copy's globals are left intact.
+- **Cache and worker cleanup:** Cache invalidation (`clearGlobalCache()`) clears `prefetched` and `prefetchedWorkerKeys` cooldowns alongside `store` and `rpcCache`, and module disposal resets Fast Load's in-memory caches (`store`, `rpcCache`, `userMap`, `idToUserMap`, `learned`, `prefetched`) while preserving persistent `coreStorage` preferences. Disposing or yielding terminates active prefetch `Worker`s and timers, and forwards any intercepted worker RPCs that have not yet dispatched a reply to the original `postMessage`.
+
 ### Session and authentication
 
 | Member | Description |
 | :--- | :--- |
 | `getAuthHeader()` | The captured `Authorization: Bearer ...` header, or `null`. |
-| `setAuthHeader(header)` | Store a header. Empty or non-Bearer values are ignored, `null` deletes it, and nothing is stored while a session wipe is in progress. |
+| `setAuthHeader(header)` | Store a header. Empty or non-Bearer values (anything not matching `Bearer <token>`, case-insensitive) are ignored, `null` (or `undefined`) deletes it, and nothing is stored while a session wipe is in progress. |
 | `clearAuth()` | Delete the stored header and clear any cache bridge's copy. |
 | `setSessionClearing(active)` / `isSessionClearing()` | Mark that a logout or backup restore is wiping the session, so in-flight requests do not write stale credentials back. Calls are counted, so nested wipes work. |
 
@@ -169,7 +176,7 @@ For reading the logged-in user, use [AniList Session](./platform-apis.md#anilist
 
 ### Disposal behavior
 
-Hooks that change shared state are no-ops after your module has unloaded, and a session-clearing flag you set is released automatically when you unload. Subscriptions and registrations you made are removed with the rest of your cleanups. A stale reference to an old `ctx` can never overwrite state set by a newer instance of the same module.
+Hooks that change shared state are no-ops after your module has unloaded, and any session-clearing flag or fetch-ownership lease you hold is released automatically when you unload. Subscriptions and registrations you made are removed with the rest of your cleanups. A stale reference to an old `ctx` can never overwrite state set by a newer instance of the same module.
 
 ---
 

@@ -25,28 +25,89 @@ export type CleanupFn = () => void;
 export type CssSource = string | (() => string);
 export type MountStyleSource = string | ((selector: string) => string);
 
-export interface MountHandle {
+export interface DebouncedFn<T extends (...args: any[]) => void> {
+  (...args: Parameters<T>): void;
+  cancel: () => void;
+  flush: () => void;
+}
+
+export interface PersistentCache<T = Record<string, any>> {
+  data: T;
+  save: () => void;
+  cancel: () => void;
+  flush: () => void;
+}
+
+export interface MountHandle<T extends Element = HTMLElement> {
   readonly id: string;
   readonly selector: string;
-  el: () => HTMLElement | null;
+  el: () => T | null;
   readonly unmount: CleanupFn;
+  readonly refresh: () => void;
 }
 
 export interface ModalOptions {
   id?: string;
   title: string;
+  subtitle?: string;
   maxWidth?: string;
+  style?: MountStyleSource;
   bodyHtml?: string;
   footerHtml?: string;
   onClose?: () => void;
 }
 
 export interface ModalHandle {
+  readonly id: string;
+  readonly selector: string;
+  readonly signal: AbortSignal;
   backdrop: HTMLDivElement;
   sheet: HTMLElement;
   body: HTMLElement;
   footer: HTMLElement;
   close: () => void;
+  listen: (
+    target: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions
+  ) => CleanupFn;
+  timeout: (fn: () => void, ms: number) => CleanupFn;
+  onCleanup: (fn: CleanupFn) => void;
+}
+
+export interface ConfirmOptions {
+  id?: string;
+  title?: string;
+  subtitle?: string;
+  message: string;
+  confirmText?: string;
+  cancelText?: string;
+  danger?: boolean;
+  maxWidth?: string;
+  signal?: AbortSignal;
+}
+
+export interface AlertOptions {
+  id?: string;
+  title?: string;
+  subtitle?: string;
+  message: string;
+  okText?: string;
+  maxWidth?: string;
+  signal?: AbortSignal;
+}
+
+export interface ToastOptions {
+  type?: 'info' | 'success' | 'error';
+  durationMs?: number;
+  closeTab?: boolean;
+}
+
+export interface ToastApi {
+  show: (msg: string, opts?: ToastOptions) => void;
+  success: (msg: string, opts?: Omit<ToastOptions, 'type'>) => void;
+  error: (msg: string, opts?: Omit<ToastOptions, 'type'>) => void;
 }
 
 export type SettingType = 'toggle' | 'number' | 'select' | 'list' | 'json';
@@ -87,6 +148,7 @@ export interface AddStyleFn {
 export interface JsonEditorContext {
   value: any;
   onApply: (nextValue: any) => void;
+  readonly signal: AbortSignal;
   getId: (name?: string) => string;
   addStyle: AddStyleFn;
   listen: (
@@ -96,8 +158,17 @@ export interface JsonEditorContext {
     options?: boolean | AddEventListenerOptions
   ) => CleanupFn;
   timeout: (fn: () => void, ms: number) => CleanupFn;
+  observe: (
+    target: Node | null | undefined,
+    options: MutationObserverInit,
+    cb: MutationCallback
+  ) => CleanupFn;
   modal: (opts: ModalOptions) => ModalHandle;
-  api?: AniListClient;
+  confirm: (opts: string | ConfirmOptions) => Promise<boolean>;
+  alert: (opts: string | AlertOptions) => Promise<void>;
+  toast: ToastApi;
+  onCleanup: (fn: CleanupFn) => void;
+  api?: Omit<AniListClient, 'session'>;
   log?: AnyLogger;
 }
 
@@ -113,6 +184,8 @@ export interface SettingOption {
   legacy?: string[];
   validate?: (v: any) => any;
   childOf?: string;
+  /** Auto-enable the parent module toggle in the Settings UI when a non-empty value is applied. */
+  autoEnableParentWhenNonEmpty?: boolean;
   editor?: (ctx: JsonEditorContext) => void;
 }
 
@@ -341,6 +414,7 @@ export interface GqlFetchEvent {
   status?: number;
   ok?: boolean;
   data?: any;
+  errors?: readonly { message?: string; [key: string]: any }[];
 }
 
 export type GqlFetchListener = (event: GqlFetchEvent) => void;
@@ -364,7 +438,7 @@ export interface CoreHooksApi {
   clearAuth(): void;
   registerCacheBridge(bridge: FastLoadCacheBridge): CleanupFn;
   getCacheBridge(): FastLoadCacheBridge | null;
-  markFetchOwner(active: boolean): void;
+  markFetchOwner(active: boolean): CleanupFn;
   hasGqlFetchSubscribers(): boolean;
   emitGqlFetch(event: GqlFetchEvent): void;
   onGqlFetch(cb: GqlFetchListener): CleanupFn;
@@ -386,7 +460,7 @@ export interface AniListViewerHint {
 }
 
 export interface AniListSession {
-  hasAuth: () => boolean;
+  hasAuth: (opts?: { reconcile?: boolean }) => boolean;
   clear: () => void;
   syncFromPage?: () => void;
   peek: (opts?: { reconcile?: boolean }) => AniListSessionSnapshot;
@@ -396,17 +470,123 @@ export interface AniListSession {
   recordHint: (hint: AniListViewerHint) => void;
 }
 
+export interface ViewerInfo {
+  id: number;
+  name: string;
+  scoreFormat: string;
+}
+
+export interface MediaEntry {
+  id: number;
+  idMal: number | null;
+  format: string;
+  title: {
+    userPreferred?: string;
+    english?: string;
+    romaji?: string;
+    native?: string;
+  };
+  episodes: number | null;
+  chapters: number | null;
+  status: string;
+  season?: string;
+  seasonYear?: number;
+  nextAiringEpisode?: {
+    episode: number;
+  };
+  mediaListEntry?: {
+    score: number;
+    progress: number;
+    status: string;
+    completedAt?: {
+      year?: number | null;
+      month?: number | null;
+      day?: number | null;
+    } | null;
+  };
+}
+
+export interface MediaListEntryItem {
+  id: number;
+  mediaId: number;
+  status: string;
+  score: number;
+  progress: number;
+  progressVolumes?: number;
+  repeat?: number;
+  priority?: number;
+  notes?: string;
+  customLists?: Record<string, boolean>;
+  startedAt?: { year?: number; month?: number; day?: number };
+  completedAt?: { year?: number; month?: number; day?: number };
+  media?: {
+    id: number;
+    idMal: number | null;
+    format?: string;
+    episodes?: number | null;
+    chapters?: number | null;
+    status?: string;
+    title?: {
+      userPreferred?: string;
+      english?: string;
+      romaji?: string;
+      native?: string;
+    };
+  };
+}
+
+export interface MediaListGroup {
+  name: string;
+  isCustomList: boolean;
+  status: string | null;
+  entries: MediaListEntryItem[];
+}
+
+export interface MediaListCollectionData {
+  hasNextChunk?: boolean;
+  user?: {
+    id: number;
+    name: string;
+  };
+  lists: MediaListGroup[];
+}
+
+export interface MediaListResult {
+  collection: MediaListCollectionData;
+  lists: MediaListGroup[];
+  allEntries: MediaListEntryItem[];
+  user?: { id: number; name: string };
+}
+
+export interface QueryOptions {
+  retries?: number;
+  forceFresh?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface AniListClient {
-  query: <T = any>(q: string, variables?: Record<string, any>, optionsOrRetries?: number | any) => Promise<T>;
-  getMediaList: (target: number | string, type?: 'ANIME' | 'MANGA', options?: any) => Promise<any>;
-  viewer: (forceFresh?: boolean) => Promise<any>;
+  query: <T = any>(
+    q: string,
+    variables?: Record<string, any>,
+    optionsOrRetries?: number | QueryOptions
+  ) => Promise<T>;
+  getMediaList: (
+    target: number | string,
+    type?: 'ANIME' | 'MANGA',
+    options?: { forceFresh?: boolean; userId?: number; userName?: string; signal?: AbortSignal }
+  ) => Promise<MediaListResult>;
+  viewer: (forceFresh?: boolean, opts?: { signal?: AbortSignal }) => Promise<ViewerInfo | null>;
   clearViewer: () => void;
   invalidate: (entityKeyPrefix?: string) => void;
   invalidateMediaList: (target?: number | string, type?: 'ANIME' | 'MANGA') => void;
-  hasAuth: () => boolean;
+  hasAuth: (opts?: { reconcile?: boolean }) => boolean;
   resumeAt: () => number;
   media: {
-    get: (id: number | string, type: 'ANIME' | 'MANGA', opts?: { throwAuth?: boolean }) => Promise<any>;
+    get: (
+      id: number | string,
+      type: 'ANIME' | 'MANGA',
+      opts?: { throwAuth?: boolean; signal?: AbortSignal }
+    ) => Promise<MediaEntry | null>;
     save: (
       id: number | string,
       type: 'ANIME' | 'MANGA',
@@ -415,8 +595,9 @@ export interface AniListClient {
         progress?: number;
         status?: string;
         completedAt?: { year: number; month: number; day: number };
-      }
-    ) => Promise<any>;
+      },
+      opts?: { signal?: AbortSignal }
+    ) => Promise<NonNullable<MediaEntry['mediaListEntry']> | null>;
   };
   session: AniListSession;
 }
@@ -429,22 +610,38 @@ export interface StorageScope {
   clear: () => void;
 }
 
-export interface MountSpec {
+export interface MountSpec<T extends Element = HTMLElement> {
   id?: string;
   anchor: string | (() => Element | null);
   position?: InsertPosition;
-  create: () => Element | null;
+  create: () => T | null;
   match?: () => boolean;
   ownUi?: boolean;
   style?: MountStyleSource;
+  onMount?: (el: T) => void | CleanupFn;
+}
+
+export interface HttpClient {
+  request: (url: string, opts?: HttpRequestOptions) => Promise<any>;
+  text: (url: string, opts?: HttpRequestOptions) => Promise<string>;
+  json: <T = any>(url: string, opts?: HttpRequestOptions) => Promise<T>;
+  download: (url: string, name: string, opts?: HttpDownloadOptions) => Promise<'download' | 'tab'>;
 }
 
 export interface RouteContext {
   url: URL;
   pathname: string;
   match: RegExpMatchArray | null;
-  signal: AbortSignal;
+  readonly signal: AbortSignal;
+  getId: (name?: string) => string;
   onCleanup: (fn: CleanupFn) => void;
+  ready: (cb: () => void) => CleanupFn;
+  onBodyMutation: (cb: (mutations: MutationRecord[]) => void) => CleanupFn;
+  observe: (
+    target: Node | null | undefined,
+    options: MutationObserverInit,
+    cb: MutationCallback
+  ) => CleanupFn;
   listen: (
     target: EventTarget,
     type: string,
@@ -453,9 +650,16 @@ export interface RouteContext {
   ) => CleanupFn;
   interval: (fn: () => void, ms: number) => CleanupFn;
   timeout: (fn: () => void, ms: number) => CleanupFn;
-  mount: (spec: MountSpec) => MountHandle;
+  debounce: <T extends (...args: any[]) => void>(fn: T, ms?: number) => DebouncedFn<T>;
+  raf: (fn: FrameRequestCallback) => CleanupFn;
+  mount: <T extends Element = HTMLElement>(spec: MountSpec<T>) => MountHandle<T>;
   addStyle: AddStyleFn;
+  modal: (opts: ModalOptions) => ModalHandle;
+  confirm: (opts: string | ConfirmOptions) => Promise<boolean>;
+  alert: (opts: string | AlertOptions) => Promise<void>;
   waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs?: number) => Promise<T | null>;
+  http: HttpClient;
+  api: Omit<AniListClient, 'session'>;
 }
 
 export interface HttpRequestOptions {
@@ -464,12 +668,14 @@ export interface HttpRequestOptions {
   data?: any;
   timeout?: number;
   responseType?: 'text' | 'json' | 'arraybuffer' | 'blob' | 'document' | 'stream';
+  signal?: AbortSignal;
   [key: string]: any;
 }
 
 export interface HttpDownloadOptions {
   saveAs?: boolean;
   openTabOnError?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface FeatureServices {
@@ -501,11 +707,12 @@ export interface FeatureContext<
   readonly id: string;
   readonly title: string;
   readonly help: string;
+  readonly signal: AbortSignal;
   getId: (name?: string) => string;
   get: <T = any>(key: string) => T;
   set: (key: string, val: any) => void;
   storage: StorageScope;
-  persistent: <T extends Record<string, any>>(key: string, prune?: (data: T) => void) => { data: T; save: () => void };
+  persistent: <T extends Record<string, any>>(key: string, prune?: (data: T) => void) => PersistentCache<T>;
   ready: (cb: () => void) => CleanupFn;
   onNav: (cb: () => void) => CleanupFn;
   onBodyMutation: (cb: (mutations: MutationRecord[]) => void) => CleanupFn;
@@ -516,9 +723,11 @@ export interface FeatureContext<
       handler: (rc: RouteContext) => void | Promise<void> | CleanupFn
     ): CleanupFn;
   };
-  mount: (spec: MountSpec) => MountHandle;
+  mount: <T extends Element = HTMLElement>(spec: MountSpec<T>) => MountHandle<T>;
   addStyle: AddStyleFn;
   modal: (opts: ModalOptions) => ModalHandle;
+  confirm: (opts: string | ConfirmOptions) => Promise<boolean>;
+  alert: (opts: string | AlertOptions) => Promise<void>;
   listen: (
     target: EventTarget,
     type: string,
@@ -527,25 +736,23 @@ export interface FeatureContext<
   ) => CleanupFn;
   interval: (fn: () => void, ms: number) => CleanupFn;
   timeout: (fn: () => void, ms: number) => CleanupFn;
+  debounce: <T extends (...args: any[]) => void>(fn: T, ms?: number) => DebouncedFn<T>;
+  raf: (fn: FrameRequestCallback) => CleanupFn;
+  observe: (
+    target: Node | null | undefined,
+    options: MutationObserverInit,
+    cb: MutationCallback
+  ) => CleanupFn;
   trackEl: <T extends Element>(el: T) => T;
   waitForSelector: <T extends HTMLElement = HTMLElement>(selector: string, timeoutMs?: number) => Promise<T | null>;
   silently: (fn: () => void) => void;
   ownUi: (selector: string) => CleanupFn;
   onCleanup: (fn: CleanupFn) => void;
-  http: {
-    request: (url: string, opts?: HttpRequestOptions) => Promise<any>;
-    text: (url: string, opts?: HttpRequestOptions) => Promise<string>;
-    json: <T = any>(url: string, opts?: HttpRequestOptions) => Promise<T>;
-    download: (url: string, name: string, opts?: HttpDownloadOptions) => Promise<'download' | 'tab'>;
-  };
-  api: AniListClient;
+  http: HttpClient;
+  api: Omit<AniListClient, 'session'>;
   session: AniListSession;
   accounts: FeatureAccounts<TAccountId>;
-  toast: {
-    show: (msg: string, opts?: { type?: 'info' | 'success' | 'error'; durationMs?: number; closeTab?: boolean }) => void;
-    success: (msg: string, opts?: { durationMs?: number; closeTab?: boolean }) => void;
-    error: (msg: string, opts?: { durationMs?: number; closeTab?: boolean }) => void;
-  };
+  toast: ToastApi;
   menuCommand: (label: string, onClick: () => void) => CleanupFn;
   services: FeatureServices;
   events: FeatureEvents;

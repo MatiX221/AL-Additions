@@ -396,8 +396,7 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
 
       ctx1.session.clear();
       ctx1.session.recordHint({ userId: 999, username: 'StaleUser' });
-      ctx1.api.session.clear();
-      ctx1.api.session.recordHint({ userId: 999, username: 'StaleUser' });
+      expect((ctx1.api as any).session).toBeUndefined();
       ctx1.hooks.setAuthHeader('Bearer stale-token');
       ctx1.hooks.setAuthHeader(null);
 
@@ -1019,5 +1018,1465 @@ describe('Lane 2: Registry, Accounts & Debug Helpers', () => {
     noAccCtx.accounts.clearSecrets();
     expect(helpers.store.get('mal_tok', null)).toBe('secret');
     expect(() => malAccCtx.accounts.get('other')).toThrow(/without declaring it in accounts/);
+  });
+});
+
+describe('Batch 2 Registry Regression Tests', () => {
+  it('BUG-04: cancels pending ctx.persistent timers on disposal and ctx.storage.clear() and supports debounce cancel/flush', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, settings, helpers } = await loadFreshKernel();
+      const host = registry.createModuleHost();
+
+      const fn = vi.fn();
+      const d = helpers.debounce(fn, 100);
+      d('first');
+      d.cancel();
+      vi.advanceTimersByTime(200);
+      expect(fn).not.toHaveBeenCalled();
+
+      d('flushed');
+      d.flush();
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(fn).toHaveBeenCalledWith('flushed');
+      vi.advanceTimersByTime(200);
+      expect(fn).toHaveBeenCalledTimes(1);
+
+      let p1!: { data: Record<string, any>; save: () => void; cancel?: () => void; flush?: () => void };
+      let ctx1!: any;
+      registry.defineModule({
+        id: 'persistMod',
+        key: 'persistModEnabled',
+        title: 'Persist Mod',
+        help: 'Test',
+        setup(ctx) {
+          ctx1 = ctx;
+          p1 = ctx.persistent('cache_v1') as any;
+        }
+      });
+
+      settings.Settings.set('persistModEnabled', true);
+      registry.startModules(false);
+
+      p1.data.stale = 1;
+      p1.save();
+      settings.Settings.set('persistModEnabled', false);
+      host.reload(['persistMod']);
+
+      vi.advanceTimersByTime(600);
+      expect(helpers.jsonGet('ala_mod_persistMod_cache_v1', null)).toBeNull();
+
+      p1.data.afterDispose = 2;
+      p1.save();
+      p1.flush?.();
+      vi.advanceTimersByTime(600);
+      expect(helpers.jsonGet('ala_mod_persistMod_cache_v1', null)).toBeNull();
+
+      settings.Settings.set('persistModEnabled', true);
+      host.reload(['persistMod']);
+      p1.data.beforeClear = 3;
+      p1.save();
+      ctx1.storage.clear();
+      vi.advanceTimersByTime(600);
+      expect(helpers.jsonGet('ala_mod_persistMod_cache_v1', null)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('BUG-05: runs cleanups registered during teardown and blocks live resource registrations during teardown', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, settings } = await loadFreshKernel();
+      const log: string[] = [];
+      const lateTimeout = vi.fn();
+      const lateListener = vi.fn();
+      const lateMountCreate = vi.fn(() => document.createElement('div'));
+      const lateEl = document.createElement('span');
+      document.body.innerHTML = '<div id="teardown-anchor"></div>';
+      document.body.appendChild(lateEl);
+
+      registry.defineModule({
+        id: 'teardownOrderMod',
+        key: 'teardownOrderEnabled',
+        title: 'Teardown Order',
+        help: 'Test',
+        setup(ctx) {
+          ctx.onCleanup(() => {
+            log.push('outer-cleanup');
+            ctx.onCleanup(() => log.push('inner-cleanup-1'));
+            ctx.onCleanup(() => {
+              log.push('inner-cleanup-2');
+              ctx.onCleanup(() => log.push('nested-cleanup-3'));
+            });
+            ctx.trackEl(lateEl);
+            ctx.timeout(lateTimeout, 10);
+            ctx.listen(window, 'click', lateListener);
+            ctx.mount({
+              id: 'teardown-mount',
+              anchor: '#teardown-anchor',
+              create: lateMountCreate
+            });
+          });
+        }
+      });
+
+      settings.Settings.set('teardownOrderEnabled', true);
+      registry.startModules(false);
+      registry.disposeFeature('teardownOrderMod');
+
+      expect(log).toEqual(['outer-cleanup', 'inner-cleanup-1', 'inner-cleanup-2', 'nested-cleanup-3']);
+      expect(lateEl.isConnected).toBe(false);
+      expect(lateMountCreate).not.toHaveBeenCalled();
+
+      window.dispatchEvent(new Event('click'));
+      vi.advanceTimersByTime(100);
+      expect(lateTimeout).not.toHaveBeenCalled();
+      expect(lateListener).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('BUG-06: rolls back partial rc.* resources on sync throw and active async rejection in ctx.onRoute', async () => {
+    vi.useFakeTimers();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { registry, settings } = await loadFreshKernel();
+      document.body.innerHTML = '<div id="route-err-anchor"></div>';
+
+      const syncIntervalSpy = vi.fn();
+      const syncClickSpy = vi.fn();
+      const syncCleanupSpy = vi.fn();
+      let syncRc!: any;
+
+      const asyncIntervalSpy = vi.fn();
+      const asyncCleanupSpy = vi.fn();
+      let asyncRc!: any;
+      let rejectAsync!: (err: Error) => void;
+      let rejectSuperseded!: (err: Error) => void;
+      let supersededAttempt = 0;
+
+      history.replaceState({}, '', '/anime/10');
+      registry.defineModule({
+        id: 'routeRollbackMod',
+        key: 'routeRollbackEnabled',
+        title: 'Route Rollback',
+        help: 'Test',
+        setup(ctx) {
+          ctx.onRoute(/^\/anime\/(\d+)/, (rc) => {
+            syncRc = rc;
+            rc.mount({
+              id: 'sync-err-widget',
+              anchor: '#route-err-anchor',
+              create: () => document.createElement('div')
+            });
+            rc.interval(syncIntervalSpy, 50);
+            rc.listen(document, 'click', syncClickSpy);
+            rc.addStyle('sync-err', '.sync-err{color:red}');
+            rc.onCleanup(syncCleanupSpy);
+            throw new Error('sync route boom');
+          });
+
+          ctx.onRoute(/^\/manga\/(\d+)/, async (rc) => {
+            asyncRc = rc;
+            rc.mount({
+              id: 'async-err-widget',
+              anchor: '#route-err-anchor',
+              create: () => document.createElement('div')
+            });
+            rc.interval(asyncIntervalSpy, 50);
+            rc.onCleanup(asyncCleanupSpy);
+            await new Promise<void>((_res, rej) => {
+              rejectAsync = rej;
+            });
+          });
+
+          ctx.onRoute(/^\/staff\/(\d+)/, async (rc) => {
+            const attempt = ++supersededAttempt;
+            if (attempt === 1) {
+              await new Promise<void>((_res, rej) => {
+                rejectSuperseded = rej;
+              });
+            } else {
+              rc.mount({
+                id: 'staff-new-widget',
+                anchor: '#route-err-anchor',
+                create: () => document.createElement('div')
+              });
+            }
+          });
+        }
+      });
+
+      settings.Settings.set('routeRollbackEnabled', true);
+      registry.startModules(false);
+
+      expect(syncRc.signal.aborted).toBe(true);
+      expect(syncCleanupSpy).toHaveBeenCalledTimes(1);
+      expect(document.getElementById('ala-routeRollbackMod-sync-err-widget')).toBeNull();
+      expect(document.getElementById('ala-routeRollbackMod-sync-err-style')).toBeNull();
+      document.dispatchEvent(new Event('click'));
+      vi.advanceTimersByTime(200);
+      expect(syncClickSpy).not.toHaveBeenCalled();
+      expect(syncIntervalSpy).not.toHaveBeenCalled();
+
+      history.pushState({}, '', '/manga/20');
+      expect(asyncRc.signal.aborted).toBe(false);
+      expect(document.getElementById('ala-routeRollbackMod-async-err-widget')).not.toBeNull();
+
+      rejectAsync(new Error('async route boom'));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(asyncRc.signal.aborted).toBe(true);
+      expect(asyncCleanupSpy).toHaveBeenCalledTimes(1);
+      expect(document.getElementById('ala-routeRollbackMod-async-err-widget')).toBeNull();
+      vi.advanceTimersByTime(200);
+      expect(asyncIntervalSpy).not.toHaveBeenCalled();
+
+      history.pushState({}, '', '/staff/1');
+      history.pushState({}, '', '/staff/2');
+      expect(document.getElementById('ala-routeRollbackMod-staff-new-widget')).not.toBeNull();
+      rejectSuperseded(new Error('superseded boom'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(document.getElementById('ala-routeRollbackMod-staff-new-widget')).not.toBeNull();
+    } finally {
+      errSpy.mockRestore();
+      vi.useRealTimers();
+      history.replaceState({}, '', '/');
+    }
+  });
+
+  it('BUG-07: prunes completed timeout, cancelled listen/mount/style, and closed modal cleanups from Sets', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, settings } = await loadFreshKernel();
+      document.body.innerHTML = '<div id="prune-anchor"></div>';
+      let modCtx!: any;
+
+      registry.defineModule({
+        id: 'pruneMod',
+        key: 'pruneModEnabled',
+        title: 'Prune Mod',
+        help: 'Test',
+        setup(ctx) {
+          modCtx = ctx;
+        }
+      });
+
+      settings.Settings.set('pruneModEnabled', true);
+      registry.startModules(false);
+
+      const timerSpy = vi.fn();
+      for (let i = 0; i < 15; i++) {
+        modCtx.timeout(timerSpy, 10);
+      }
+      vi.advanceTimersByTime(20);
+      expect(timerSpy).toHaveBeenCalledTimes(15);
+
+      const listenerSpy = vi.fn();
+      const unlisten = modCtx.listen(document, 'custom-ev', listenerSpy);
+      const unstyle = modCtx.addStyle('temp', '.temp{color:red}');
+      const mount = modCtx.mount({
+        id: 'temp-mount',
+        anchor: '#prune-anchor',
+        create: () => document.createElement('div')
+      });
+
+      unlisten();
+      unstyle();
+      mount.unmount();
+
+      const modalCloseSpy = vi.fn();
+      const modal1 = modCtx.modal({ id: 'm1', title: 'M1', onClose: modalCloseSpy });
+      modal1.close();
+      expect(modalCloseSpy).toHaveBeenCalledTimes(1);
+
+      const modal2 = modCtx.modal({ id: 'm2', title: 'M2', onClose: modalCloseSpy });
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(modalCloseSpy).toHaveBeenCalledTimes(2);
+
+      const removeListenerSpy = vi.spyOn(document, 'removeEventListener');
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      removeListenerSpy.mockClear();
+      clearTimeoutSpy.mockClear();
+
+      registry.disposeFeature('pruneMod');
+      expect(clearTimeoutSpy).not.toHaveBeenCalled();
+      expect(removeListenerSpy.mock.calls.filter((c) => c[0] === 'custom-ev')).toHaveLength(0);
+      expect(modalCloseSpy).toHaveBeenCalledTimes(2);
+      modal2.close();
+      expect(modalCloseSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('BUG-08: handles responseType json in ctx.http.json and aborts ctx.http requests via opts.signal without forwarding signal', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    let httpCtx!: any;
+
+    registry.defineModule({
+      id: 'httpSigMod',
+      key: 'httpSigEnabled',
+      title: 'HTTP Signal',
+      help: 'Test',
+      setup(ctx) {
+        httpCtx = ctx;
+      }
+    });
+    settings.Settings.set('httpSigEnabled', true);
+    registry.startModules(false);
+
+    const xhrSpy = vi.spyOn(globalThis, 'GM_xmlhttpRequest');
+    xhrSpy.mockImplementationOnce((details: any) => {
+      details.onload?.({ status: 200, response: { ok: true, items: [1, 2] }, responseText: '' });
+      return { abort: vi.fn() } as any;
+    });
+    await expect(httpCtx.http.json('https://example.com/data', { responseType: 'json' })).resolves.toEqual({
+      ok: true,
+      items: [1, 2]
+    });
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    xhrSpy.mockClear();
+    await expect(httpCtx.http.request('https://example.com/pre', { signal: preAborted.signal })).rejects.toThrow(
+      'Request aborted'
+    );
+    expect(xhrSpy).not.toHaveBeenCalled();
+
+    const midController = new AbortController();
+    const addAbortSpy = vi.spyOn(midController.signal, 'addEventListener');
+    const removeAbortSpy = vi.spyOn(midController.signal, 'removeEventListener');
+    const protoRemoveSpy = vi.spyOn(AbortSignal.prototype, 'removeEventListener');
+    const xhrAbort = vi.fn();
+    xhrSpy.mockImplementationOnce((details: any) => {
+      expect(details.signal).toBeUndefined();
+      return { abort: xhrAbort } as any;
+    });
+
+    const pending = httpCtx.http.text('https://example.com/mid', { signal: midController.signal });
+    midController.abort();
+    await expect(pending).rejects.toThrow('Request aborted');
+    expect(xhrAbort).toHaveBeenCalledTimes(1);
+    expect(removeAbortSpy).toHaveBeenCalledTimes(addAbortSpy.mock.calls.length);
+    expect(protoRemoveSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it('BUG-09: injects style and registers ownUi on adopted mounts, guards detached sibling anchors, and returns null from el() after unmount', async () => {
+    const { registry, settings, observer } = await loadFreshKernel();
+    let mountCtx!: any;
+
+    registry.defineModule({
+      id: 'mountEdgeMod',
+      key: 'mountEdgeEnabled',
+      title: 'Mount Edge',
+      help: 'Test',
+      setup(ctx) {
+        mountCtx = ctx;
+      }
+    });
+    settings.Settings.set('mountEdgeEnabled', true);
+    registry.startModules(false);
+
+    const preExisting = document.createElement('div');
+    preExisting.id = 'ala-mountEdgeMod-adopted';
+    document.body.appendChild(preExisting);
+
+    const ownUiSpy = vi.spyOn(observer.Core, 'registerOwnUi');
+    const adoptedHandle = mountCtx.mount({
+      id: 'adopted',
+      anchor: () => document.body,
+      ownUi: true,
+      style: (sel: string) => `${sel} { color: purple; }`,
+      create: () => document.createElement('div')
+    });
+
+    expect(adoptedHandle.el()).toBe(preExisting);
+    expect(document.getElementById('ala-mountEdgeMod-adopted-style')?.textContent).toBe(
+      '#ala-mountEdgeMod-adopted { color: purple; }'
+    );
+    expect(ownUiSpy).toHaveBeenCalledWith('#ala-mountEdgeMod-adopted');
+
+    adoptedHandle.unmount();
+    expect(adoptedHandle.el()).toBeNull();
+    expect(document.getElementById('ala-mountEdgeMod-adopted-style')).toBeNull();
+
+    const detachedAnchor = document.createElement('div');
+    const detachedCreate = vi.fn(() => document.createElement('div'));
+    expect(() =>
+      mountCtx.mount({
+        id: 'detached-sib',
+        anchor: () => detachedAnchor,
+        position: 'beforebegin',
+        create: detachedCreate
+      })
+    ).not.toThrow();
+    expect(detachedCreate).not.toHaveBeenCalled();
+  });
+
+  it('BUG-10: guards ctx.set, toast, silently, accounts.clearSecrets, api mutations, and disposed hasAuth pure reads', async () => {
+    const { registry, settings, helpers, accounts, observer, bus, anilist } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+
+    accounts.registerAccountProvider({
+      id: 'mal',
+      name: 'MAL',
+      secretKeys: ['mal_token'],
+      isConnected: () => !!helpers.store.get('mal_token', null),
+      connect: () => {},
+      disconnect: () => {}
+    });
+    helpers.store.set('mal_token', 'keep-secret');
+
+    let modCtx!: any;
+    registry.defineModule({
+      id: 'dispGuardMod',
+      key: 'dispGuardEnabled',
+      accounts: ['mal'],
+      title: 'Disposal Guard',
+      help: 'Test',
+      options: [{ key: 'dispOpt', type: 'number', def: 10, min: 0, max: 100, title: 'Opt', help: 'Help' }],
+      setup(ctx) {
+        modCtx = ctx;
+      }
+    });
+
+    settings.Settings.set('dispGuardEnabled', true);
+    registry.startModules(false);
+
+    settings.Settings.set('dispGuardEnabled', false);
+    host.reload(['dispGuardMod']);
+
+    modCtx.set('dispOpt', 99);
+    expect(settings.Settings.get('dispOpt')).toBe(10);
+
+    const silentSpy = vi.spyOn(observer.Core, 'silently');
+    const innerSilent = vi.fn();
+    modCtx.silently(innerSilent);
+    expect(silentSpy).not.toHaveBeenCalled();
+    expect(innerSilent).not.toHaveBeenCalled();
+
+    const winCloseSpy = vi.spyOn(window, 'close').mockImplementation(() => {});
+    modCtx.toast.show('disposed toast', { closeTab: true });
+    modCtx.toast.success('disposed success');
+    modCtx.toast.error('disposed error');
+    expect(document.body.textContent).not.toContain('disposed toast');
+    expect(winCloseSpy).not.toHaveBeenCalled();
+
+    modCtx.accounts.clearSecrets('mal');
+    modCtx.accounts.clearSecrets();
+    expect(helpers.store.get('mal_token', null)).toBe('keep-secret');
+
+    helpers.store.set('al_token_auth', 'Bearer valid-tok');
+    helpers.store.set('al_user_id', 555);
+    helpers.store.set('al_username', 'Alice');
+    const clearViewerSpy = vi.spyOn(anilist.anilistApiClient, 'clearViewer');
+    const invSpy = vi.spyOn(anilist.anilistApiClient, 'invalidate');
+    const invListSpy = vi.spyOn(anilist.anilistApiClient, 'invalidateMediaList');
+
+    modCtx.api.clearViewer();
+    modCtx.api.invalidate('Media:1');
+    modCtx.api.invalidateMediaList('Alice', 'ANIME');
+    expect(clearViewerSpy).not.toHaveBeenCalled();
+    expect(invSpy).not.toHaveBeenCalled();
+    expect(invListSpy).not.toHaveBeenCalled();
+    expect(helpers.store.get('al_user_id', null)).toBe(555);
+
+    await expect(modCtx.api.media.save(1, 'ANIME', { score: 8 })).rejects.toThrow(/disposed/i);
+    await expect(modCtx.api.query('mutation { SaveMediaListEntry(mediaId: 1) { id } }')).rejects.toThrow(/disposed/i);
+
+    document.body.innerHTML = '<nav><a href="/login">Login</a></nav>';
+    expect(modCtx.session.hasAuth()).toBe(false);
+    expect(modCtx.api.hasAuth()).toBe(false);
+    expect(helpers.store.get('al_user_id', null)).toBe(555);
+    expect(bus.CoreHooks.getAuthHeader()).toBe('Bearer valid-tok');
+  });
+
+  it('BUG-15 & BUG-37 & BUG-85: enforces unbooted status accuracy, reserved IDs, and trimmed empty modal IDs', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      registry.defineModule({
+        id: 'core',
+        key: 'coreConflictEnabled',
+        title: 'Fake Core',
+        help: 'Should reject',
+        debug: { title: 'Fake Core Debug', help: 'Should not clobber' },
+        setup: () => {}
+      });
+      registry.defineModule({
+        id: 'devMode',
+        key: 'devModeConflictEnabled',
+        title: 'Fake DevMode',
+        help: 'Should reject',
+        setup: () => {}
+      });
+      registry.registerShellModule('core', () => {});
+
+      expect(host.getStatus('core')).toEqual({ active: false, reason: 'invalid-id' });
+      expect(host.getStatus('devMode')).toEqual({ active: false, reason: 'invalid-id' });
+      expect(settings.ROWS.coreConflictEnabled).toBeUndefined();
+      expect(settings.ROWS.devModeConflictEnabled).toBeUndefined();
+      expect(settings.Settings.get('debug').core.channels.anilist).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    let standaloneFound = true;
+    let modCtx!: any;
+    registry.defineModule({
+      id: 'earlyMod',
+      key: 'earlyModEnabled',
+      layer: 'preload',
+      title: 'Early',
+      help: 'Early',
+      setup: () => {}
+    });
+    registry.defineModule({
+      id: 'deferredMod',
+      key: 'deferredModEnabled',
+      layer: 'feature',
+      requiresReload: true,
+      title: 'Deferred',
+      help: 'Deferred',
+      standalone: { name: 'Standalone', probe: () => standaloneFound },
+      setup(ctx) {
+        modCtx = ctx;
+      }
+    });
+
+    settings.Settings.set('earlyModEnabled', true);
+    settings.Settings.set('deferredModEnabled', true);
+
+    registry.startModules(true);
+    expect(host.getStatus('earlyMod')).toEqual({ active: true });
+    expect(host.getStatus('deferredMod')).toEqual({ active: false });
+
+    await host.probeStandalone('deferredMod');
+    expect(host.getStatus('deferredMod')).toEqual({ active: false, reason: 'standalone-paused' });
+
+    standaloneFound = false;
+    await host.probeStandalone('deferredMod');
+    expect(host.getStatus('deferredMod')).toEqual({ active: false });
+    expect(modCtx).toBeUndefined();
+
+    registry.startModules(false);
+    expect(host.getStatus('deferredMod')).toEqual({ active: true });
+
+    const mEmpty = modCtx.modal({ id: '', title: 'Empty ID' });
+    const mSpaces = modCtx.modal({ id: '   ', title: 'Spaces ID' });
+    expect(mEmpty.backdrop.id).toBe('ala-deferredMod-modal-1');
+    expect(mSpaces.backdrop.id).toBe('ala-deferredMod-modal-2');
+    mEmpty.close();
+    mSpaces.close();
+  });
+});
+
+describe('Batch 10 Wave 1 Kernel API Improvements (IMP-01..04, 06, 08, 09)', () => {
+  it('exposes ctx.signal aborted synchronously before cleanups and fresh per boot (IMP-09)', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+
+    let boot1Signal!: AbortSignal;
+    let boot2Signal!: AbortSignal;
+    let abortedDuringCleanup = false;
+    let boot = 0;
+
+    registry.defineModule({
+      id: 'sigMod',
+      key: 'sigModEnabled',
+      title: 'Signal Mod',
+      help: 'Test',
+      setup(ctx) {
+        boot++;
+        if (boot === 1) {
+          boot1Signal = ctx.signal;
+          ctx.onCleanup(() => {
+            abortedDuringCleanup = ctx.signal.aborted;
+          });
+        } else {
+          boot2Signal = ctx.signal;
+        }
+      }
+    });
+
+    settings.Settings.set('sigModEnabled', true);
+    registry.startModules(false);
+    expect(boot1Signal.aborted).toBe(false);
+
+    host.reload(['sigMod']);
+    expect(abortedDuringCleanup).toBe(true);
+    expect(boot1Signal.aborted).toBe(true);
+    expect(boot2Signal).not.toBe(boot1Signal);
+    expect(boot2Signal.aborted).toBe(false);
+
+    settings.Settings.set('sigModEnabled', false);
+    host.reload(['sigMod']);
+    expect(boot2Signal.aborted).toBe(true);
+  });
+
+  it('provides rc.modal, rc.ready, rc.onBodyMutation, and rc.http with route-exit abort and signal composition (IMP-01 & IMP-03)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, settings } = await loadFreshKernel();
+      document.body.innerHTML = '<div id="rc-root"></div>';
+
+      const readyCalls: string[] = [];
+      const mutCalls: number[] = [];
+      let activeRc!: any;
+      let routeModalCloseCalls = 0;
+      let staleRc!: any;
+
+      history.replaceState({}, '', '/anime/77');
+      registry.defineModule({
+        id: 'routeErgonomics',
+        key: 'routeErgonomicsEnabled',
+        title: 'Route Ergonomics',
+        help: 'Test',
+        setup(ctx) {
+          ctx.onRoute(/^\/anime\/(\d+)/, (rc) => {
+            activeRc = rc;
+            staleRc = rc;
+            rc.ready(() => readyCalls.push('immediate'));
+            rc.onBodyMutation((muts) => mutCalls.push(muts.length));
+            rc.modal({
+              id: 'route-dialog',
+              title: 'Route Modal',
+              style: (sel) => `${sel} { border: 1px solid red; }`,
+              onClose: () => {
+                routeModalCloseCalls++;
+              }
+            });
+          });
+        }
+      });
+
+      settings.Settings.set('routeErgonomicsEnabled', true);
+      registry.startModules(false);
+
+      expect(readyCalls).toEqual(['immediate']);
+      expect(document.getElementById('ala-routeErgonomics-route-dialog')).not.toBeNull();
+      expect(document.getElementById('ala-routeErgonomics-route-dialog-style')).not.toBeNull();
+
+      document.getElementById('rc-root')!.appendChild(document.createElement('span'));
+      await Promise.resolve();
+      vi.advanceTimersByTime(60);
+      expect(mutCalls.length).toBe(1);
+
+      const xhrAbort = vi.fn();
+      const xhrSpy = vi.spyOn(globalThis, 'GM_xmlhttpRequest').mockImplementation((details: any) => {
+        expect(details.signal).toBeUndefined();
+        return { abort: xhrAbort } as any;
+      });
+      const dlAbort = vi.fn();
+      const dlSpy = vi.spyOn(globalThis, 'GM_download').mockImplementation(() => ({ abort: dlAbort }) as any);
+
+      const callerAc = new AbortController();
+      const callerReq = activeRc.http.text('https://example.com/caller-abort', { signal: callerAc.signal });
+      callerAc.abort();
+      await expect(callerReq).rejects.toThrow('Request aborted');
+      expect(xhrAbort).toHaveBeenCalledTimes(1);
+      expect(activeRc.signal.aborted).toBe(false);
+
+      xhrAbort.mockClear();
+      const routeTextReq = activeRc.http.json('https://example.com/route-abort');
+      const routeDlReq = activeRc.http.download('https://example.com/file.bin', 'file.bin');
+
+      history.pushState({}, '', '/home');
+
+      await expect(routeTextReq).rejects.toThrow('Request aborted');
+      await expect(routeDlReq).rejects.toThrow('Download aborted');
+      expect(xhrAbort).toHaveBeenCalledTimes(1);
+      expect(dlAbort).toHaveBeenCalledTimes(1);
+      expect(routeModalCloseCalls).toBe(1);
+      expect(document.getElementById('ala-routeErgonomics-route-dialog')).toBeNull();
+      expect(document.getElementById('ala-routeErgonomics-route-dialog-style')).toBeNull();
+
+      document.getElementById('rc-root')!.appendChild(document.createElement('b'));
+      await Promise.resolve();
+      vi.advanceTimersByTime(60);
+      expect(mutCalls.length).toBe(1);
+
+      xhrSpy.mockClear();
+      dlSpy.mockClear();
+      await expect(staleRc.http.request('https://example.com/after-exit')).rejects.toThrow('Request aborted');
+      await expect(staleRc.http.download('https://example.com/after.bin', 'after.bin')).rejects.toThrow(
+        'Download aborted'
+      );
+      expect(xhrSpy).not.toHaveBeenCalled();
+      expect(dlSpy).not.toHaveBeenCalled();
+
+      const deadRouteModal = staleRc.modal({ id: 'dead-route', title: 'Dead' });
+      expect(deadRouteModal.signal.aborted).toBe(true);
+      expect(document.getElementById('ala-routeErgonomics-dead-route')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      history.replaceState({}, '', '/');
+    }
+  });
+
+  it('implements lifecycle-tracked debounce, raf, and { once: true } listen self-pruning on ctx and rc (IMP-04)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, settings } = await loadFreshKernel();
+      let modCtx!: any;
+      let routeRc!: any;
+
+      history.replaceState({}, '', '/anime/11');
+      registry.defineModule({
+        id: 'timingMod',
+        key: 'timingModEnabled',
+        title: 'Timing Mod',
+        help: 'Test',
+        setup(ctx) {
+          modCtx = ctx;
+          ctx.onRoute(/^\/anime\/\d+/, (rc) => {
+            routeRc = rc;
+          });
+        }
+      });
+
+      settings.Settings.set('timingModEnabled', true);
+      registry.startModules(false);
+
+      const debouncedSpy = vi.fn();
+      const d = routeRc.debounce(debouncedSpy, 100);
+      d('a');
+      d('b');
+      vi.advanceTimersByTime(100);
+      expect(debouncedSpy).toHaveBeenCalledTimes(1);
+      expect(debouncedSpy).toHaveBeenCalledWith('b');
+
+      d('flushed');
+      d.flush();
+      expect(debouncedSpy).toHaveBeenCalledTimes(2);
+      expect(debouncedSpy).toHaveBeenLastCalledWith('flushed');
+
+      d('cancelled-by-route');
+      const rafSpy = vi.fn();
+      routeRc.raf(rafSpy);
+
+      const onceTarget = document.createElement('div');
+      const onceListener = vi.fn();
+      modCtx.listen(onceTarget, 'my-once', onceListener, { once: true });
+      onceTarget.dispatchEvent(new Event('my-once'));
+      onceTarget.dispatchEvent(new Event('my-once'));
+      expect(onceListener).toHaveBeenCalledTimes(1);
+
+      history.pushState({}, '', '/home');
+      d.flush();
+      vi.advanceTimersByTime(200);
+      expect(debouncedSpy).toHaveBeenCalledTimes(2);
+      expect(rafSpy).not.toHaveBeenCalled();
+
+      const ctxDebouncedSpy = vi.fn();
+      const ctxD = modCtx.debounce(ctxDebouncedSpy, 100);
+      ctxD('pending');
+      const ctxRafSpy = vi.fn();
+      modCtx.raf(ctxRafSpy);
+
+      const removeSpy = vi.spyOn(onceTarget, 'removeEventListener');
+      registry.disposeFeature('timingMod');
+      expect(removeSpy.mock.calls.filter((c) => c[0] === 'my-once')).toHaveLength(0);
+
+      ctxD('post-dispose');
+      ctxD.flush();
+      vi.advanceTimersByTime(200);
+      expect(ctxDebouncedSpy).not.toHaveBeenCalled();
+      expect(ctxRafSpy).not.toHaveBeenCalled();
+
+      const origRaf = globalThis.requestAnimationFrame;
+      try {
+        (globalThis as any).requestAnimationFrame = undefined;
+        settings.Settings.set('timingModEnabled', true);
+        registry.createModuleHost().reload(['timingMod']);
+        const fallbackRafSpy = vi.fn();
+        modCtx.raf(fallbackRafSpy);
+        vi.advanceTimersByTime(20);
+        expect(fallbackRafSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        globalThis.requestAnimationFrame = origRaf;
+      }
+    } finally {
+      vi.useRealTimers();
+      history.replaceState({}, '', '/');
+    }
+  });
+
+  it('supports MountSpec<T> onMount cleanup across detach/match/unmount and MountHandle.refresh() (IMP-06)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registry, settings } = await loadFreshKernel();
+      document.body.innerHTML = '<div id="mount-imp06-anchor"></div>';
+
+      let enabled = false;
+      const mountCalls: string[] = [];
+      const cleanupCalls: string[] = [];
+      let seq = 0;
+      let handle!: any;
+
+      registry.defineModule({
+        id: 'mountHookMod',
+        key: 'mountHookEnabled',
+        title: 'Mount Hook',
+        help: 'Test',
+        setup(ctx) {
+          handle = ctx.mount<HTMLAnchorElement>({
+            id: 'typed-link',
+            anchor: '#mount-imp06-anchor',
+            match: () => enabled,
+            create: () => {
+              const a = document.createElement('a');
+              a.dataset.seq = String(++seq);
+              return a;
+            },
+            onMount: (el) => {
+              const id = el.dataset.seq!;
+              mountCalls.push(`mount:${id}`);
+              return () => {
+                cleanupCalls.push(`cleanup:${id}`);
+              };
+            }
+          });
+        }
+      });
+
+      settings.Settings.set('mountHookEnabled', true);
+      registry.startModules(false);
+
+      expect(handle.el()).toBeNull();
+      expect(mountCalls).toEqual([]);
+
+      enabled = true;
+      handle.refresh();
+      expect(handle.el()?.tagName).toBe('A');
+      expect(mountCalls).toEqual(['mount:1']);
+      expect(cleanupCalls).toEqual([]);
+
+      handle.refresh();
+      expect(mountCalls).toEqual(['mount:1']);
+
+      handle.el()!.remove();
+      document.body.appendChild(document.createElement('span'));
+      await Promise.resolve();
+      vi.advanceTimersByTime(60);
+      expect(cleanupCalls).toEqual(['cleanup:1']);
+      expect(mountCalls).toEqual(['mount:1', 'mount:2']);
+
+      enabled = false;
+      handle.refresh();
+      expect(handle.el()).toBeNull();
+      expect(cleanupCalls).toEqual(['cleanup:1', 'cleanup:2']);
+
+      enabled = true;
+      handle.refresh();
+      expect(mountCalls).toEqual(['mount:1', 'mount:2', 'mount:3']);
+
+      handle.unmount();
+      expect(cleanupCalls).toEqual(['cleanup:1', 'cleanup:2', 'cleanup:3']);
+      registry.disposeFeature('mountHookMod');
+      expect(cleanupCalls).toEqual(['cleanup:1', 'cleanup:2', 'cleanup:3']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('Batch 11 Wave 1 Kernel Improvements (IMP-05, IMP-10, IMP-16)', () => {
+  it('propagates ctx.signal across ctx.api with waiter-isolated abort and post-disposal safety (IMP-05)', async () => {
+    const { registry, settings, anilist } = await loadFreshKernel();
+    const fetchMock = vi.fn();
+    const origFetch = window.fetch;
+    window.fetch = fetchMock as any;
+
+    try {
+      let ctxA!: any;
+      let ctxB!: any;
+
+      registry.defineModule({
+        id: 'apiIsoA',
+        key: 'apiIsoAEnabled',
+        title: 'API Iso A',
+        help: 'Test',
+        setup(ctx) {
+          ctxA = ctx;
+        }
+      });
+      registry.defineModule({
+        id: 'apiIsoB',
+        key: 'apiIsoBEnabled',
+        title: 'API Iso B',
+        help: 'Test',
+        setup(ctx) {
+          ctxB = ctx;
+        }
+      });
+
+      settings.Settings.set('apiIsoAEnabled', true);
+      settings.Settings.set('apiIsoBEnabled', true);
+      registry.startModules(false);
+
+      let resolveShared!: (r: Response) => void;
+      fetchMock.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveShared = resolve;
+          })
+      );
+
+      const q = 'query ($id: Int) { Media(id: $id) { id title { romaji } } }';
+      const pA = ctxA.api.query(q, { id: 777 });
+      const pB = ctxB.api.query(q, { id: 777 });
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+      // Disposing A aborts A's waiter without aborting B's shared request
+      registry.disposeFeature('apiIsoA');
+      await expect(pA).rejects.toMatchObject({ name: 'AbortError' });
+
+      resolveShared(new Response(JSON.stringify({ data: { Media: { id: 777, title: { romaji: 'Shared OK' } } } }), { status: 200 }));
+      await expect(pB).resolves.toEqual({ Media: { id: 777, title: { romaji: 'Shared OK' } } });
+
+      // Post-disposal calls on ctxA.api reject cleanly (or return null for media.get)
+      await expect(ctxA.api.query(q, { id: 778 })).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(ctxA.api.getMediaList(1, 'ANIME')).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(ctxA.api.viewer()).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(ctxA.api.media.get(778, 'ANIME')).resolves.toBeNull();
+      expect(anilist.AniList.hasAuth()).toBe(false);
+    } finally {
+      window.fetch = origFetch;
+    }
+  });
+
+  it('auto-resolves ctx.confirm and ctx.alert cleanly on disposal and suppresses post-disposal dialogs (IMP-10)', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    let modCtx!: any;
+
+    registry.defineModule({
+      id: 'dialogMod',
+      key: 'dialogModEnabled',
+      title: 'Dialog Mod',
+      help: 'Test',
+      setup(ctx) {
+        modCtx = ctx;
+      }
+    });
+
+    settings.Settings.set('dialogModEnabled', true);
+    registry.startModules(false);
+
+    const confirmPromise = modCtx.confirm({ id: 'mod-confirm', message: 'Proceed?' });
+    expect(document.getElementById('ala-dialogMod-mod-confirm')).not.toBeNull();
+
+    registry.disposeFeature('dialogMod');
+    await expect(confirmPromise).resolves.toBe(false);
+    expect(document.getElementById('ala-dialogMod-mod-confirm')).toBeNull();
+
+    await expect(modCtx.confirm({ id: 'late-confirm', message: 'Late' })).resolves.toBe(false);
+    await expect(modCtx.alert({ id: 'late-alert', message: 'Late' })).resolves.toBeUndefined();
+    expect(document.getElementById('ala-dialogMod-late-confirm')).toBeNull();
+    expect(document.getElementById('ala-dialogMod-late-alert')).toBeNull();
+  });
+
+  it('isolates per-context markFetchOwner leases via whenAlive and releases on markFetchOwner(false) or teardown (IMP-16)', async () => {
+    const origWinFetch = window.fetch;
+    const { registry, settings, bus, observer } = await loadFreshKernel();
+    const baseFetch = vi.fn(async () => new Response(JSON.stringify({ data: { Viewer: { id: 1 } } }), { status: 200 }));
+    window.fetch = baseFetch as any;
+
+    const gqlEvents: string[] = [];
+    const unsubGql = bus.CoreHooks.onGqlFetch((ev) => gqlEvents.push(ev.phase));
+    try {
+      let ctxA!: any;
+      let ctxB!: any;
+
+      registry.defineModule({
+        id: 'ownerModA',
+        key: 'ownerModAEnabled',
+        title: 'Owner A',
+        help: 'Test',
+        setup(ctx) {
+          ctxA = ctx;
+        }
+      });
+      registry.defineModule({
+        id: 'ownerModB',
+        key: 'ownerModBEnabled',
+        title: 'Owner B',
+        help: 'Test',
+        setup(ctx) {
+          ctxB = ctx;
+        }
+      });
+
+      settings.Settings.set('ownerModAEnabled', true);
+      settings.Settings.set('ownerModBEnabled', true);
+      registry.startModules(false);
+
+      const leaseA = ctxA.hooks.markFetchOwner(true);
+      ctxB.hooks.markFetchOwner(true);
+      expect(typeof leaseA).toBe('function');
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(true);
+      expect(window.fetch).toBe(baseFetch);
+
+      // Module A releasing via markFetchOwner(false) keeps Module B's lease active
+      ctxA.hooks.markFetchOwner(false);
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(true);
+      expect(window.fetch).toBe(baseFetch);
+
+      // Module B unloading without manual markFetchOwner(false) releases its token automatically
+      registry.disposeFeature('ownerModB');
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(false);
+      expect(window.fetch).not.toBe(baseFetch);
+
+      await window.fetch('https://anilist.co/graphql', {
+        method: 'POST',
+        body: JSON.stringify({ query: 'query AutoReleased { Viewer { id } }' })
+      });
+      expect(gqlEvents).toEqual(['request', 'response']);
+      expect(observer.Core).toBeDefined();
+    } finally {
+      unsubGql();
+      window.fetch = origWinFetch;
+    }
+  });
+
+  it('re-probes standalone before clearing standalonePaused on host.reload and gates deferred modules before startModules(false) when document.body is null (BUG-06)', async () => {
+    const { registry, settings } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+
+    let syncProbeActive = true;
+    let asyncProbeActive = true;
+    const bootLog: string[] = [];
+    const cleanupLog: string[] = [];
+
+    registry.defineModule({
+      id: 'earlyMod',
+      key: 'earlyModEnabled',
+      layer: 'preload',
+      title: 'Early Mod',
+      help: 'Test',
+      setup(ctx) {
+        bootLog.push('earlyMod');
+        ctx.onCleanup(() => cleanupLog.push('earlyMod'));
+      }
+    });
+
+    registry.defineModule({
+      id: 'deferredMod',
+      key: 'deferredModEnabled',
+      layer: 'feature',
+      title: 'Deferred Mod',
+      help: 'Test',
+      setup() {
+        bootLog.push('deferredMod');
+      }
+    });
+
+    registry.defineModule({
+      id: 'syncStandaloneMod',
+      key: 'syncStandaloneEnabled',
+      layer: 'service',
+      title: 'Sync Standalone',
+      help: 'Test',
+      standalone: { name: 'Sync Standalone', probe: () => syncProbeActive },
+      setup() {
+        bootLog.push('syncStandaloneMod');
+      }
+    });
+
+    registry.defineModule({
+      id: 'syncStandaloneChild',
+      key: 'syncStandaloneChildEnabled',
+      layer: 'feature',
+      dependsOn: ['syncStandaloneMod'],
+      title: 'Sync Standalone Child',
+      help: 'Test',
+      setup() {
+        bootLog.push('syncStandaloneChild');
+      }
+    });
+
+    registry.defineModule({
+      id: 'asyncStandaloneMod',
+      key: 'asyncStandaloneEnabled',
+      layer: 'service',
+      title: 'Async Standalone',
+      help: 'Test',
+      standalone: { name: 'Async Standalone', probe: async () => asyncProbeActive },
+      setup(ctx) {
+        bootLog.push('asyncStandaloneMod');
+        ctx.onCleanup(() => cleanupLog.push('asyncStandaloneMod'));
+      }
+    });
+
+    registry.defineModule({
+      id: 'asyncStandaloneChild',
+      key: 'asyncStandaloneChildEnabled',
+      layer: 'feature',
+      dependsOn: ['asyncStandaloneMod'],
+      title: 'Async Standalone Child',
+      help: 'Test',
+      setup(ctx) {
+        bootLog.push('asyncStandaloneChild');
+        ctx.onCleanup(() => cleanupLog.push('asyncStandaloneChild'));
+      }
+    });
+
+    settings.Settings.set('earlyModEnabled', true);
+    settings.Settings.set('deferredModEnabled', true);
+    settings.Settings.set('syncStandaloneEnabled', true);
+    settings.Settings.set('syncStandaloneChildEnabled', true);
+    settings.Settings.set('asyncStandaloneEnabled', true);
+    settings.Settings.set('asyncStandaloneChildEnabled', true);
+
+    const origBody = document.body;
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      registry.startModules(true);
+      expect(bootLog).toEqual(['earlyMod']);
+
+      host.reload(['earlyMod', 'deferredMod']);
+      expect(cleanupLog).toEqual(['earlyMod']);
+      expect(bootLog).toEqual(['earlyMod', 'earlyMod']);
+      expect(host.getStatus('deferredMod').active).toBe(false);
+    } finally {
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+
+    await host.probeStandalone('syncStandaloneMod');
+    expect(host.getStatus('syncStandaloneMod')).toEqual({ active: false, reason: 'standalone-paused' });
+
+    registry.startModules(false);
+    expect(bootLog).toContain('deferredMod');
+    expect(bootLog).not.toContain('syncStandaloneMod');
+    expect(bootLog).not.toContain('syncStandaloneChild');
+
+    // Sync standalone probe still active -> reload keeps standalone-paused and does not boot
+    host.reload(['syncStandaloneMod']);
+    expect(bootLog).not.toContain('syncStandaloneMod');
+    expect(bootLog).not.toContain('syncStandaloneChild');
+    expect(host.getStatus('syncStandaloneMod')).toEqual({ active: false, reason: 'standalone-paused' });
+    expect(host.getStatus('syncStandaloneChild')).toEqual({
+      active: false,
+      reason: 'dep-unavailable',
+      missingDeps: ['syncStandaloneMod']
+    });
+
+    // Async standalone probe resolving true -> post-probe cascadeDispose tears down parent & child
+    await host.probeStandalone('asyncStandaloneMod');
+    expect(host.getStatus('asyncStandaloneMod')).toEqual({ active: false, reason: 'standalone-paused' });
+    cleanupLog.length = 0;
+    host.reload(['asyncStandaloneMod']);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleanupLog).toEqual(['asyncStandaloneChild', 'asyncStandaloneMod']);
+    expect(host.getStatus('asyncStandaloneMod')).toEqual({ active: false, reason: 'standalone-paused' });
+    expect(host.getStatus('asyncStandaloneChild')).toEqual({
+      active: false,
+      reason: 'dep-unavailable',
+      missingDeps: ['asyncStandaloneMod']
+    });
+
+    // When standalone conflict clears, reload boots parent and dependent cleanly
+    syncProbeActive = false;
+    host.reload(['syncStandaloneMod']);
+    expect(host.getStatus('syncStandaloneMod')).toEqual({ active: true });
+    expect(host.getStatus('syncStandaloneChild')).toEqual({ active: true });
+
+    asyncProbeActive = false;
+    host.reload(['asyncStandaloneMod']);
+    await Promise.resolve();
+    expect(host.getStatus('asyncStandaloneMod')).toEqual({ active: true });
+    expect(host.getStatus('asyncStandaloneChild')).toEqual({ active: true });
+  });
+
+  it('IMP-02: scopes rc.api to route lifecycle, aborts reads/mutations on navigation, rejects post-teardown mutations, and keeps hasAuth() non-reconciling once closed', async () => {
+    const origWinFetch = window.fetch;
+    const { registry, settings, helpers, bus, anilist } = await loadFreshKernel();
+    const host = registry.createModuleHost();
+
+    let capturedCtx!: any;
+    let capturedRc!: any;
+
+    registry.defineModule({
+      id: 'routeApiMod',
+      key: 'routeApiEnabled',
+      requiresReload: false,
+      title: 'Route API',
+      help: 'Test',
+      setup(ctx) {
+        capturedCtx = ctx;
+        ctx.onRoute(/\/anime\/\d+/, (rc) => {
+          capturedRc = rc;
+        });
+      }
+    });
+
+    history.replaceState({}, '', '/anime/101');
+    settings.Settings.set('routeApiEnabled', true);
+
+    try {
+      registry.startModules(false);
+
+      expect(capturedRc).toBeDefined();
+      expect(capturedRc.api).toBe(capturedRc.api);
+      expect((capturedRc.api as any).session).toBeUndefined();
+
+      const makeAbortingPromise = (signal?: AbortSignal) =>
+        new Promise<any>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+            return;
+          }
+          signal?.addEventListener(
+            'abort',
+            () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })),
+            { once: true }
+          );
+        });
+
+      const forwardedSignals: Array<AbortSignal | undefined> = [];
+      const querySpy = vi
+        .spyOn(anilist.anilistApiClient, 'query')
+        .mockImplementation((_q, _v, opts) => {
+          const sig = typeof opts === 'object' ? opts?.signal : undefined;
+          forwardedSignals.push(sig);
+          return makeAbortingPromise(sig);
+        });
+      const viewerSpy = vi
+        .spyOn(anilist.anilistApiClient, 'viewer')
+        .mockImplementation((_f, opts) => {
+          forwardedSignals.push(opts?.signal);
+          return makeAbortingPromise(opts?.signal);
+        });
+      const listSpy = vi
+        .spyOn(anilist.anilistApiClient, 'getMediaList')
+        .mockImplementation((_t, _ty, opts) => {
+          forwardedSignals.push(opts?.signal);
+          return makeAbortingPromise(opts?.signal);
+        });
+      const mediaGetSpy = vi
+        .spyOn(anilist.anilistApiClient.media, 'get')
+        .mockImplementation((_id, _ty, opts) => {
+          forwardedSignals.push(opts?.signal);
+          return makeAbortingPromise(opts?.signal);
+        });
+      const mediaSaveSpy = vi
+        .spyOn(anilist.anilistApiClient.media, 'save')
+        .mockImplementation((_id, _ty, _patch, opts) => {
+          forwardedSignals.push(opts?.signal);
+          return makeAbortingPromise(opts?.signal);
+        });
+
+      const callerAc = new AbortController();
+      const pCallerAborted = capturedRc.api.viewer(true, { signal: callerAc.signal });
+      callerAc.abort();
+      await expect(pCallerAborted).rejects.toMatchObject({ name: 'AbortError' });
+      expect(capturedRc.signal.aborted).toBe(false);
+
+      forwardedSignals.length = 0;
+      const pQuery = capturedRc.api.query('query { Media(id: 101) { id } }', undefined, 2);
+      const pViewer = capturedRc.api.viewer(true);
+      const pList = capturedRc.api.getMediaList('Alice', 'ANIME');
+      const pMediaGet = capturedRc.api.media.get(101, 'ANIME');
+      const pMediaSave = capturedRc.api.media.save(101, 'ANIME', { progress: 3 });
+
+      expect(forwardedSignals).toHaveLength(5);
+      expect(forwardedSignals.every((s) => s && !s.aborted)).toBe(true);
+
+      history.pushState({}, '', '/home');
+      expect(capturedRc.signal.aborted).toBe(true);
+      expect(forwardedSignals.every((s) => s?.aborted === true)).toBe(true);
+
+      await expect(pQuery).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(pViewer).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(pList).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(pMediaGet).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(pMediaSave).rejects.toMatchObject({ name: 'AbortError' });
+
+      // Post-teardown mutations reject immediately without reaching anilistApiClient
+      querySpy.mockClear();
+      mediaSaveSpy.mockClear();
+      viewerSpy.mockClear();
+      listSpy.mockClear();
+      mediaGetSpy.mockClear();
+
+      await expect(
+        capturedRc.api.query('mutation { SaveMediaListEntry(mediaId: 1) { id } }')
+      ).rejects.toThrow(/disposed/i);
+      await expect(capturedRc.api.media.save(101, 'ANIME', { score: 8 })).rejects.toThrow(/disposed/i);
+      expect(querySpy).not.toHaveBeenCalled();
+      expect(mediaSaveSpy).not.toHaveBeenCalled();
+
+      // Post-teardown cache/viewer invalidations are no-ops
+      const clearViewerSpy = vi.spyOn(anilist.anilistApiClient, 'clearViewer');
+      const invSpy = vi.spyOn(anilist.anilistApiClient, 'invalidate');
+      const invListSpy = vi.spyOn(anilist.anilistApiClient, 'invalidateMediaList');
+      capturedRc.api.clearViewer();
+      capturedRc.api.invalidate('Media:101');
+      capturedRc.api.invalidateMediaList('Alice', 'ANIME');
+      expect(clearViewerSpy).not.toHaveBeenCalled();
+      expect(invSpy).not.toHaveBeenCalled();
+      expect(invListSpy).not.toHaveBeenCalled();
+
+      // Closed rc.api.hasAuth() passes { reconcile: false } so stale session data is not wiped
+      helpers.store.set('al_token_auth', 'Bearer valid-tok');
+      helpers.store.set('al_user_id', 555);
+      helpers.store.set('al_username', 'Alice');
+      bus.CoreHooks.setAuthHeader('Bearer valid-tok');
+      document.body.innerHTML = '<nav><a href="/login">Login</a></nav>';
+
+      expect(capturedRc.api.hasAuth()).toBe(false);
+      expect(helpers.store.get('al_user_id', null)).toBe(555);
+      expect(helpers.store.get('al_username', null)).toBe('Alice');
+      expect(bus.CoreHooks.getAuthHeader()).toBe('Bearer valid-tok');
+
+      // End-to-end fetch abort check with real anilistApiClient on new route entry
+      vi.restoreAllMocks();
+      const fetchSignals: Array<AbortSignal | undefined> = [];
+      window.fetch = vi.fn((_url, init?: RequestInit) => {
+        fetchSignals.push(init?.signal ?? undefined);
+        return makeAbortingPromise(init?.signal ?? undefined);
+      }) as any;
+
+      history.pushState({}, '', '/anime/202');
+      const secondRc = capturedRc;
+      expect(secondRc).not.toBeNull();
+      expect(secondRc.signal.aborted).toBe(false);
+
+      const liveFetchQuery = secondRc.api.query('query { Media(id: 202) { id } }', {}, { forceFresh: true });
+      const liveFetchExpect = expect(liveFetchQuery).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() => expect(fetchSignals).toHaveLength(1));
+      expect(fetchSignals[0]?.aborted).toBe(false);
+
+      // Module ctx.api remains open after route exit, while secondRc.api aborts
+      history.pushState({}, '', '/home');
+      await liveFetchExpect;
+      expect(fetchSignals[0]?.aborted).toBe(true);
+      expect(capturedCtx.signal.aborted).toBe(false);
+
+      settings.Settings.set('routeApiEnabled', false);
+      host.reload(['routeApiMod']);
+      expect(capturedCtx.signal.aborted).toBe(true);
+      await expect(capturedCtx.api.media.save(202, 'ANIME', { score: 9 })).rejects.toThrow(/disposed/i);
+    } finally {
+      window.fetch = origWinFetch;
+      history.replaceState({}, '', '/');
+    }
+  });
+
+  it('IMP-01, IMP-03, IMP-04, IMP-09: exposes rc.getId/confirm/alert/observe, aborts ctx.http at teardown start, and flushes ctx.persistent on pagehide only while active', async () => {
+    const { registry, settings, helpers } = await loadFreshKernel();
+    const xhrSpy = vi.spyOn(globalThis, 'GM_xmlhttpRequest');
+
+    let capturedCtx!: any;
+    let capturedRc!: any;
+    let httpAbortedBeforeCleanup = false;
+    let cacheHandle!: any;
+    const obsRecords: MutationRecord[][] = [];
+
+    history.replaceState({}, '', '/anime/303');
+    registry.defineModule({
+      id: 'wave1KernelMod',
+      key: 'wave1KernelEnabled',
+      layer: 'feature',
+      requiresReload: false,
+      title: 'Wave 1 Kernel',
+      help: 'Test',
+      setup(ctx) {
+        capturedCtx = ctx;
+        cacheHandle = ctx.persistent<{ count: number }>('wave1Cache');
+        ctx.onRoute(/^\/anime\/\d+/, (rc) => {
+          capturedRc = rc;
+          rc.observe(document.body, { childList: true }, (mutations) => {
+            obsRecords.push(mutations);
+          });
+        });
+      }
+    });
+
+    settings.Settings.set('wave1KernelEnabled', true);
+    registry.startModules(false);
+
+    // IMP-01: rc.getId namespacing + rc.confirm / rc.alert auto-resolve on route exit
+    expect(capturedRc.getId('badge')).toBe('ala-wave1KernelMod-badge');
+    expect(capturedRc.getId('ala-custom')).toBe('ala-custom');
+    expect(capturedRc.getId()).toMatch(/^ala-wave1KernelMod-\d+$/);
+
+    const confirmP = capturedRc.confirm({ id: 'route-confirm', message: 'Confirm route?' });
+    expect(document.getElementById('ala-wave1KernelMod-route-confirm')).not.toBeNull();
+    const alertP = capturedRc.alert({ id: 'route-alert', message: 'Alert route!' });
+    expect(document.getElementById('ala-wave1KernelMod-route-alert')).not.toBeNull();
+
+    // IMP-04: rc.observe delivers mutations while route is active
+    const probeNode = document.createElement('div');
+    document.body.appendChild(probeNode);
+    await Promise.resolve();
+    expect(obsRecords.length).toBeGreaterThanOrEqual(1);
+    const countAtExit = obsRecords.length;
+
+    // Route exit dismisses rc.confirm -> false, rc.alert -> undefined, and disconnects rc.observe
+    history.pushState({}, '', '/home');
+    await expect(confirmP).resolves.toBe(false);
+    await expect(alertP).resolves.toBeUndefined();
+    expect(document.getElementById('ala-wave1KernelMod-route-confirm')).toBeNull();
+    expect(document.getElementById('ala-wave1KernelMod-route-alert')).toBeNull();
+
+    document.body.appendChild(document.createElement('span'));
+    await Promise.resolve();
+    expect(obsRecords).toHaveLength(countAtExit);
+
+    // Post-teardown rc.confirm / rc.alert resolve immediately without mounting
+    await expect(capturedRc.confirm({ id: 'post-confirm', message: 'Noop' })).resolves.toBe(false);
+    await expect(capturedRc.alert({ id: 'post-alert', message: 'Noop' })).resolves.toBeUndefined();
+    expect(document.getElementById('ala-wave1KernelMod-post-confirm')).toBeNull();
+    expect(document.getElementById('ala-wave1KernelMod-post-alert')).toBeNull();
+
+    // IMP-09: pagehide flushes pending ctx.persistent writes while active
+    vi.useFakeTimers();
+    try {
+      cacheHandle.data.count = 42;
+      cacheHandle.save();
+      expect(helpers.jsonGet('ala_mod_wave1KernelMod_wave1Cache', null)).toBeNull();
+      window.dispatchEvent(new Event('pagehide'));
+      expect(helpers.jsonGet('ala_mod_wave1KernelMod_wave1Cache', null)).toEqual({ count: 42 });
+
+      // Queue another debounced write, then dispose -> pagehide must NOT flush cancelled write
+      cacheHandle.data.count = 99;
+      cacheHandle.save();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // IMP-03: ctx.http aborts at teardown start (before ctx.onCleanup runs)
+    const abortFn = vi.fn();
+    xhrSpy.mockImplementation(() => ({ abort: abortFn }) as any);
+    let httpRejectedBeforeCleanup = false;
+    const pendingHttp = capturedCtx.http.text('https://example.com/teardown-start').catch((err: Error) => {
+      httpRejectedBeforeCleanup = err.message === 'Request aborted';
+      throw err;
+    });
+
+    capturedCtx.onCleanup(() => {
+      httpAbortedBeforeCleanup = capturedCtx.signal.aborted && abortFn.mock.calls.length === 1;
+    });
+
+    registry.disposeFeature('wave1KernelMod');
+    expect(httpAbortedBeforeCleanup).toBe(true);
+    await expect(pendingHttp).rejects.toThrow('Request aborted');
+    expect(httpRejectedBeforeCleanup).toBe(true);
+
+    // Post-disposal pagehide does not flush the cancelled write (count remains 42)
+    window.dispatchEvent(new Event('pagehide'));
+    expect(helpers.jsonGet('ala_mod_wave1KernelMod_wave1Cache', null)).toEqual({ count: 42 });
+    probeNode.remove();
+    history.replaceState({}, '', '/');
   });
 });

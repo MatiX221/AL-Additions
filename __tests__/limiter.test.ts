@@ -99,6 +99,107 @@ describe('RateLimiter: Token Consumption & Acquisition', () => {
     const next = limiter.acquire();
     await expect(next).resolves.toBeUndefined();
   });
+
+  it('re-evaluates check() cancellation within 1000 ms on a rate: 1 limiter', async () => {
+    const limiter = new RateLimiter({ rate: 1, burst: 1 });
+    await limiter.acquire();
+
+    let cancelled = false;
+    const pending = limiter.acquire(() => {
+      if (cancelled) throw new Error('Cancelled mid-wait');
+    });
+    const assertion = expect(pending).rejects.toThrow('Cancelled mid-wait');
+
+    cancelled = true;
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+  });
+
+  it('applies setRate() updates within 1000 ms on a rate: 1 limiter', async () => {
+    const limiter = new RateLimiter({ rate: 1, min: 1, max: 60, burst: 1 });
+    await limiter.acquire();
+
+    let acquired = false;
+    const pending = limiter.acquire().then(() => {
+      acquired = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(acquired).toBe(false);
+
+    limiter.setRate(60);
+    await vi.advanceTimersByTimeAsync(500);
+    await pending;
+    expect(acquired).toBe(true);
+  });
+
+  it('aborts { check, signal } waiters immediately without stalling this.queue (IMP-05)', async () => {
+    const limiter = new RateLimiter({ rate: 1, burst: 1 });
+    await limiter.acquire();
+
+    // Already-aborted signal rejects immediately without queueing
+    const preAc = new AbortController();
+    preAc.abort();
+    await expect(limiter.acquire({ signal: preAc.signal })).rejects.toMatchObject({ name: 'AbortError' });
+
+    // Waiter A is sleeping for 1000ms chunks; Waiter B is queued behind A
+    const acA = new AbortController();
+    const pA = limiter.acquire({ signal: acA.signal });
+    let acquiredB = false;
+    const pB = limiter.acquire().then(() => {
+      acquiredB = true;
+    });
+
+    // Advance 50ms so A is sleeping in _take, then abort A -> A rejects immediately without waiting 950ms
+    await vi.advanceTimersByTimeAsync(50);
+    acA.abort();
+    await expect(pA).rejects.toMatchObject({ name: 'AbortError' });
+
+    // Also test a waiter C aborted while queued behind B: rejects immediately and leaves tokens intact
+    const acC = new AbortController();
+    const pC = limiter.acquire({ signal: acC.signal });
+    acC.abort();
+    await expect(pC).rejects.toMatchObject({ name: 'AbortError' });
+
+    // Let B finish its 60s token refill cleanly (1 token/min at rate: 1)
+    expect(acquiredB).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await pB;
+    expect(acquiredB).toBe(true);
+
+    // Aborting during cooldown (resumeAt) also releases queue immediately for the next waiter
+    const cooldownLimiter = new RateLimiter({ rate: 600, burst: 1 });
+    cooldownLimiter.limit(500);
+    const acCooldown = new AbortController();
+    const pAbortedCooldown = cooldownLimiter.acquire({ signal: acCooldown.signal });
+    let nextOk = false;
+    const pNext = cooldownLimiter.acquire().then(() => {
+      nextOk = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    acCooldown.abort();
+    await expect(pAbortedCooldown).rejects.toMatchObject({ name: 'AbortError' });
+
+    // Only ~490ms remain on cooldown + 100ms for 1 token at rate: 600;
+    // if the aborted waiter stalled the queue for 1000ms this would still be false at 600ms
+    await vi.advanceTimersByTimeAsync(600);
+    await pNext;
+    expect(nextOk).toBe(true);
+
+    // { check, signal } removes abort listener when check() throws before abort
+    const checkAc = new AbortController();
+    const removeCheckSpy = vi.spyOn(checkAc.signal, 'removeEventListener');
+    await expect(
+      cooldownLimiter.acquire({
+        signal: checkAc.signal,
+        check: () => {
+          throw new Error('Check stopped');
+        }
+      })
+    ).rejects.toThrow('Check stopped');
+    expect(removeCheckSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
 });
 
 describe('RateLimiter: Adaptive Scaling', () => {

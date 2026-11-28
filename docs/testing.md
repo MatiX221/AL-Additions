@@ -9,9 +9,9 @@ Tests run on Vitest with a browser-like DOM (jsdom) pointed at `https://anilist.
 `__tests__/setup.ts` runs before every test file and provides:
 
 - **Userscript APIs.** `GM_getValue`, `GM_setValue`, `GM_deleteValue`, `GM_listValues`, and the value-change listeners are backed by an in-memory map. `GM_xmlhttpRequest`, `GM_registerMenuCommand`, and `GM_download` are plain `vi.fn()` mocks that do nothing until you give them behavior. `unsafeWindow` is the window itself.
-- **Browser extras.** Web Crypto, `Blob`, `CompressionStream`, and `DecompressionStream` from Node.
-- **Core services.** The AniList client is already configured, so `ctx.api` and `ctx.session` work in lifecycle tests.
-- **Clean state per test.** Before each test the storage map and value listeners are cleared and `document.body` and `document.head` are emptied. History, `location`, and `localStorage` are not reset, so set the URL yourself with `history.replaceState({}, '', '/anime/1')` and clean up anything you alter if later tests depend on it.
+- **Browser extras.** Web Crypto, `Blob`, `CompressionStream`, and `DecompressionStream` from Node, plus `Response`, `Headers`, and `Request` mirrored onto `window` when missing.
+- **Core services.** The AniList client is already configured, so `ctx.api` (and `rc.api` on routes) and `ctx.session` work in lifecycle tests.
+- **Clean state per test.** Before each test the storage map, value listeners, and `localStorage` are cleared, `GM_*` mock call history and missing defaults are reset, `document.body` and `document.head` are emptied, and `document.documentElement` inline `style` is removed. History and `location` are not reset, so set the URL yourself with `history.replaceState({}, '', '/anime/1')` and clean up anything you alter if later tests depend on it.
 
 Tests are not modules, so they may import `Settings`, `bootModuleForTest`, and other internals freely. The module-only rules in [Enforced Conventions](./architecture.md#enforced-conventions) apply to `src/modules/**` only.
 
@@ -58,11 +58,11 @@ describe('example module', () => {
     Settings.set('exampleEnabled', true);
 
     await bootModuleForTest('example');
-    expect(document.getElementById('ala-example')).not.toBeNull();
+    expect(document.getElementById('ala-example-mount-1')).not.toBeNull(); // or 'ala-example-<id>' when mount({ id }) is set
 
     Settings.set('exampleEnabled', false);
     createModuleHost().reload(['example']);
-    expect(document.getElementById('ala-example')).toBeNull();
+    expect(document.getElementById('ala-example-mount-1')).toBeNull();
   });
 });
 ```
@@ -70,9 +70,10 @@ describe('example module', () => {
 Things to know:
 
 - `bootModuleForTest` disposes any earlier instance, boots a fresh one, and does not check the enabled toggle. Still set the toggle, because `reload` decides what to stop from it.
-- **Assert against the resolved element ids.** IDs passed to `ctx.getId(name)` / `mount({ id })` namespace to `ala-<moduleId>-<name>`, and 2-arg `addStyle(name, css)` appends `-style` unless already present (names already starting with `ala-` stay as written), see [Element IDs](./context-api.md#element-ids) and [Mounting DOM Elements](./context-api.md#mounting-dom-elements).
-- `host.getStatus(id)` returns `{ active: true }` or `{ active: false, reason }` and is the way to assert on dependency, host, standalone, and error behavior, see [Status reasons](./define-module.md#status-reasons).
-- `MountHandle.unmount()` detaches a mount early, and `disposeFeature(id)` from the registry stops a module and everything that depends on it.
+- `createModuleHost().reload(ids)` re-runs `standalone.probe()` before clearing `standalone-paused` on unbooted targets, and skips booting deferred (`service` / `feature`) modules if `startModules(false)` has not run yet and `document.body` is `null`.
+- **Assert against the resolved element ids.** IDs passed to `ctx.getId(name)` / `mount({ id })` namespace to `ala-<moduleId>-<name>` (omitting `id` on `mount()` allocates `ala-<moduleId>-mount-<n>`), and 2-arg `addStyle(name, css)` appends `-style` unless already present (names already starting with `ala-` stay as written), see [Element IDs](./context-api.md#element-ids) and [Mounting DOM Elements](./context-api.md#mounting-dom-elements).
+- `host.getStatus(id)` returns `{ active: true }`, `{ active: false }` (eligible, not booted yet), or `{ active: false, reason }` and is the way to assert on dependency, host, standalone, and error behavior, see [Status reasons](./define-module.md#status-reasons).
+- `MountHandle.refresh()` re-evaluates a mount on demand, `MountHandle.unmount()` detaches a mount early, and `disposeFeature(id)` from the registry stops a module and everything that depends on it.
 - Module-level state in your files survives between tests in the same file. Reset it in cleanups, or call `vi.resetModules()` and import again for a fresh copy.
 
 ### Timers and mutations
@@ -81,11 +82,11 @@ Mount repair and body-mutation callbacks are batched for 50 ms. Use fake timers 
 
 ```ts
 vi.useFakeTimers();
-document.getElementById('ala-example')!.remove();
+document.getElementById('ala-example-mount-1')!.remove();
 document.body.appendChild(document.createElement('span')); // any mutation
 await Promise.resolve();
 vi.advanceTimersByTime(60);
-expect(document.getElementById('ala-example')).not.toBeNull();
+expect(document.getElementById('ala-example-mount-1')).not.toBeNull();
 vi.useRealTimers();
 ```
 
@@ -109,6 +110,9 @@ vi.useRealTimers();
 Debug output needs Developer Mode and the module's toggle:
 
 ```ts
+import '../src/settings/devMode';
+import { Settings } from '../src/settings/settings';
+
 const spy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 Settings.set('devModeEnabled', true);
 Settings.set('debug', { example: { enabled: true } });
@@ -153,14 +157,14 @@ Two test files scan the source tree. They run as part of `npm test`, so any viol
 ### layering.test.ts
 
 - **`src/types.ts` stays a leaf.** It imports nothing from `src/`.
-- **Imports follow the DAG.** Every relative import in `src/` must be allowed by the table in [Import DAG](./architecture.md#import-dag). The test compares against an allowlist of known violations that is meant to stay empty, and it also fails if that list contains an entry that no longer applies, so fixed violations must be removed from it.
-- **Zero import-time side effects.** The test imports every `src/modules/*/index.ts` one at a time, with a fresh module registry, and fails if the import calls any `GM_*` function, changes `document.head` or `document.body`, or calls `addEventListener` on `window` or `document`.
+- **Imports follow the DAG.** Every relative import or re-export in `src/` (scanned with a tokenizer that skips comments, strings, templates, and regex literals) must be allowed by the table in [Import DAG](./architecture.md#import-dag). The test compares against an allowlist of known violations that is meant to stay empty, and it also fails if that list contains an entry that no longer applies, so fixed violations must be removed from it. It also asserts that `core/` (including `core/scopeLifecycle.ts` importing only `types.ts` and `utils/helpers.ts`, and `core/modal.ts` never importing `core/contextScope.ts`) is free of import cycles.
+- **Zero import-time side effects.** The test imports every `.ts` file under `src/modules/**` (both `index.ts` and non-index sibling files), `src/api/**`, and `src/settings/**` one at a time, with a fresh module registry, and fails if the import calls any `GM_*` function, changes `document.head` or `document.body`, calls `addEventListener` on `window` or `document`, starts `setInterval` / `setTimeout`, calls `history.pushState` / `history.replaceState`, calls `fetch`, or performs unexpected account or setting registrations (only pure-memory boot registrations for `'mal'` in `api/mal.ts`, `'devModeEnabled'` / `'debug'` in `settings/devMode.ts` / `settings/panel.ts`, and `Settings.register` from `modules/` are allowed). It also verifies that `src/core/observer.ts` guards `history.pushState` / `replaceState` patching with a global symbol and lazily starts/stops `popstate`/`hashchange` listeners and the 400 ms poll interval with `Core.onNavigate(...)` subscribers.
 
 ### conventions.test.ts
 
-- **Module rules.** `src/modules/**` is scanned, with comments removed and strings kept. Each rule in [Enforced Conventions](./architecture.md#enforced-conventions) is a pattern, and a hit is reported as `<file>: <rule name>`. There are no per-file exceptions.
-- **No raw console.** `console.log`, `debug`, `warn`, and `error` calls are rejected in `core/`, `settings/`, `api/`, and `modules/`.
-- **Migration annotations.** Every `@migration(...)` comment must parse, with double-quoted `from` and `sunset` and a `kind` of `storage`, `import`, or `cleanup`. Every file that declares a `migrate` hook or a function whose name starts with `migrate` must carry at least one valid tag.
+- **Module rules.** `src/modules/**` is scanned, with comments removed and strings kept (and cast/bracket/template-aware checks for imports, listeners, and IDs). Each rule in [Enforced Conventions](./architecture.md#enforced-conventions) is a pattern, and a hit is reported as `<file>: <rule name>`. Only the raw `setTimeout`/`setInterval` rule (`modules/fastLoad/config.ts`, `modules/fastLoad/domOptimizers.ts`, `modules/fastLoad/worker.ts`, and `modules/sync/state.ts`) and the raw `new MutationObserver` rule (`modules/fastLoad/domOptimizers.ts` only) have narrow per-file allowlists; all other rules have no per-file exceptions.
+- **No raw console.** `console.log`, `debug`, `warn`, `error`, and bracket-access `console[...]` calls (including cast and optional-chaining forms) are rejected in `core/`, `settings/`, `api/`, and `modules/`.
+- **Migration annotations.** Every `@migration(...)` comment must parse, with non-empty double-quoted `from` and `sunset` and a `kind` of `storage`, `import`, or `cleanup`. Every `migrate` hook or declaration individually — `(async) migrate(...)` methods, `migrate: (async) ...` properties, `(async) function migrate*(...)`, and `const/let/var migrate* = ...` function/arrow variables — must carry an adjacent leading or in-body valid tag.
 
 How to fix a failure:
 

@@ -41,7 +41,7 @@ describe('B1-01: CoreHooks fallback fetch lifecycle & stacked wrappers', () => {
       });
       window.fetch = outerWrapper as any;
 
-      CoreHooks.markFetchOwner(true);
+      const releaseOwner = CoreHooks.markFetchOwner(true);
 
       const ownerRes = await window.fetch('https://anilist.co/graphql', {
         method: 'POST',
@@ -62,7 +62,7 @@ describe('B1-01: CoreHooks fallback fetch lifecycle & stacked wrappers', () => {
       expect(baseFetch.mock.contexts[1]).toBe(window);
       expect(events).toEqual([]);
 
-      CoreHooks.markFetchOwner(false);
+      releaseOwner();
       const afterRes = await window.fetch('https://anilist.co/graphql', {
         method: 'POST',
         body: JSON.stringify({ query: 'query AfterYield { Viewer { id } }' })
@@ -113,6 +113,7 @@ describe('B1-01: CoreHooks fallback fetch lifecycle & stacked wrappers', () => {
     const baseFetch = vi.fn(async () => new Response(JSON.stringify({ data: { Viewer: { id: 9 } } }), { status: 200 }));
     const events: any[] = [];
     let unsub: (() => void) | null = null;
+    let releaseOwner: (() => void) | null = null;
 
     try {
       (window as any).Request = DeferredRequest;
@@ -141,7 +142,7 @@ describe('B1-01: CoreHooks fallback fetch lifecycle & stacked wrappers', () => {
       unsub = CoreHooks.onGqlFetch((ev) => events.push(ev));
 
       const inflight2 = window.fetch(new DeferredRequest('https://anilist.co/graphql', reqTextPromise2) as any);
-      CoreHooks.markFetchOwner(true);
+      releaseOwner = CoreHooks.markFetchOwner(true);
 
       resolveReqText2(JSON.stringify({ query: 'query MidOwner { Viewer { id } }' }));
       const res2 = await inflight2;
@@ -150,7 +151,7 @@ describe('B1-01: CoreHooks fallback fetch lifecycle & stacked wrappers', () => {
       expect(events).toEqual([]);
     } finally {
       unsub?.();
-      CoreHooks.markFetchOwner(false);
+      releaseOwner?.();
       window.fetch = origWinFetch;
       (window as any).Request = origWinRequest;
     }
@@ -797,6 +798,56 @@ describe('B1-03: CoreHooks.isRpcBlocked & emitGqlFetch contract normalization', 
       window.fetch = origWinFetch;
     }
   });
+
+  it('IMP-10: populates GqlFetchEvent.errors on HTTP 200 GraphQL error payloads in installFallbackFetch', async () => {
+    const origWinFetch = window.fetch;
+    const { CoreHooks } = await loadFreshBus();
+    const events: any[] = [];
+    const baseFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { DeleteMediaListEntry: null },
+            errors: [{ message: 'Entry not found', status: 404 }]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { DeleteMediaListEntry: { deleted: true } },
+            errors: 'non-array-ignored'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    window.fetch = baseFetch as any;
+
+    const unsub = CoreHooks.onGqlFetch((ev) => events.push(ev));
+    try {
+      await window.fetch('https://anilist.co/graphql', {
+        method: 'POST',
+        body: JSON.stringify({ query: 'mutation { DeleteMediaListEntry(id: 1) { deleted } }', variables: { id: 1 } })
+      });
+      await window.fetch('https://anilist.co/graphql', {
+        method: 'POST',
+        body: JSON.stringify({ query: 'mutation { DeleteMediaListEntry(id: 2) { deleted } }', variables: { id: 2 } })
+      });
+
+      const responses = events.filter((e) => e.phase === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].ok).toBe(true);
+      expect(responses[0].status).toBe(200);
+      expect(responses[0].data).toEqual({ DeleteMediaListEntry: null });
+      expect(responses[0].errors).toEqual([{ message: 'Entry not found', status: 404 }]);
+      expect(responses[1].errors).toBeUndefined();
+    } finally {
+      unsub();
+      window.fetch = origWinFetch;
+    }
+  });
 });
 
 describe('CoreHooks authHeader & AccountProvider transition watching', () => {
@@ -829,6 +880,47 @@ describe('CoreHooks authHeader & AccountProvider transition watching', () => {
     CoreHooks.setAuthHeader('Bearer to_clear');
     CoreHooks.clearAuth();
     expect(CoreHooks.getAuthHeader()).toBeNull();
+  });
+
+  it('BUG-01: enforces Bearer prefix on setAuthHeader/getAuthHeader and handles null, undefined, and case-insensitive Bearer', async () => {
+    const { CoreHooks } = await loadFreshBus();
+    const { store } = await import('../src/utils/helpers');
+    const rawJwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMifQ.sig';
+
+    for (const invalid of ['Bearer', 'Bearer   ', 'Basic abc', rawJwt, 123 as any]) {
+      CoreHooks.setAuthHeader(invalid);
+      expect(CoreHooks.getAuthHeader()).toBeNull();
+      expect(store.get('al_token_auth', null)).toBeNull();
+    }
+
+    CoreHooks.setAuthHeader('  bearer tok  ');
+    expect(store.get('al_token_auth', null)).toBe('bearer tok');
+    expect(CoreHooks.getAuthHeader()).toBe('bearer tok');
+
+    for (const invalid of ['Bearer', 'Bearer   ', 'Basic abc', rawJwt, { token: 'x' } as any]) {
+      CoreHooks.setAuthHeader(invalid);
+      expect(CoreHooks.getAuthHeader()).toBe('bearer tok');
+      expect(store.get('al_token_auth', null)).toBe('bearer tok');
+    }
+
+    CoreHooks.setAuthHeader(null);
+    expect(CoreHooks.getAuthHeader()).toBeNull();
+    expect(store.get('al_token_auth', null)).toBeNull();
+
+    CoreHooks.setAuthHeader('bearer tok');
+    expect(CoreHooks.getAuthHeader()).toBe('bearer tok');
+
+    CoreHooks.setAuthHeader(undefined as any);
+    expect(CoreHooks.getAuthHeader()).toBeNull();
+    expect(store.get('al_token_auth', null)).toBeNull();
+
+    for (const invalidStored of ['Bearer', 'Bearer   ', 'Basic abc', rawJwt, 42]) {
+      store.set('al_token_auth', invalidStored);
+      expect(CoreHooks.getAuthHeader()).toBeNull();
+    }
+
+    store.set('al_token_auth', '  bearer tok  ');
+    expect(CoreHooks.getAuthHeader()).toBe('bearer tok');
   });
 
   it('notifies watchAccountProvider only on isConnected() transitions and supports deferred registration', async () => {
@@ -875,5 +967,57 @@ describe('CoreHooks authHeader & AccountProvider transition watching', () => {
     expect(transitions).toEqual([true, false, true, false]);
 
     unsub();
+  });
+});
+
+describe('IMP-16: Multi-owner CoreHooks.markFetchOwner leases', () => {
+  it('isolates per-caller fetch owner tokens and ignores legacy markFetchOwner(false) while leases remain', async () => {
+    const origWinFetch = window.fetch;
+    const { CoreHooks } = await loadFreshBus();
+
+    const baseFetch = vi.fn(async () => new Response(JSON.stringify({ data: { Viewer: { id: 1 } } }), { status: 200 }));
+    const events: string[] = [];
+    let unsub: (() => void) | null = null;
+    let releaseA: (() => void) | null = null;
+    let releaseB: (() => void) | null = null;
+
+    try {
+      window.fetch = baseFetch as any;
+      unsub = CoreHooks.onGqlFetch((ev) => events.push(ev.phase));
+
+      releaseA = CoreHooks.markFetchOwner(true);
+      releaseB = CoreHooks.markFetchOwner(true);
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(true);
+      expect(window.fetch).toBe(baseFetch);
+
+      // Legacy markFetchOwner(false) must not wipe active leases
+      const noopCleanup = CoreHooks.markFetchOwner(false);
+      expect(typeof noopCleanup).toBe('function');
+      noopCleanup();
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(true);
+      expect(window.fetch).toBe(baseFetch);
+
+      // Releasing A twice keeps B active
+      releaseA();
+      releaseA();
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(true);
+      expect(window.fetch).toBe(baseFetch);
+
+      // Releasing B restores fallback fetch when listeners exist
+      releaseB();
+      expect((window as any).__alaCoreMirror?.fetchOwner).toBe(false);
+      expect(window.fetch).not.toBe(baseFetch);
+
+      await window.fetch('https://anilist.co/graphql', {
+        method: 'POST',
+        body: JSON.stringify({ query: 'query Restored { Viewer { id } }' })
+      });
+      expect(events).toEqual(['request', 'response']);
+    } finally {
+      releaseA?.();
+      releaseB?.();
+      unsub?.();
+      window.fetch = origWinFetch;
+    }
   });
 });

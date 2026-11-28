@@ -12,13 +12,16 @@ import { TYPES } from './types';
 import {
   stores,
   initSyncStores,
-  syncStore,
+  resetSyncStores,
   setSyncLog,
   setSyncGet,
   setSyncStorage,
   setSyncApi,
   clearCache,
   releaseLock,
+  bumpSyncEpoch,
+  progress,
+  notifyState,
   syncStatus
 } from './state';
 import { initSyncPanel, renderPanel } from './panel';
@@ -163,27 +166,6 @@ defineModule({
           }
         }
 
-        for (const t of TYPES) {
-          const rawIds = m.storage.get<any>(`idmap_${t}`, undefined);
-          if (rawIds !== undefined) {
-            try {
-              const parsed = typeof rawIds === 'string' ? JSON.parse(rawIds) : rawIds;
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                stores[t].ids.data = parsed;
-              }
-            } catch {}
-          }
-          const rawSettled = m.storage.get<any>(`settled_${t}`, undefined);
-          if (rawSettled !== undefined) {
-            try {
-              const parsed = typeof rawSettled === 'string' ? JSON.parse(rawSettled) : rawSettled;
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                stores[t].settled.data = parsed;
-              }
-            } catch {}
-          }
-        }
-
         m.storage.set('schema', 3);
         m.legacy.del('sync_schema');
         m.legacy.del('sync_lock_heartbeat');
@@ -191,6 +173,7 @@ defineModule({
     }
   },
   setup(ctx) {
+    bumpSyncEpoch();
     setSyncLog(ctx.log);
     setSyncGet(ctx.get);
     setSyncStorage(ctx.storage);
@@ -199,14 +182,13 @@ defineModule({
     initDeletionInterceptor(ctx);
 
     ctx.menuCommand('🗑️ AL→MAL Sync: Reset all data', () => {
-      syncStore.clearKnown();
+      for (const t of TYPES) {
+        clearCache(stores[t].ids, false);
+        clearCache(stores[t].settled, false);
+      }
       ctx.api.clearViewer();
       ctx.accounts.clearSecrets('mal');
       ctx.storage.clear();
-      for (const t of TYPES) {
-        clearCache(stores[t].ids);
-        clearCache(stores[t].settled);
-      }
       log('All stored data cleared.');
       renderPanel();
     });
@@ -222,8 +204,15 @@ defineModule({
     }
 
     ctx.onCleanup(() => {
-      if (syncStatus.syncing) syncStatus.cancelled = true;
+      bumpSyncEpoch();
+      if (syncStatus.syncing) {
+        syncStatus.cancelled = true;
+        syncStatus.syncing = false;
+        progress.phase = 'idle';
+        notifyState();
+      }
       releaseLock();
+      resetSyncStores();
       setSyncLog(null);
       setSyncGet(null);
       setSyncStorage(null);
@@ -249,6 +238,7 @@ defineModule({
       legacy: [OVERRIDES_SETTING_KEY],
       title: 'Manual Overrides & Audit',
       help: 'Configure custom AniList → MyAnimeList ID mappings, ignore titles, and audit unmatched or orphaned entries.',
+      autoEnableParentWhenNonEmpty: true,
       validate: validateOverrides,
       editor: openOverridesModal
     }

@@ -18,10 +18,19 @@ export const Core = (() => {
   let observer: MutationObserver | null = null;
   let readyCancel: CleanupFn | null = null;
   let lastHref = location.href;
-  let muted = false;
+  let muteDepth = 0;
   const pageWin = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window) as Window;
+  const patchedHistories = new WeakSet<History>();
+  const PATCHED_HISTORY_SYM = Symbol.for('ala.historyPatch');
+  const NAV_WATCHER_SYM = Symbol.for('ala.navWatcher');
+  let navInterval: ReturnType<typeof setInterval> | 0 = 0;
+  let navListening = false;
   let queued: MutationRecord[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | 0 = 0;
+
+  interface HistoryPatchState {
+    notify: () => void;
+  }
 
   const fire = <T extends (...args: any[]) => void>(set: Set<ObserverEntry<T>>, ...args: Parameters<T>): void => {
     for (const entry of [...set]) {
@@ -31,26 +40,98 @@ export const Core = (() => {
   };
 
   function notifyNav(): void {
-    if (muted || location.href === lastHref) return;
+    if (muteDepth > 0 || location.href === lastHref) return;
     lastHref = location.href;
     coreLog.debug('Navigation detected:', location.pathname + location.search);
     fire(navCbs);
   }
 
-  for (const name of ['pushState', 'replaceState'] as const) {
-    const orig = pageWin.history[name];
+  function clearGlobalNavWatcher(): void {
+    const prev = (globalThis as any)[NAV_WATCHER_SYM] as { stop?: () => void } | undefined;
+    if (prev && typeof prev.stop === 'function') {
+      try {
+        prev.stop();
+      } catch (_) {}
+    }
     try {
-      pageWin.history[name] = function (this: History, ...args: any[]) {
-        const r = (orig as any).apply(this, args);
-        notifyNav();
-        return r;
-      };
+      delete (globalThis as any)[NAV_WATCHER_SYM];
     } catch (_) {}
   }
 
-  window.addEventListener('popstate', notifyNav);
-  window.addEventListener('hashchange', notifyNav);
-  setInterval(notifyNav, 400);
+  clearGlobalNavWatcher();
+
+  function stopNavWatcher(): void {
+    if (navListening && typeof window !== 'undefined') {
+      window.removeEventListener('popstate', notifyNav);
+      window.removeEventListener('hashchange', notifyNav);
+      navListening = false;
+    }
+    if (navInterval) {
+      clearInterval(navInterval);
+      navInterval = 0;
+    }
+    const cur = (globalThis as any)[NAV_WATCHER_SYM] as { stop?: () => void } | undefined;
+    if (cur?.stop === stopNavWatcher) {
+      try {
+        delete (globalThis as any)[NAV_WATCHER_SYM];
+      } catch (_) {}
+    }
+  }
+
+  function startNavWatcher(): void {
+    if (navListening || navInterval) return;
+    clearGlobalNavWatcher();
+    lastHref = location.href;
+    if (typeof window !== 'undefined') {
+      window.addEventListener('popstate', notifyNav);
+      window.addEventListener('hashchange', notifyNav);
+      navListening = true;
+    }
+    navInterval = setInterval(notifyNav, 400);
+    try {
+      (globalThis as any)[NAV_WATCHER_SYM] = { stop: stopNavWatcher };
+    } catch (_) {}
+  }
+
+  function patchHistory(hist: History | null | undefined): void {
+    if (!hist || patchedHistories.has(hist)) return;
+    patchedHistories.add(hist);
+
+    let state: HistoryPatchState | undefined;
+    try {
+      state = (hist as any)[PATCHED_HISTORY_SYM] as HistoryPatchState | undefined;
+      if (!state) {
+        state = { notify: notifyNav };
+        (hist as any)[PATCHED_HISTORY_SYM] = state;
+      } else {
+        state.notify = notifyNav;
+      }
+    } catch (_) {
+      state = undefined;
+    }
+
+    const activeState = state;
+    for (const name of ['pushState', 'replaceState'] as const) {
+      const orig = hist[name];
+      if (typeof orig !== 'function') continue;
+      if ((orig as any)[PATCHED_HISTORY_SYM] && activeState) continue;
+      try {
+        const wrapped = function (this: History, ...args: any[]) {
+          const r = (orig as any).apply(this, args);
+          if (activeState) activeState.notify();
+          else notifyNav();
+          return r;
+        };
+        (wrapped as any)[PATCHED_HISTORY_SYM] = true;
+        hist[name] = wrapped;
+      } catch (_) {}
+    }
+  }
+
+  patchHistory(pageWin?.history);
+  if (typeof window !== 'undefined' && window.history !== pageWin?.history) {
+    patchHistory(window.history);
+  }
 
   function ready(cb: () => void): CleanupFn {
     if (document.body) {
@@ -148,11 +229,14 @@ export const Core = (() => {
 
   function onNavigate(cb: () => void): CleanupFn {
     const entry: ObserverEntry<() => void> = { cb, active: true };
+    const wasEmpty = navCbs.size === 0;
     navCbs.add(entry);
+    if (wasEmpty) startNavWatcher();
     return () => {
       if (!entry.active) return;
       entry.active = false;
       navCbs.delete(entry);
+      if (navCbs.size === 0) stopNavWatcher();
     };
   }
 
@@ -168,27 +252,57 @@ export const Core = (() => {
     };
   }
 
+  const INVALID_SELECTOR = Symbol('invalidSelector');
+
+  function safeQuerySelector<T extends HTMLElement>(selector: string): T | null | typeof INVALID_SELECTOR {
+    try {
+      return document.querySelector<T>(selector);
+    } catch {
+      return INVALID_SELECTOR;
+    }
+  }
+
   function waitForSelector<T extends HTMLElement = HTMLElement>(
     selector: string,
     timeoutMs = 8000,
     signal?: AbortSignal
   ): Promise<T | null> {
     if (signal?.aborted) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      const existing = document.querySelector<T>(selector);
-      if (existing) return resolve(existing);
+    const existing = safeQuerySelector<T>(selector);
+    if (existing === INVALID_SELECTOR) return Promise.resolve(null);
+    if (existing) return Promise.resolve(existing);
+    if (!(timeoutMs > 0)) return Promise.resolve(null);
 
+    return new Promise((resolve) => {
       let done = false;
       let unsub: CleanupFn | null = null;
+      let readyUnsub: CleanupFn | null = null;
       let onAbort: (() => void) | null = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
 
       const finish = (v: T | null) => {
         if (done) return;
         done = true;
-        clearTimeout(timer);
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
         if (onAbort && signal) signal.removeEventListener('abort', onAbort);
-        if (unsub) unsub();
+        if (readyUnsub) {
+          readyUnsub();
+          readyUnsub = null;
+        }
+        if (unsub) {
+          unsub();
+          unsub = null;
+        }
         resolve(v);
+      };
+
+      const checkSelector = () => {
+        const el = safeQuerySelector<T>(selector);
+        if (el === INVALID_SELECTOR) finish(null);
+        else if (el) finish(el);
       };
 
       if (signal) {
@@ -196,21 +310,28 @@ export const Core = (() => {
         signal.addEventListener('abort', onAbort, { once: true });
       }
 
-      const timer = setTimeout(() => finish(null), timeoutMs);
-      unsub = onBodyMutation(() => {
-        const el = document.querySelector<T>(selector);
-        if (el) finish(el);
-      });
+      if (Number.isFinite(timeoutMs)) {
+        timer = setTimeout(() => finish(null), Math.min(timeoutMs, 0x7fffffff));
+      }
+      unsub = onBodyMutation(checkSelector);
+      if (!done && !document.body) {
+        readyUnsub = ready(() => {
+          readyUnsub = null;
+          checkSelector();
+        });
+      }
     });
   }
 
   function silently(fn: () => void): void {
-    muted = true;
+    muteDepth++;
     try {
       fn();
     } finally {
-      muted = false;
-      lastHref = location.href;
+      muteDepth = Math.max(0, muteDepth - 1);
+      if (muteDepth === 0) {
+        lastHref = location.href;
+      }
     }
   }
 

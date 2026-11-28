@@ -1,5 +1,4 @@
 import { defineModule } from '../../core/registry';
-import { debounce } from '../../utils/helpers';
 import { COMPARE_CSS } from './styles';
 import { createCompareState, isComparePage, resetCompareFilters } from './data';
 import { cleanupCompareView, setupCompareView } from './dom';
@@ -34,24 +33,6 @@ defineModule({
     const state = createCompareState();
     ctx.hooks.blockRpc(createCompareRpcBlocker(state));
 
-    const checkView = debounce(() => {
-      if (state.disposed || state.isMutatingDOM || !isComparePage()) return;
-      if (state.isCompareLoaded) return;
-
-      const compareRoot = document.querySelector<HTMLElement>('.compare:not(#ala-compare-table)');
-      if (!compareRoot) return;
-
-      const header = compareRoot.querySelector<HTMLElement>('.entry.header');
-      const entries = Array.from(compareRoot.querySelectorAll<HTMLElement>('.entry:not(.header)'));
-
-      if (!compareRoot.dataset.alaCompareInit || (!state.isCompareLoaded && entries.length !== state.lastProcessedCount)) {
-        state.lastProcessedCount = entries.length;
-        setupCompareView(ctx, state, compareRoot, header, entries, (root, sidebar) => {
-          void loadAllEntriesViaMediaList(ctx, state, root, sidebar);
-        });
-      }
-    }, 60);
-
     ctx.onRoute(
       () => isComparePage(),
       (rc) => {
@@ -59,14 +40,31 @@ defineModule({
         state.currentRoute = rc.pathname;
         resetCompareFilters(state);
         cleanupCompareView(state);
-        rc.onCleanup(ctx.ready(checkView));
-        rc.onCleanup(
-          ctx.onBodyMutation(() => {
-            if (!rc.signal.aborted && !state.disposed && !state.isMutatingDOM) {
-              checkView();
-            }
-          })
-        );
+
+        const checkView = rc.debounce(() => {
+          if (state.disposed || state.isMutatingDOM || !isComparePage()) return;
+          if (state.isCompareLoaded) return;
+
+          const compareRoot = document.querySelector<HTMLElement>('.compare:not(#ala-compare-table)');
+          if (!compareRoot) return;
+
+          const header = compareRoot.querySelector<HTMLElement>('.entry.header');
+          const entries = Array.from(compareRoot.querySelectorAll<HTMLElement>('.entry:not(.header)'));
+
+          if (!compareRoot.dataset.alaCompareInit || (!state.isCompareLoaded && entries.length !== state.lastProcessedCount)) {
+            state.lastProcessedCount = entries.length;
+            setupCompareView(rc, state, compareRoot, header, entries, (root, sidebar) => {
+              void loadAllEntriesViaMediaList(ctx, rc, state, root, sidebar);
+            });
+          }
+        }, 60);
+
+        rc.ready(checkView);
+        rc.onBodyMutation(() => {
+          if (!state.disposed && !state.isMutatingDOM) {
+            checkView();
+          }
+        });
         return () => {
           state.currentRoute = '';
           cleanupCompareView(state);

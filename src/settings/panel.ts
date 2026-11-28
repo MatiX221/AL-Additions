@@ -2,7 +2,9 @@ import { Settings, TYPES, ROWS, features } from './settings';
 import { DEV_MODE_DEF } from './devMode';
 import { creditsHtml } from './credits';
 import { addStyle } from '../core/styles';
-import { createModal } from '../core/modal';
+import { createContextScope, scopeAniListClient, type ContextScope } from '../core/contextScope';
+import { hasActiveModal, openConfirmModal, acquireScrollLock } from '../core/modal';
+import { showToast, toastError, toastSuccess } from '../core/toast';
 import { listAccountProviders } from '../core/accounts';
 import { findExactText, icon } from '../utils/dom';
 import { debounce, esc, createCoreLogger, getDebuggableChannels } from '../utils/helpers';
@@ -10,23 +12,27 @@ import { Core } from '../core/observer';
 import { createBackup, createRawBackup, downloadBackupFile, importBackup, readFileAsBytes } from './backup';
 import { promptPasswordModal, closePasswordModal } from './passwordModal';
 import type {
-  AddStyleFn,
   CleanupFn,
-  CssSource,
   DebugSettingsMap,
   SettingRow,
   RegisteredFeature,
   ModuleDebugEnabledDef,
   ModuleHost,
-  ModuleStatus,
-  ModalHandle,
-  ModalOptions
+  ModuleStatus
 } from '../types';
 
 const settingsLog = createCoreLogger('settings');
 
 const getRow = (key?: string): SettingRow | undefined =>
   key && Object.prototype.hasOwnProperty.call(ROWS, key) ? ROWS[key] : undefined;
+
+const isNonEmptyValue = (val: unknown): boolean => {
+  if (Array.isArray(val)) return val.length > 0;
+  if (!val || typeof val !== 'object') return false;
+  const proto = Object.getPrototypeOf(val);
+  if (proto !== Object.prototype && proto !== null) return false;
+  return Object.keys(val).length > 0;
+};
 
 const PINNED_FIRST = ['Sync', 'General'];
 const PINNED_LAST = ['Advanced'];
@@ -246,8 +252,8 @@ function accountsHtml(): string {
 
 function backupRestoreHtml(): string {
   const isDev = !!Settings.get(DEV_MODE_DEF.key);
-  return `<details class="ala-section-dropdown" data-section="backup" open>
-    <summary class="ala-section-summary">
+  return `<details class="ala-section-dropdown" data-section="backup">
+    <summary class="ala-section-summary" aria-expanded="false">
       <span class="ala-section-title">Backup &amp; Restore</span>
       <span class="ala-chevron">${icon('chevron', 14)}</span>
     </summary>
@@ -377,8 +383,8 @@ function sectionsHtml(): string {
         ...(name === 'Advanced' ? [devModeCardHtml()] : [])
       ].join('');
       return cardsHtml
-        ? `<details class="ala-section-dropdown" data-section="${esc(name)}" open>
-            <summary class="ala-section-summary">
+        ? `<details class="ala-section-dropdown" data-section="${esc(name)}">
+            <summary class="ala-section-summary" aria-expanded="false">
               <span class="ala-section-title">${esc(name)}</span>
               <span class="ala-chevron">${icon('chevron', 14)}</span>
             </summary>
@@ -395,8 +401,8 @@ function sectionsHtml(): string {
 }
 
 function creditsDropdownHtml(): string {
-  return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits" open>
-    <summary class="ala-section-summary">
+  return `<details class="ala-section-dropdown ala-credits-dropdown" data-section="credits">
+    <summary class="ala-section-summary" aria-expanded="false">
       <span class="ala-section-title">Credits</span>
       <span class="ala-chevron">${icon('chevron', 14)}</span>
     </summary>
@@ -408,21 +414,88 @@ function creditsDropdownHtml(): string {
   </details>`;
 }
 
-function initDropdownAnimations(panel: HTMLElement): void {
+function hasCollapsibleTransition(el: HTMLElement): boolean {
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    return false;
+  }
+  const raw = getComputedStyle(el).transitionDuration;
+  if (!raw) return false;
+  return raw.split(',').some((part) => {
+    const trimmed = part.trim();
+    if (!trimmed) return false;
+    const num = parseFloat(trimmed);
+    return Number.isFinite(num) && num > 0;
+  });
+}
+
+function initDropdownAnimations(panel: HTMLElement): CleanupFn {
+  const cleanups: CleanupFn[] = [];
   panel.querySelectorAll<HTMLDetailsElement>('details.ala-section-dropdown').forEach((details) => {
     const summary = details.querySelector<HTMLElement>(':scope > summary');
     const collapsible = details.querySelector<HTMLElement>(':scope > .ala-collapsible');
     if (!summary || !collapsible) return;
 
+    let collapseCleanup: CleanupFn | null = null;
+    const cancelPendingCollapse = () => {
+      collapseCleanup?.();
+      collapseCleanup = null;
+    };
+    cleanups.push(cancelPendingCollapse);
+
+    const expandedInitially = details.classList.contains('is-expanded') || details.open;
+    details.open = expandedInitially;
+    details.classList.toggle('is-expanded', expandedInitially);
+    collapsible.classList.toggle('is-open', expandedInitially);
+    summary.setAttribute('aria-expanded', String(expandedInitially));
+
     summary.addEventListener('click', (e) => {
       e.preventDefault();
-      const isExpanded = details.classList.toggle('is-expanded');
-      collapsible.classList.toggle('is-open', isExpanded);
+      const willExpand = !details.classList.contains('is-expanded');
+      cancelPendingCollapse();
+
+      if (willExpand) {
+        details.open = true;
+        void collapsible.offsetHeight;
+        details.classList.add('is-expanded');
+        collapsible.classList.add('is-open');
+        summary.setAttribute('aria-expanded', 'true');
+        return;
+      }
+
+      details.classList.remove('is-expanded');
+      collapsible.classList.remove('is-open');
+      summary.setAttribute('aria-expanded', 'false');
+
+      if (!hasCollapsibleTransition(collapsible)) {
+        details.open = false;
+        return;
+      }
+
+      const finishCollapse = () => {
+        cancelPendingCollapse();
+        if (!details.classList.contains('is-expanded')) {
+          details.open = false;
+        }
+      };
+      const onTransitionEnd = (ev: TransitionEvent) => {
+        if (ev.target !== collapsible) return;
+        if (ev.propertyName && ev.propertyName !== 'grid-template-rows') return;
+        finishCollapse();
+      };
+      const fallbackTimer = setTimeout(finishCollapse, 300);
+      collapsible.addEventListener('transitionend', onTransitionEnd);
+      collapseCleanup = () => {
+        collapsible.removeEventListener('transitionend', onTransitionEnd);
+        clearTimeout(fallbackTimer);
+      };
     });
   });
+  return () => {
+    for (const fn of cleanups) fn();
+  };
 }
 
-let prevOverflow: string | null = null;
+let scrollLockRelease: CleanupFn | null = null;
 
 function standaloneNoteHtml(f: RegisteredFeature): string {
   const name = f.standalone?.name || f.title;
@@ -447,8 +520,11 @@ export function closePanel(): void {
     onCleanup?.();
   } finally {
     b.remove();
-    document.documentElement.style.overflow = prevOverflow || '';
-    prevOverflow = null;
+    document
+      .querySelectorAll('#ala-settings-nav-section .ala-settings-nav-link.is-active')
+      .forEach((el) => el.classList.remove('is-active'));
+    scrollLockRelease?.();
+    scrollLockRelease = null;
   }
 }
 
@@ -506,6 +582,30 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     return card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]') || null;
   };
 
+  const resolveEffectiveStatuses = (enabledMap: Record<string, boolean>): Record<string, ModuleStatus> => {
+    const statuses = { ...host.resolveStagedStates(enabledMap) };
+    for (const f of features) {
+      if (!enabledMap[f.id]) continue;
+      const live = host.getStatus(f.id);
+      if (live.reason === 'error' && statuses[f.id]?.active) {
+        statuses[f.id] = { active: false, reason: 'error', error: live.error };
+      }
+    }
+    let propagated = true;
+    while (propagated) {
+      propagated = false;
+      for (const f of features) {
+        if (!statuses[f.id]?.active || !f.dependsOn?.length) continue;
+        const missingDeps = f.dependsOn.filter((depId) => !statuses[depId]?.active);
+        if (missingDeps.length > 0) {
+          statuses[f.id] = { active: false, reason: 'dep-unavailable', missingDeps };
+          propagated = true;
+        }
+      }
+    }
+    return statuses;
+  };
+
   const snapshotInitial = () => {
     const vals: Record<string, string> = {};
     const enabledMap: Record<string, boolean> = {};
@@ -515,7 +615,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     for (const f of features) {
       enabledMap[f.id] = !!Settings.get(f.toggle.key) && !isFeatureStandalonePaused(f.id);
     }
-    return { vals, statuses: host.resolveStagedStates(enabledMap) };
+    return { vals, statuses: resolveEffectiveStatuses(enabledMap) };
   };
 
   let baseline = snapshotInitial();
@@ -538,7 +638,7 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     }
     baseline = {
       vals: baseline.vals,
-      statuses: host.resolveStagedStates(enabledMap)
+      statuses: resolveEffectiveStatuses(enabledMap)
     };
   };
 
@@ -587,8 +687,9 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       }
     });
 
-    const stagedStatuses = host.resolveStagedStates(readStagedEnabled());
+    const stagedStatuses = resolveEffectiveStatuses(readStagedEnabled());
     const hotReloadIds: string[] = [];
+    const affectedActiveIds: string[] = [];
     let needsPageReload = false;
 
     for (const f of features) {
@@ -597,10 +698,39 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       const optionChanged = f.options.some((o) => changedKeys.has(o.key));
 
       if (wasActive !== isNowActive || ((wasActive || isNowActive) && optionChanged)) {
+        if (wasActive || isNowActive) affectedActiveIds.push(f.id);
         if (f.requiresReload) {
           needsPageReload = true;
         } else {
           hotReloadIds.push(f.id);
+        }
+      }
+    }
+
+    if (!needsPageReload && affectedActiveIds.length > 0) {
+      const dependentsOf = new Map<string, RegisteredFeature[]>();
+      for (const f of features) {
+        for (const depId of f.dependsOn || []) {
+          const list = dependentsOf.get(depId);
+          if (list) list.push(f);
+          else dependentsOf.set(depId, [f]);
+        }
+      }
+      const visited = new Set<string>(affectedActiveIds);
+      const queue = [...affectedActiveIds];
+      while (queue.length > 0 && !needsPageReload) {
+        const id = queue.shift()!;
+        for (const depFeature of dependentsOf.get(id) || []) {
+          if (visited.has(depFeature.id)) continue;
+          const depWasActive = !!baseline.statuses[depFeature.id]?.active;
+          const depIsNowActive = !!stagedStatuses[depFeature.id]?.active;
+          if (!depWasActive && !depIsNowActive) continue;
+          visited.add(depFeature.id);
+          if (depFeature.requiresReload) {
+            needsPageReload = true;
+            break;
+          }
+          queue.push(depFeature.id);
         }
       }
     }
@@ -822,10 +952,20 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   };
 
   syncAll();
-  initDropdownAnimations(panel);
+  const cleanupDropdowns = initDropdownAnimations(panel);
+  const panelAc = new AbortController();
+  const panelScope = createContextScope({
+    prefix: 'settings',
+    signal: panelAc.signal,
+    isClosed: () => !panel.isConnected || panelAc.signal.aborted,
+    styleKind: 'style',
+    onError: (err) => settingsLog.error('Settings panel cleanup failed:', err)
+  });
 
   const editorOverlays = new Set<HTMLElement>();
+  const editorOverlayFlushers = new Set<() => void>();
   const editorStyleDisposers = new Set<() => void>();
+  const activeEditorSessions = new Map<string, () => void>();
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
   const clearReloadTimer = () => {
     if (reloadTimer !== null) {
@@ -890,67 +1030,92 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       e.preventDefault();
       const inputEl = panel.querySelector<HTMLInputElement>(`input[data-key="${key}"]`);
       if (!inputEl) return;
+      activeEditorSessions.get(key)?.();
+
       const beforeBodyChildren = new Set<Element>(Array.from(document.body.children));
-      let edIdSeq = 0;
-      let edStyleSeq = 0;
-      let edModalSeq = 0;
-      const edGetId = (name?: string): string => {
-        const trimmed = name?.trim();
-        if (!trimmed) return `ala-editor-${key}-${++edIdSeq}`;
-        return trimmed.startsWith('ala-') ? trimmed : `ala-editor-${key}-${trimmed}`;
-      };
-      const trackedAddStyle: AddStyleFn = (idOrCss: CssSource, maybeCss?: CssSource): CleanupFn => {
-        const isOneArg = maybeCss === undefined;
-        const css = isOneArg ? idOrCss : maybeCss;
-        let styleId: string;
-        if (isOneArg) {
-          styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
-        } else {
-          const raw = String(idOrCss || '').trim();
-          if (!raw) styleId = `ala-editor-${key}-style-${++edStyleSeq}`;
-          else if (raw.startsWith('ala-')) styleId = raw;
-          else styleId = `ala-editor-${key}-${raw}${raw.endsWith('-style') ? '' : '-style'}`;
+      const editorAc = new AbortController();
+      let sessionDisposed = false;
+      let activeSessionModals = 0;
+      let editorPending = false;
+
+      const recordMutationOverlays = (records: MutationRecord[]) => {
+        for (const rec of records) {
+          for (const node of Array.from(rec.addedNodes)) {
+            if (
+              node instanceof HTMLElement &&
+              node !== backdrop &&
+              node.id !== 'ala-toast' &&
+              !beforeBodyChildren.has(node)
+            ) {
+              editorOverlays.add(node);
+            }
+          }
         }
-        const dispose = addStyle(styleId, css);
-        editorStyleDisposers.add(dispose);
-        return dispose;
       };
-      const trackedListen = (
-        target: EventTarget,
-        type: string,
-        listener: EventListenerOrEventListenerObject,
-        options?: boolean | AddEventListenerOptions
-      ) => {
-        target.addEventListener(type, listener, options);
-        const dispose = () => target.removeEventListener(type, listener, options);
-        editorStyleDisposers.add(dispose);
-        return dispose;
+      const overlayObserver =
+        typeof MutationObserver === 'function'
+          ? new MutationObserver((records) => {
+              if (!panel.isConnected || sessionDisposed) return;
+              recordMutationOverlays(records);
+            })
+          : null;
+      const flushOverlayObserver = () => {
+        if (!overlayObserver) return;
+        recordMutationOverlays(overlayObserver.takeRecords());
       };
-      const trackedTimeout = (fn: () => void, ms: number): CleanupFn => {
-        const timerId = setTimeout(fn, ms);
-        const dispose = () => clearTimeout(timerId);
-        editorStyleDisposers.add(dispose);
-        return dispose;
+      if (overlayObserver) {
+        overlayObserver.observe(document.body, { childList: true });
+        editorOverlayFlushers.add(flushOverlayObserver);
+      }
+
+      let editorScope!: ContextScope;
+      const disposeSession = () => {
+        if (sessionDisposed) return;
+        sessionDisposed = true;
+        if (activeEditorSessions.get(key) === disposeSession) {
+          activeEditorSessions.delete(key);
+        }
+        editorStyleDisposers.delete(disposeSession);
+        editorOverlayFlushers.delete(flushOverlayObserver);
+        if (overlayObserver) {
+          flushOverlayObserver();
+          overlayObserver.disconnect();
+        }
+        editorAc.abort();
+        editorScope.dispose();
       };
-      const trackedModal = (opts: ModalOptions): ModalHandle => {
-        const modalId = edGetId(opts.id ?? `modal-${++edModalSeq}`);
-        const handle = createModal({ ...opts, id: modalId });
-        editorStyleDisposers.add(handle.close);
-        return handle;
-      };
+      activeEditorSessions.set(key, disposeSession);
+      editorStyleDisposers.add(disposeSession);
+
+      editorScope = createContextScope({
+        prefix: `editor-${key}`,
+        signal: editorAc.signal,
+        isClosed: () => sessionDisposed,
+        styleKind: 'style',
+        onError: (err) => settingsLog.error('JSON editor cleanup failed:', err),
+        onModalStart: () => {
+          activeSessionModals++;
+        },
+        onModalAbort: () => {
+          activeSessionModals = Math.max(0, activeSessionModals - 1);
+        },
+        onModalClose: () => {
+          activeSessionModals = Math.max(0, activeSessionModals - 1);
+          if (activeSessionModals === 0 && !editorPending) {
+            disposeSession();
+          }
+        }
+      });
+
+      let editorResult: unknown;
       try {
-        r.editor!({
+        editorResult = r.editor!({
           value: TYPES.json.read(inputEl),
           onApply: (nextValue: any) => {
-            if (!panel.isConnected) return;
-            TYPES.json.write(inputEl, nextValue);
-            if (
-              key === 'syncManualOverrides' &&
-              nextValue &&
-              typeof nextValue === 'object' &&
-              !Array.isArray(nextValue) &&
-              Object.keys(nextValue).length > 0
-            ) {
+            if (sessionDisposed || !panel.isConnected) return;
+            const normalized = TYPES.json.normalize(nextValue, r);
+            TYPES.json.write(inputEl, normalized);
+            if (Boolean(r.autoEnableParentWhenNonEmpty) && isNonEmptyValue(normalized)) {
               const card = inputEl.closest<HTMLElement>('.ala-feature');
               const mainToggle = card?.querySelector<HTMLInputElement>('.ala-row--main input[type="checkbox"][data-key]');
               if (mainToggle && !mainToggle.checked && !mainToggle.disabled) {
@@ -960,20 +1125,72 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
             const plan = syncAll();
             setStatus(`Updated. Press "${plan.needsPageReload ? 'Save and reload' : 'Save'}" to apply.`);
           },
-          getId: edGetId,
-          addStyle: trackedAddStyle,
-          listen: trackedListen,
-          timeout: trackedTimeout,
-          modal: trackedModal,
-          api: host.api,
+          signal: editorAc.signal,
+          getId: editorScope.getId,
+          addStyle: editorScope.addStyle,
+          listen: editorScope.listen,
+          timeout: editorScope.timeout,
+          observe: editorScope.observe,
+          modal: editorScope.modal,
+          confirm: editorScope.confirm,
+          alert: editorScope.alert,
+          toast: {
+            show: (msg, opts) => {
+              if (!sessionDisposed && panel.isConnected) showToast(msg, opts);
+            },
+            success: (msg, opts) => {
+              if (!sessionDisposed && panel.isConnected) toastSuccess(msg, opts);
+            },
+            error: (msg, opts) => {
+              if (!sessionDisposed && panel.isConnected) toastError(msg, opts);
+            }
+          },
+          onCleanup: editorScope.onCleanup,
+          api: host.api
+            ? scopeAniListClient(() => host.api!, editorAc.signal, () => sessionDisposed)
+            : undefined,
           log: settingsLog
         });
+      } catch (err) {
+        if (activeSessionModals === 0) {
+          disposeSession();
+        }
+        throw err;
       } finally {
+        flushOverlayObserver();
         for (const child of Array.from(document.body.children)) {
-          if (!beforeBodyChildren.has(child) && child instanceof HTMLElement && child !== backdrop) {
+          if (
+            !beforeBodyChildren.has(child) &&
+            child instanceof HTMLElement &&
+            child !== backdrop &&
+            child.id !== 'ala-toast'
+          ) {
             editorOverlays.add(child);
           }
         }
+      }
+
+      if (
+        editorResult &&
+        (typeof editorResult === 'object' || typeof editorResult === 'function') &&
+        typeof (editorResult as PromiseLike<unknown>).then === 'function'
+      ) {
+        editorPending = true;
+        Promise.resolve(editorResult).then(
+          () => {
+            editorPending = false;
+            if (activeSessionModals === 0) {
+              disposeSession();
+            }
+          },
+          (err) => {
+            editorPending = false;
+            if (activeSessionModals === 0) {
+              disposeSession();
+            }
+            settingsLog.error('JSON editor failed:', err);
+          }
+        );
       }
     });
   });
@@ -984,10 +1201,14 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       Settings.set(key, value);
     }
     if (plan.needsPageReload) {
+      baseline = snapshotInitial();
+      syncAll();
+      saveBtn.disabled = true;
       setStatus('Saved. Reloading…');
       scheduleReload(350);
       return;
     }
+    clearReloadTimer();
     baseline = snapshotInitial();
     if (plan.hotReloadIds.length > 0) {
       host.reload(plan.hotReloadIds);
@@ -1013,7 +1234,10 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     if (e.target === backdrop) closePanel();
   });
   backdrop._onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') closePanel();
+    if (e.key === 'Escape') {
+      if (e.defaultPrevented || hasActiveModal()) return;
+      closePanel();
+    }
   };
   document.addEventListener('keydown', backdrop._onKey);
 
@@ -1032,12 +1256,27 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   };
 
   for (const p of providers) {
-    panel.querySelector(`[data-account-btn="${p.id}"]`)?.addEventListener('click', () => {
+    const btn = panel.querySelector<HTMLButtonElement>(`[data-account-btn="${p.id}"]`);
+    btn?.addEventListener('click', async () => {
       if (p.isConnected()) {
-        if (confirm(`Disconnect ${p.name}?`)) {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+          const confirmed = await openConfirmModal(
+            {
+              title: 'Disconnect Account',
+              message: `Disconnect ${p.name}?`,
+              confirmText: 'Disconnect',
+              danger: true
+            },
+            panelScope.modal
+          );
+          if (!panel.isConnected || !confirmed) return;
           p.disconnect();
           updateAccountUI();
           setStatus(`${p.name} disconnected.`);
+        } finally {
+          if (panel.isConnected) btn.disabled = false;
         }
       } else {
         p.connect();
@@ -1058,58 +1297,79 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     return overrides;
   };
 
-  panel.querySelector('#ala-btn-export')?.addEventListener('click', async () => {
-    const pwd = await promptPasswordModal({
-      title: 'Export Settings',
-      description: 'Optional: Set a password to encrypt your backup file. Leave blank for an unencrypted backup.',
-      submitText: 'Export',
-      allowEmpty: true,
-      confirm: true,
-      placeholder: 'Optional encryption password'
-    });
-    if (!panel.isConnected || pwd === null) return;
+  const exportBtn = panel.querySelector<HTMLButtonElement>('#ala-btn-export');
+  exportBtn?.addEventListener('click', async () => {
+    if (exportBtn.disabled) return;
+    exportBtn.disabled = true;
     try {
-      setStatus('Generating backup…');
-      const envelope = await createBackup(false, pwd, getPanelOverrides());
-      if (!panel.isConnected) return;
-      downloadBackupFile(envelope);
-      setStatus('Settings exported successfully.');
-    } catch (e: any) {
-      if (!panel.isConnected) return;
-      setStatus('Export failed: ' + (e.message || e), true);
+      const pwd = await promptPasswordModal({
+        title: 'Export Settings',
+        description: 'Optional: Set a password to encrypt your backup file. Leave blank for an unencrypted backup.',
+        submitText: 'Export',
+        allowEmpty: true,
+        confirm: true,
+        placeholder: 'Optional encryption password'
+      });
+      if (!panel.isConnected || pwd === null) return;
+      try {
+        setStatus('Generating backup…');
+        const envelope = await createBackup(false, pwd, getPanelOverrides());
+        if (!panel.isConnected) return;
+        downloadBackupFile(envelope);
+        setStatus('Settings exported successfully.');
+      } catch (e: any) {
+        if (!panel.isConnected) return;
+        setStatus('Export failed: ' + (e.message || e), true);
+      }
+    } finally {
+      if (panel.isConnected) exportBtn.disabled = false;
     }
   });
 
-  panel.querySelector('#ala-btn-export-secrets')?.addEventListener('click', async () => {
-    const confirmed = confirm(
-      '⚠️ Warning: This export includes your connected account credentials.\n\n' +
-      'Anyone with access to this file will have full access to your connected accounts.\n\n' +
-      'Do you want to continue?'
-    );
-    if (!panel.isConnected || !confirmed) return;
-
-    const pwd = await promptPasswordModal({
-      title: 'Export Credentials (Encrypted)',
-      description: 'A password is required to encrypt your credentials and protect your accounts.',
-      submitText: 'Encrypt & Export',
-      allowEmpty: false,
-      confirm: true,
-      placeholder: 'Choose an encryption password'
-    });
-    if (!panel.isConnected || pwd === null) return;
-    if (!pwd.trim()) {
-      setStatus('A password is required to export credentials.', true);
-      return;
-    }
+  const exportSecretsBtn = panel.querySelector<HTMLButtonElement>('#ala-btn-export-secrets');
+  exportSecretsBtn?.addEventListener('click', async () => {
+    if (exportSecretsBtn.disabled) return;
+    exportSecretsBtn.disabled = true;
     try {
-      setStatus('Generating backup…');
-      const envelope = await createBackup(true, pwd, getPanelOverrides());
-      if (!panel.isConnected) return;
-      downloadBackupFile(envelope);
-      setStatus('Settings and credentials exported successfully.');
-    } catch (e: any) {
-      if (!panel.isConnected) return;
-      setStatus('Export failed: ' + (e.message || e), true);
+      const confirmed = await openConfirmModal(
+        {
+          title: 'Export Credentials',
+          message:
+            '⚠️ Warning: This export includes your connected account credentials.\n\n' +
+            'Anyone with access to this file will have full access to your connected accounts.\n\n' +
+            'Do you want to continue?',
+          confirmText: 'Continue',
+          danger: true
+        },
+        panelScope.modal
+      );
+      if (!panel.isConnected || !confirmed) return;
+
+      const pwd = await promptPasswordModal({
+        title: 'Export Credentials (Encrypted)',
+        description: 'A password is required to encrypt your credentials and protect your accounts.',
+        submitText: 'Encrypt & Export',
+        allowEmpty: false,
+        confirm: true,
+        placeholder: 'Choose an encryption password'
+      });
+      if (!panel.isConnected || pwd === null) return;
+      if (!pwd.trim()) {
+        setStatus('A password is required to export credentials.', true);
+        return;
+      }
+      try {
+        setStatus('Generating backup…');
+        const envelope = await createBackup(true, pwd, getPanelOverrides());
+        if (!panel.isConnected) return;
+        downloadBackupFile(envelope);
+        setStatus('Settings and credentials exported successfully.');
+      } catch (e: any) {
+        if (!panel.isConnected) return;
+        setStatus('Export failed: ' + (e.message || e), true);
+      }
+    } finally {
+      if (panel.isConnected) exportSecretsBtn.disabled = false;
     }
   });
 
@@ -1125,14 +1385,21 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     }
   });
 
+  const importBtn = panel.querySelector<HTMLButtonElement>('#ala-btn-import');
   const fileInput = panel.querySelector<HTMLInputElement>('#ala-import-file');
-  panel.querySelector('#ala-btn-import')?.addEventListener('click', () => {
+  importBtn?.addEventListener('click', () => {
+    if (importBtn.disabled) return;
     fileInput?.click();
   });
 
+  let importInFlight = false;
   fileInput?.addEventListener('change', async () => {
+    if (importInFlight) return;
     const file = fileInput.files?.[0];
     if (!file) return;
+    importInFlight = true;
+    if (importBtn) importBtn.disabled = true;
+    fileInput.disabled = true;
     try {
       setStatus('Reading backup file…');
       const bytes = await readFileAsBytes(file);
@@ -1141,7 +1408,6 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       if (!panel.isConnected) return;
       if (result.cancelled) {
         setStatus('Import cancelled.');
-        fileInput.value = '';
         return;
       }
       const parts = [];
@@ -1152,7 +1418,13 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
     } catch (e: any) {
       if (!panel.isConnected) return;
       setStatus('Import failed: ' + (e.message || e), true);
+    } finally {
+      importInFlight = false;
       fileInput.value = '';
+      if (panel.isConnected) {
+        if (importBtn) importBtn.disabled = false;
+        fileInput.disabled = false;
+      }
     }
   });
 
@@ -1164,9 +1436,25 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
   backdrop._onCleanup = () => {
     unsubStatus();
     clearReloadTimer();
+    cleanupDropdowns();
+    panelAc.abort();
+    panelScope.dispose();
     try {
       closePasswordModal();
     } catch {}
+    for (const flush of [...editorOverlayFlushers]) {
+      try {
+        flush();
+      } catch {}
+    }
+    editorOverlayFlushers.clear();
+    for (const dispose of [...editorStyleDisposers]) {
+      try {
+        dispose();
+      } catch {}
+    }
+    editorStyleDisposers.clear();
+    activeEditorSessions.clear();
     for (const el of editorOverlays) {
       try {
         if (el.isConnected) {
@@ -1181,16 +1469,10 @@ export function showPanel(host: ModuleHost = NOOP_HOST): void {
       } catch {}
     }
     editorOverlays.clear();
-    for (const dispose of editorStyleDisposers) {
-      try {
-        dispose();
-      } catch {}
-    }
-    editorStyleDisposers.clear();
   };
 
-  prevOverflow = document.documentElement.style.overflow;
-  document.documentElement.style.overflow = 'hidden';
+  scrollLockRelease?.();
+  scrollLockRelease = acquireScrollLock();
   document.body.appendChild(backdrop);
   panel.focus();
 }
@@ -1234,25 +1516,47 @@ export function installSidebar(host: ModuleHost = NOOP_HOST): void {
   nav.parentElement.insertBefore(section, nav.nextSibling);
 }
 
-export function initSettingsPage(host: ModuleHost = NOOP_HOST): void {
-  addStyle('ala-settings-style', CSS);
+export function initSettingsPage(host: ModuleHost = NOOP_HOST): CleanupFn {
+  let disposed = false;
+  const disposeStyle = addStyle('ala-settings-style', CSS);
   const attempt = debounce(() => {
-    if (!onSettingsPage()) return;
+    if (disposed || !onSettingsPage()) return;
     installSidebar(host);
     ensureLauncher(host);
   }, 100);
-  Core.ready(attempt);
-  Core.onBodyMutation(() => {
-    if (onSettingsPage() && !(document.getElementById('ala-settings-nav-section') && document.getElementById('ala-settings-mobile-launcher'))) {
+  const unsubReady = Core.ready(() => {
+    if (!disposed) attempt();
+  });
+  const unsubBody = Core.onBodyMutation(() => {
+    if (
+      !disposed &&
+      onSettingsPage() &&
+      !(document.getElementById('ala-settings-nav-section') && document.getElementById('ala-settings-mobile-launcher'))
+    ) {
       attempt();
     }
   });
-  Core.onNavigate(() => {
+  const unsubNav = Core.onNavigate(() => {
+    if (disposed) return;
     if (onSettingsPage()) {
       attempt();
       return;
     }
     closePanel();
+    document.getElementById('ala-settings-nav-section')?.remove();
     document.getElementById('ala-settings-mobile-launcher')?.remove();
   });
+
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    attempt.cancel();
+    unsubReady();
+    unsubBody();
+    unsubNav();
+    closePanel();
+    document.getElementById('ala-settings-nav-section')?.remove();
+    document.getElementById('ala-settings-mobile-launcher')?.remove();
+    disposeStyle();
+  };
 }

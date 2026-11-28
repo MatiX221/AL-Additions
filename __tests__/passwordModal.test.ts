@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { promptPasswordModal, closePasswordModal } from '../src/settings/passwordModal';
 import { showPanel, closePanel } from '../src/settings/panel';
+import { createModal, hasActiveModal } from '../src/core/modal';
+import { Core } from '../src/core/observer';
 
 describe('Password Modal Component', () => {
   beforeEach(() => {
@@ -431,6 +433,158 @@ describe('Password Modal Component', () => {
     } finally {
       delete (document as any).body;
       if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+  });
+
+  it('rejects whitespace-only passwords even when allowEmpty is true and refocuses input (BUG-39)', async () => {
+    const modalPromise = promptPasswordModal({
+      title: 'Optional Password',
+      allowEmpty: true,
+      confirm: true
+    });
+
+    const input = document.querySelector<HTMLInputElement>('#ala-pwd-input-main')!;
+    const confirmInput = document.querySelector<HTMLInputElement>('#ala-pwd-input-confirm')!;
+    const submitBtn = document.querySelector<HTMLButtonElement>('#ala-pwd-btn-submit')!;
+    const errBox = document.querySelector<HTMLElement>('#ala-pwd-err')!;
+    const focusSpy = vi.spyOn(input, 'focus');
+
+    input.value = '   ';
+    confirmInput.value = '   ';
+    submitBtn.click();
+
+    expect(errBox.style.display).toBe('block');
+    expect(errBox.textContent).toBe('Password cannot contain only whitespace.');
+    expect(focusSpy).toHaveBeenCalledTimes(1);
+    expect(document.getElementById('ala-pwd-backdrop')).not.toBeNull();
+
+    input.value = '';
+    confirmInput.value = '';
+    submitBtn.click();
+    await expect(modalPromise).resolves.toBe('');
+  });
+
+  it('registers #ala-pwd-backdrop as ownUi so internal mutations do not fire Core.onBodyMutation, disposes on cleanup, and bundles scoped CSS (BUG-40)', async () => {
+    vi.useFakeTimers();
+    const registerSpy = vi.spyOn(Core, 'registerOwnUi');
+    const mutSpy = vi.fn();
+    let unsubMut: (() => void) | null = null;
+    try {
+      const modalPromise = promptPasswordModal({ title: 'OwnUi & CSS Test' });
+      expect(registerSpy).toHaveBeenCalledWith('#ala-pwd-backdrop');
+
+      const styleEl = document.getElementById('ala-pwd-modal-style') as HTMLStyleElement | null;
+      expect(styleEl).not.toBeNull();
+      const css = styleEl?.textContent || '';
+      for (const selector of [
+        '#ala-pwd-backdrop .ala-sheet',
+        '#ala-pwd-backdrop .ala-sheet-head',
+        '#ala-pwd-backdrop .ala-sheet-body',
+        '#ala-pwd-backdrop .ala-sheet-foot',
+        '#ala-pwd-backdrop .ala-btn',
+        '#ala-pwd-backdrop .ala-btn--primary',
+        '#ala-pwd-backdrop .ala-icon-btn'
+      ]) {
+        expect(css).toContain(selector);
+      }
+
+      // Let the initial document.body.appendChild settle before observing internal mutations
+      await Promise.resolve();
+      unsubMut = Core.onBodyMutation(mutSpy);
+
+      const toggleBtn = document.querySelector<HTMLButtonElement>('.ala-pwd-toggle')!;
+      const submitBtn = document.querySelector<HTMLButtonElement>('#ala-pwd-btn-submit')!;
+      toggleBtn.click();
+      submitBtn.click();
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+      expect(mutSpy).not.toHaveBeenCalled();
+
+      closePasswordModal();
+      await expect(modalPromise).resolves.toBeNull();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+
+      // After cleanup(), #ala-pwd-backdrop is no longer registered as ownUi
+      mutSpy.mockClear();
+      const stray = document.createElement('div');
+      stray.id = 'ala-pwd-backdrop';
+      document.body.appendChild(stray);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+      mutSpy.mockClear();
+
+      stray.appendChild(document.createElement('span'));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+      expect(mutSpy).toHaveBeenCalledTimes(1);
+      stray.remove();
+    } finally {
+      registerSpy.mockRestore();
+      unsubMut?.();
+      closePasswordModal();
+      vi.useRealTimers();
+    }
+  });
+
+  it('coordinates LIFO Escape handling and hasActiveModal() across createModal and promptPasswordModal (BUG-21)', async () => {
+    expect(hasActiveModal()).toBe(false);
+
+    const under = createModal({ id: 'under-pwd-modal', title: 'Underlying Modal' });
+    try {
+      expect(hasActiveModal()).toBe(true);
+
+      const pwdPromise = promptPasswordModal({ title: 'Top Password Modal' });
+      expect(hasActiveModal()).toBe(true);
+      expect(document.getElementById('ala-pwd-backdrop')).not.toBeNull();
+      expect(document.getElementById('ala-under-pwd-modal')).not.toBeNull();
+
+      const lateCaptureSpy = vi.fn();
+      document.addEventListener('keydown', lateCaptureSpy, true);
+      try {
+        const esc1 = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+        document.dispatchEvent(esc1);
+        expect(esc1.defaultPrevented).toBe(true);
+        expect(lateCaptureSpy).not.toHaveBeenCalled();
+      } finally {
+        document.removeEventListener('keydown', lateCaptureSpy, true);
+      }
+
+      await expect(pwdPromise).resolves.toBeNull();
+      expect(document.getElementById('ala-pwd-backdrop')).toBeNull();
+      expect(document.getElementById('ala-under-pwd-modal')).not.toBeNull();
+      expect(under.signal.aborted).toBe(false);
+      expect(hasActiveModal()).toBe(true);
+
+      const esc2 = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      document.dispatchEvent(esc2);
+      expect(esc2.defaultPrevented).toBe(true);
+      expect(document.getElementById('ala-under-pwd-modal')).toBeNull();
+      expect(under.signal.aborted).toBe(true);
+      expect(hasActiveModal()).toBe(false);
+    } finally {
+      under.close();
+      closePasswordModal();
+    }
+
+    // Reverse stacking order: createModal opened on top of promptPasswordModal
+    const pwdUnder = promptPasswordModal({ title: 'Lower Password Modal' });
+    const over = createModal({ id: 'over-pwd-modal', title: 'Top Core Modal' });
+    try {
+      expect(hasActiveModal()).toBe(true);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(over.signal.aborted).toBe(true);
+      expect(document.getElementById('ala-pwd-backdrop')).not.toBeNull();
+      expect(hasActiveModal()).toBe(true);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await expect(pwdUnder).resolves.toBeNull();
+      expect(document.getElementById('ala-pwd-backdrop')).toBeNull();
+      expect(hasActiveModal()).toBe(false);
+    } finally {
+      over.close();
+      closePasswordModal();
     }
   });
 });

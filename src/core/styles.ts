@@ -2,6 +2,7 @@ import { Core } from './observer';
 import type { CleanupFn, CssSource } from '../types';
 
 const styleRefCounts = new Map<string, number>();
+const styleGenerations = new Map<string, number>();
 
 export function prefixAlaId(id: string): string {
   const trimmed = id.trim();
@@ -14,9 +15,11 @@ export function addStyle(id: string, css: CssSource): CleanupFn {
   let disposed = false;
   let cancelReady: CleanupFn | null = null;
   styleRefCounts.set(styleId, (styleRefCounts.get(styleId) || 0) + 1);
+  const myGen = (styleGenerations.get(styleId) || 0) + 1;
+  styleGenerations.set(styleId, myGen);
 
   const mount = () => {
-    if (disposed) return;
+    if (disposed || styleGenerations.get(styleId) !== myGen) return;
     const parent = document.head || document.documentElement;
     if (!parent) return;
     const text = typeof css === 'function' ? css() : css;
@@ -45,6 +48,7 @@ export function addStyle(id: string, css: CssSource): CleanupFn {
     const nextCount = (styleRefCounts.get(styleId) || 1) - 1;
     if (nextCount <= 0) {
       styleRefCounts.delete(styleId);
+      styleGenerations.delete(styleId);
       document.getElementById(styleId)?.remove();
     } else {
       styleRefCounts.set(styleId, nextCount);

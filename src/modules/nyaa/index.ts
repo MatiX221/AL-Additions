@@ -2,7 +2,20 @@ import { defineModule } from '../../core/registry';
 import { icon } from '../../utils/dom';
 import { openTab } from '../../utils/helpers';
 import { getEffectiveMalId, isIgnored } from '../../api/malOverrides';
-import type { CleanupFn, MediaRoute, MountHandle } from '../../types';
+import type { CleanupFn, MediaRoute, MountHandle, ServiceMap } from '../../types';
+
+/** Builds a Nyaa search URL preserving Unicode letters/numbers and text-fragment provider highlights. */
+export function buildNyaaUrl(title: string, providers: readonly string[] = []): string {
+  const q = title
+    .normalize('NFC')
+    .trim()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('+');
+  const frag = providers.map(encodeURIComponent).join('&text=');
+  return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${q}#:~:text=${frag}`;
+}
 
 defineModule({
   id: 'nyaa',
@@ -29,56 +42,11 @@ defineModule({
     const EDIT_ID = ctx.getId('edit-mal-id');
     const H1_SEL = '.page-content .header .content > h1';
 
-    const nyaaUrl = (title: string): string => {
-      const q = title.trim().replace(/[^a-zA-Z0-9]+/g, '+').replace(/^\++|\++$/g, '');
-      const providers = ctx.get<string[]>('nyaaProviders') || [];
-      const frag = providers.map(encodeURIComponent).join('&text=');
-      return `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&q=${encodeURI(q)}#:~:text=${frag}`;
-    };
+    const nyaaUrl = (title: string): string =>
+      buildNyaaUrl(title, ctx.get<string[]>('nyaaProviders') || []);
 
-    let activeLink: MountHandle | null = null;
-    let activeEdit: MountHandle | null = null;
+    let activeLink: MountHandle<HTMLAnchorElement> | null = null;
     let activeRoute: MediaRoute | null = null;
-    let quickEditFn = ctx.services.get('manualOverrides:quickEdit') ?? null;
-
-    const ensureEditMount = () => {
-      if (!activeRoute || !quickEditFn) return;
-      const el = activeEdit?.el();
-      if (el?.isConnected) return;
-      const h1 = activeLink?.el()?.parentElement || document.querySelector<HTMLElement>(H1_SEL);
-      if (!h1 || !h1.isConnected) return;
-      if (activeEdit) activeEdit.unmount();
-      const route = activeRoute;
-      activeEdit = ctx.mount({
-        id: EDIT_ID,
-        anchor: () => activeLink?.el()?.parentElement || document.querySelector<HTMLElement>(H1_SEL),
-        position: 'beforeend',
-        match: () => !!quickEditFn && activeRoute === route,
-        create: () => {
-          const editBtn = document.createElement('a');
-          editBtn.href = '#';
-          editBtn.title = 'Set or edit MyAnimeList mapping';
-          editBtn.setAttribute('aria-label', 'Set or edit MyAnimeList mapping');
-          editBtn.innerHTML = icon('edit', 16);
-          editBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            quickEditFn?.(route.id, route.type);
-          });
-          return editBtn;
-        }
-      });
-    };
-
-    ctx.services.onAvailable('manualOverrides:quickEdit', (impl) => {
-      quickEditFn = impl;
-      ensureEditMount();
-      return () => {
-        if (quickEditFn === impl) quickEditFn = null;
-        activeEdit?.unmount();
-        activeEdit = null;
-      };
-    });
 
     ctx.events.on('manualOverrides:changed', (changedId) => {
       const linkEl = activeLink?.el();
@@ -97,7 +65,8 @@ defineModule({
         id: Number(rc.match![2])
       };
       activeRoute = route;
-      void ctx.api.media.get(route.id, route.type);
+      const pendingPopups = new Set<Window>();
+      void rc.api.media.get(route.id, route.type).catch(() => null);
 
       let cancelTouchTimer: CleanupFn | null = null;
       let cancelResetTimer: CleanupFn | null = null;
@@ -108,10 +77,11 @@ defineModule({
         cancelResetTimer = null;
       };
 
-      const link = rc.mount({
+      const link = rc.mount<HTMLAnchorElement>({
         id: LINK_ID,
         anchor: H1_SEL,
         position: 'beforeend',
+        ownUi: true,
         style: (sel) =>
           `${sel},#${EDIT_ID}{display:inline-flex;align-items:center;vertical-align:middle;color:rgb(var(--color-text-lighter));opacity:.75;transition:opacity .15s,transform .15s,color .15s}${sel}{margin-left:10px}#${EDIT_ID}{margin-left:6px;cursor:pointer}${sel}:hover,#${EDIT_ID}:hover{opacity:1;color:rgb(var(--color-blue));transform:scale(1.1)}`,
         create: () => {
@@ -143,10 +113,9 @@ defineModule({
             cancelTouchTimer = null;
           };
 
-          rc.listen(
-            a,
+          a.addEventListener(
             'touchstart',
-            ((e: TouchEvent) => {
+            (e: TouchEvent) => {
               if (e.touches.length !== 1) return;
               sx = e.touches[0].clientX;
               sy = e.touches[0].clientY;
@@ -162,56 +131,74 @@ defineModule({
                   cancelResetTimer = null;
                 }, 800);
               }, 550);
-            }) as EventListener,
+            },
             { passive: true }
           );
 
-          rc.listen(
-            a,
+          a.addEventListener(
             'touchmove',
-            ((e: TouchEvent) => {
+            (e: TouchEvent) => {
               if (!cancelTouchTimer || !e.touches.length) return;
               if (Math.abs(e.touches[0].clientX - sx) > 12 || Math.abs(e.touches[0].clientY - sy) > 12) cancel();
-            }) as EventListener,
+            },
             { passive: true }
           );
 
-          rc.listen(a, 'touchend', cancel, { passive: true });
-          rc.listen(a, 'touchcancel', cancel, { passive: true });
-          rc.listen(a, 'contextmenu', (e) => {
+          a.addEventListener('touchend', cancel, { passive: true });
+          a.addEventListener('touchcancel', cancel, { passive: true });
+          a.addEventListener('contextmenu', (e) => {
             if (longPressed) e.preventDefault();
           });
 
-          rc.listen(a, 'click', (ev: Event) => {
-            const e = ev as MouseEvent;
-            void (async () => {
-              e.preventDefault();
+          a.addEventListener('click', (e: MouseEvent) => {
+            e.preventDefault();
             if (longPressed) {
               longPressed = false;
               e.stopPropagation();
               return;
             }
-            const w = window.open('about:blank', '_blank');
+            if (rc.signal.aborted) return;
+
             const title = titleText();
             const nyaa = nyaaUrl(title);
-            let target = nyaa;
-            if (!e.ctrlKey && !e.metaKey) {
-              if (isIgnored(route.id)) {
-                target = nyaa;
-              } else {
-                const media = await ctx.api.media.get(route.id, route.type);
-                const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
-                if (effectiveMalId) {
-                  target = `https://myanimelist.net/${route.kind}/${effectiveMalId}`;
-                } else {
-                  target = `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
-                }
-              }
+            if (e.ctrlKey || e.metaKey || isIgnored(route.id)) {
+              openTab(nyaa);
+              return;
             }
+
+            const w = window.open('about:blank', '_blank');
+            if (w) {
+              w.opener = null;
+              pendingPopups.add(w);
+            }
+
+            void (async () => {
+              let media: { idMal?: number | null } | null = null;
+              try {
+                media = await rc.api.media.get(route.id, route.type);
+              } catch {
+                media = null;
+              }
+              if (rc.signal.aborted) {
+                if (w && pendingPopups.delete(w) && !w.closed) w.close?.();
+                return;
+              }
+              if (w?.closed) {
+                pendingPopups.delete(w);
+                return;
+              }
+
+              const effectiveMalId = getEffectiveMalId(route.id, media?.idMal);
+              const target = effectiveMalId
+                ? `https://myanimelist.net/${route.kind}/${effectiveMalId}`
+                : `https://myanimelist.net/search/all?q=${encodeURIComponent(title)}&cat=all`;
+
               if (w) {
-                w.opener = null;
+                pendingPopups.delete(w);
                 w.location.href = target;
-              } else openTab(target);
+              } else {
+                openTab(target);
+              }
             })();
           });
 
@@ -220,20 +207,55 @@ defineModule({
       });
 
       activeLink = link;
-      ensureEditMount();
+
+      let currentQuickEdit: ServiceMap['manualOverrides:quickEdit'] | null = null;
+      const editMount = rc.mount<HTMLAnchorElement>({
+        id: EDIT_ID,
+        anchor: () => link.el()?.parentElement || document.querySelector<HTMLElement>(H1_SEL),
+        position: 'beforeend',
+        ownUi: true,
+        match: () => currentQuickEdit !== null,
+        create: () => {
+          const editBtn = document.createElement('a');
+          editBtn.href = '#';
+          editBtn.title = 'Set or edit MyAnimeList mapping';
+          editBtn.setAttribute('aria-label', 'Set or edit MyAnimeList mapping');
+          editBtn.innerHTML = icon('edit', 16);
+          editBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            currentQuickEdit?.(route.id, route.type);
+          });
+          return editBtn;
+        }
+      });
+
+      const stopQuickEditWatch = ctx.services.onAvailable('manualOverrides:quickEdit', (quickEditFn) => {
+        if (rc.signal.aborted) return;
+        currentQuickEdit = quickEditFn;
+        editMount.refresh();
+        return () => {
+          if (currentQuickEdit === quickEditFn) {
+            currentQuickEdit = null;
+            editMount.refresh();
+          }
+        };
+      });
 
       rc.onCleanup(() => {
+        for (const w of pendingPopups) {
+          if (!w.closed) w.close?.();
+        }
+        pendingPopups.clear();
         clearTouchTimers();
+        stopQuickEditWatch();
+        currentQuickEdit = null;
         if (activeLink === link) activeLink = null;
         if (activeRoute === route) activeRoute = null;
-        activeEdit?.unmount();
-        activeEdit = null;
       });
     });
 
     ctx.onCleanup(() => {
-      activeEdit?.unmount();
-      activeEdit = null;
       activeLink = null;
       activeRoute = null;
     });

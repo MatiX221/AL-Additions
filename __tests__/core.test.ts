@@ -686,6 +686,7 @@ describe('Core Microkernel: Settings Panel Integration', () => {
           def: {},
           title: 'Overrides',
           help: 'JSON',
+          autoEnableParentWhenNonEmpty: true,
           editor(ec) {
             ec.onApply({ '42': { malId: 84, type: 'ANIME', title: 'Staged Show', updatedAt: 1 } });
           }
@@ -1285,5 +1286,997 @@ describe('Core Microkernel: Settings Panel Integration', () => {
     expect(document.getElementById('ala-live-upd')).not.toBeNull();
     sClean2();
     expect(document.getElementById('ala-live-upd')).toBeNull();
+  });
+
+  it('evicts duplicate-ID modals via close() without leaking listeners, styles, or ownUi (BUG-02)', async () => {
+    const { observer } = await loadFreshKernel();
+    const { createModal } = await import('../src/core/modal');
+
+    const onClose1 = vi.fn();
+    const onClose2 = vi.fn();
+    const mutSpy = vi.fn();
+    let unsubMut: (() => void) | null = null;
+    let m1: any;
+    let m2: any;
+
+    try {
+      m1 = createModal({ id: 'dup-modal', title: 'First', onClose: onClose1 });
+      expect(document.querySelectorAll('#ala-dup-modal')).toHaveLength(1);
+      expect(document.getElementById('ala-core-modal-style')).not.toBeNull();
+
+      m2 = createModal({ id: 'dup-modal', title: 'Second', onClose: onClose2 });
+      expect(onClose1).toHaveBeenCalledTimes(1);
+      expect(onClose2).not.toHaveBeenCalled();
+      expect(document.querySelectorAll('#ala-dup-modal')).toHaveLength(1);
+      expect(document.getElementById('ala-dup-modal-title')?.textContent).toBe('Second');
+      expect(document.getElementById('ala-core-modal-style')).not.toBeNull();
+      expect(m2.backdrop.isConnected).toBe(true);
+      expect(m1.backdrop.isConnected).toBe(false);
+
+      vi.useFakeTimers();
+      unsubMut = observer.Core.onBodyMutation(mutSpy);
+      const ownChild = document.createElement('span');
+      m2.body.appendChild(ownChild);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+      expect(mutSpy).not.toHaveBeenCalled();
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(onClose2).toHaveBeenCalledTimes(1);
+      expect(document.getElementById('ala-dup-modal')).toBeNull();
+      expect(document.getElementById('ala-core-modal-style')).toBeNull();
+
+      mutSpy.mockClear();
+      const stray = document.createElement('div');
+      stray.id = 'ala-dup-modal';
+      document.body.appendChild(stray);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+      mutSpy.mockClear();
+
+      stray.appendChild(document.createElement('span'));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(60);
+      expect(mutSpy).toHaveBeenCalledTimes(1);
+      stray.remove();
+    } finally {
+      vi.useRealTimers();
+      unsubMut?.();
+      m1?.close();
+      m2?.close();
+    }
+  });
+
+  it('guards null document.body, stacks Escape LIFO across modals and Settings panel, and ref-counts scroll lock (BUG-03)', async () => {
+    const { panel, registry } = await loadFreshKernel();
+    const { createModal } = await import('../src/core/modal');
+
+    const origBody = document.body;
+    const noBodyClose = vi.fn();
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      const handle = createModal({ id: 'no-body', title: 'No Body', onClose: noBodyClose });
+      expect(handle).toBeDefined();
+      expect(() => handle.close()).not.toThrow();
+      expect(document.getElementById('ala-no-body')).toBeNull();
+      expect(document.getElementById('ala-core-modal-style')).toBeNull();
+      const escEv = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(escEv);
+      expect(escEv.defaultPrevented).toBe(false);
+      expect(noBodyClose).not.toHaveBeenCalled();
+    } finally {
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+
+    document.documentElement.style.overflow = 'auto';
+    const soloClose1 = vi.fn();
+    const soloClose2 = vi.fn();
+    createModal({ id: 'solo-1', title: 'Solo 1', onClose: soloClose1 });
+    expect(document.documentElement.style.overflow).toBe('hidden');
+    createModal({ id: 'solo-2', title: 'Solo 2', onClose: soloClose2 });
+    expect(document.documentElement.style.overflow).toBe('hidden');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(soloClose2).toHaveBeenCalledTimes(1);
+    expect(soloClose1).not.toHaveBeenCalled();
+    expect(document.documentElement.style.overflow).toBe('hidden');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(soloClose1).toHaveBeenCalledTimes(1);
+    expect(document.documentElement.style.overflow).toBe('auto');
+    document.documentElement.style.overflow = '';
+
+    panel.showPanel(registry.createModuleHost());
+    try {
+      expect(document.getElementById('ala-settings-backdrop')).not.toBeNull();
+      expect(document.documentElement.style.overflow).toBe('hidden');
+
+      const stackClose1 = vi.fn();
+      const stackClose2 = vi.fn();
+      createModal({ id: 'over-panel-1', title: 'Modal 1', onClose: stackClose1 });
+      createModal({ id: 'over-panel-2', title: 'Modal 2', onClose: stackClose2 });
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(stackClose2).toHaveBeenCalledTimes(1);
+      expect(stackClose1).not.toHaveBeenCalled();
+      expect(document.getElementById('ala-settings-backdrop')).not.toBeNull();
+      expect(document.documentElement.style.overflow).toBe('hidden');
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(stackClose1).toHaveBeenCalledTimes(1);
+      expect(document.getElementById('ala-settings-backdrop')).not.toBeNull();
+      expect(document.documentElement.style.overflow).toBe('hidden');
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(document.getElementById('ala-settings-backdrop')).toBeNull();
+      expect(document.documentElement.style.overflow).toBe('');
+    } finally {
+      panel.closePanel();
+    }
+  });
+
+  it('keeps navigation muted across nested Core.silently() calls (BUG-11)', async () => {
+    const { observer } = await loadFreshKernel();
+    const navSpy = vi.fn();
+    const unsub = observer.Core.onNavigate(navSpy);
+    try {
+      observer.Core.silently(() => {
+        history.replaceState({}, '', '/silent-outer-1');
+        observer.Core.silently(() => {
+          history.replaceState({}, '', '/silent-inner');
+        });
+        history.replaceState({}, '', '/silent-outer-2');
+      });
+      expect(navSpy).not.toHaveBeenCalled();
+
+      history.pushState({}, '', '/after-nested-silently');
+      expect(navSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('patches both distinct unsafeWindow.history and window.history for synchronous onNavigate (BUG-12)', async () => {
+    const origWinPush = window.history.pushState;
+    const origWinReplace = window.history.replaceState;
+    const distinctHistory: any = {
+      pushState: (...args: any[]) => origWinPush.apply(window.history, args as [any, string, string?]),
+      replaceState: (...args: any[]) => origWinReplace.apply(window.history, args as [any, string, string?])
+    };
+
+    try {
+      vi.resetModules();
+      vi.doMock('vite-plugin-monkey/dist/client', () => ({
+        unsafeWindow: { history: distinctHistory },
+        GM_getValue: globalThis.GM_getValue,
+        GM_setValue: globalThis.GM_setValue,
+        GM_deleteValue: globalThis.GM_deleteValue,
+        GM_listValues: globalThis.GM_listValues,
+        GM_addValueChangeListener: globalThis.GM_addValueChangeListener,
+        GM_removeValueChangeListener: globalThis.GM_removeValueChangeListener,
+        GM_xmlhttpRequest: globalThis.GM_xmlhttpRequest,
+        GM_registerMenuCommand: globalThis.GM_registerMenuCommand,
+        GM_download: globalThis.GM_download
+      }));
+
+      const { Core } = await import('../src/core/observer');
+      const navSpy = vi.fn();
+      const unsub = Core.onNavigate(navSpy);
+      try {
+        window.history.pushState({}, '', '/bug12-sandbox-win');
+        expect(navSpy).toHaveBeenCalledTimes(1);
+
+        distinctHistory.pushState({}, '', '/bug12-unsafe-win');
+        expect(navSpy).toHaveBeenCalledTimes(2);
+
+        window.history.replaceState({}, '', '/bug12-sandbox-replace');
+        expect(navSpy).toHaveBeenCalledTimes(3);
+
+        distinctHistory.replaceState({}, '', '/bug12-unsafe-replace');
+        expect(navSpy).toHaveBeenCalledTimes(4);
+      } finally {
+        unsub();
+      }
+    } finally {
+      vi.doUnmock('vite-plugin-monkey/dist/client');
+      vi.resetModules();
+      window.history.pushState = origWinPush;
+      window.history.replaceState = origWinReplace;
+    }
+  });
+
+  it('resolves null cleanly in Core.waitForSelector for invalid selectors, <= 0 timeouts, and waits on Infinity (BUG-13)', async () => {
+    const { observer } = await loadFreshKernel();
+
+    await expect(observer.Core.waitForSelector('###invalid')).resolves.toBeNull();
+    await expect(observer.Core.waitForSelector('#never-there', 0)).resolves.toBeNull();
+    await expect(observer.Core.waitForSelector('#never-there', -5)).resolves.toBeNull();
+
+    const present = document.createElement('div');
+    present.id = 'already-here';
+    document.body.appendChild(present);
+    await expect(observer.Core.waitForSelector('#already-here', 0)).resolves.toBe(present);
+
+    let p!: Promise<HTMLElement | null>;
+    let late!: HTMLDivElement;
+    vi.useFakeTimers();
+    try {
+      let resolved: HTMLElement | null | undefined;
+      p = observer.Core.waitForSelector('#late-infinity', Infinity).then((el) => {
+        resolved = el;
+        return el;
+      });
+
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+      expect(resolved).toBeUndefined();
+
+      late = document.createElement('div');
+      late.id = 'late-infinity';
+      document.body.appendChild(late);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(vi.getTimerCount()).toBe(1);
+      vi.advanceTimersByTime(60);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(resolved).toBe(late);
+    } finally {
+      vi.useRealTimers();
+    }
+    await expect(p).resolves.toBe(late);
+  });
+
+  it('prevents stale deferred Core.ready style mount from overwriting newer CSS for the same styleId (BUG-14)', async () => {
+    await loadFreshKernel();
+    const styles = await import('../src/core/styles');
+
+    const origHead = document.head;
+    const origBody = document.body;
+    Object.defineProperty(document, 'head', { value: null, configurable: true });
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+
+    let disposeOld!: () => void;
+    let disposeNew!: () => void;
+    try {
+      disposeOld = styles.addStyle('gen-guard', '.gen { color: red; }');
+
+      delete (document as any).head;
+      if (!document.head && origHead) document.documentElement.prepend(origHead);
+
+      disposeNew = styles.addStyle('gen-guard', '.gen { color: blue; }');
+      expect(document.getElementById('ala-gen-guard')?.textContent).toBe('.gen { color: blue; }');
+
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+
+      document.dispatchEvent(new Event('DOMContentLoaded'));
+      expect(document.getElementById('ala-gen-guard')?.textContent).toBe('.gen { color: blue; }');
+
+      disposeOld();
+      expect(document.getElementById('ala-gen-guard')?.textContent).toBe('.gen { color: blue; }');
+      disposeNew();
+      expect(document.getElementById('ala-gen-guard')).toBeNull();
+    } finally {
+      delete (document as any).head;
+      delete (document as any).body;
+      if (!document.head && origHead) document.documentElement.prepend(origHead);
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+  });
+
+  it('handles null document.body in openTab and makes store.watch cleanup idempotent (BUG-17)', async () => {
+    const { helpers } = await loadFreshKernel();
+
+    const origBody = document.body;
+    const origDocEl = document.documentElement;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      expect(() => helpers.openTab('https://example.com/doc-el')).not.toThrow();
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(document.documentElement.querySelector('a[href="https://example.com/doc-el"]')).toBeNull();
+
+      Object.defineProperty(document, 'documentElement', { value: null, configurable: true });
+      expect(() => helpers.openTab('https://example.com/fallback')).not.toThrow();
+      expect(openSpy).toHaveBeenCalledWith('https://example.com/fallback', '_blank', 'noopener,noreferrer');
+    } finally {
+      delete (document as any).documentElement;
+      if (!document.documentElement && origDocEl) document.appendChild(origDocEl);
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+
+    const removeSpy = vi.spyOn(globalThis, 'GM_removeValueChangeListener');
+    const unwatch = helpers.store.watch('idempotent-key', () => {});
+    unwatch();
+    unwatch();
+    expect(removeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes empty and whitespace modal IDs to ala-modal-<n> in createModal (BUG-85)', async () => {
+    await loadFreshKernel();
+    const { createModal } = await import('../src/core/modal');
+
+    const mEmpty = createModal({ id: '', title: 'Empty' });
+    const mSpaces = createModal({ id: '   ', title: 'Whitespace' });
+    try {
+      expect(mEmpty.backdrop.id).toMatch(/^ala-modal-\d+$/);
+      expect(mSpaces.backdrop.id).toMatch(/^ala-modal-\d+$/);
+      expect(mEmpty.backdrop.id).not.toBe(mSpaces.backdrop.id);
+    } finally {
+      mEmpty.close();
+      mSpaces.close();
+    }
+  });
+
+  it('supports ModalOptions.style/subtitle, ModalHandle id/selector/signal/listen/timeout/onCleanup, and [data-ala-close] delegation (IMP-01 & IMP-09)', async () => {
+    await loadFreshKernel();
+    const { createModal } = await import('../src/core/modal');
+
+    vi.useFakeTimers();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      let stylePresentDuringAppend = false;
+      const origAppend = document.body.appendChild.bind(document.body);
+      const appendSpy = vi.spyOn(document.body, 'appendChild').mockImplementation((node: any) => {
+        if (node?.id === 'ala-unified-modal') {
+          stylePresentDuringAppend = !!document.getElementById('ala-unified-modal-style');
+        }
+        return origAppend(node);
+      });
+
+      const order: string[] = [];
+      let signalWasAbortedInOnClose = false;
+      let throwingModal!: ReturnType<typeof createModal>;
+      try {
+        throwingModal = createModal({
+          id: 'unified-modal',
+          title: 'Title',
+          subtitle: '<script>alert(1)</script> Sub',
+          style: (sel) => `${sel} .ala-core-body { padding: 8px; }`,
+          bodyHtml: '<button id="stay-open" data-ala-close type="button">Prevent</button><button id="close-me" data-ala-close type="button">Close</button>',
+          onClose: () => {
+            signalWasAbortedInOnClose = throwingModal.signal.aborted;
+            order.push('onClose');
+            throw new Error('onClose error');
+          }
+        });
+      } finally {
+        appendSpy.mockRestore();
+      }
+
+      expect(stylePresentDuringAppend).toBe(true);
+      expect(throwingModal.id).toBe('ala-unified-modal');
+      expect(throwingModal.selector).toBe('#ala-unified-modal');
+      expect(throwingModal.signal.aborted).toBe(false);
+      expect(document.getElementById('ala-unified-modal-style')?.textContent).toContain(
+        '#ala-unified-modal .ala-core-body { padding: 8px; }'
+      );
+
+      const subtitleEl = throwingModal.sheet.querySelector('.ala-core-subtitle')!;
+      expect(subtitleEl.textContent).toBe('<script>alert(1)</script> Sub');
+      expect(subtitleEl.querySelector('script')).toBeNull();
+
+      const customTarget = document.createElement('button');
+      const onceSpy = vi.fn();
+      const persistentSpy = vi.fn();
+      const timeoutSpy = vi.fn();
+      throwingModal.listen(customTarget, 'ping', onceSpy, { once: true });
+      throwingModal.listen(customTarget, 'pong', persistentSpy);
+      throwingModal.timeout(timeoutSpy, 500);
+      throwingModal.onCleanup(() => {
+        expect(throwingModal.signal.aborted).toBe(true);
+        order.push('cleanup');
+      });
+
+      customTarget.dispatchEvent(new Event('ping'));
+      customTarget.dispatchEvent(new Event('ping'));
+      expect(onceSpy).toHaveBeenCalledTimes(1);
+
+      const stayBtn = throwingModal.body.querySelector<HTMLButtonElement>('#stay-open')!;
+      stayBtn.addEventListener('click', (e) => e.preventDefault());
+      stayBtn.click();
+      expect(throwingModal.backdrop.isConnected).toBe(true);
+
+      const removeSpy = vi.spyOn(customTarget, 'removeEventListener');
+      expect(() => throwingModal.close()).toThrow('onClose error');
+
+      expect(signalWasAbortedInOnClose).toBe(true);
+      expect(throwingModal.signal.aborted).toBe(true);
+      expect(order).toEqual(['cleanup', 'onClose']);
+      expect(document.getElementById('ala-unified-modal')).toBeNull();
+      expect(document.getElementById('ala-unified-modal-style')).toBeNull();
+      expect(removeSpy.mock.calls.filter((c) => c[0] === 'ping')).toHaveLength(0);
+      expect(removeSpy.mock.calls.filter((c) => c[0] === 'pong')).toHaveLength(1);
+
+      customTarget.dispatchEvent(new Event('pong'));
+      vi.advanceTimersByTime(1000);
+      expect(persistentSpy).not.toHaveBeenCalled();
+      expect(timeoutSpy).not.toHaveBeenCalled();
+
+      const closeOnClick = vi.fn();
+      const delegatedModal = createModal({
+        id: 'delegated-close-modal',
+        title: 'Delegated',
+        bodyHtml: '<button id="close-me" data-ala-close type="button">Close</button>',
+        onClose: closeOnClick
+      });
+      delegatedModal.body.querySelector<HTMLButtonElement>('#close-me')!.click();
+      expect(closeOnClick).toHaveBeenCalledTimes(1);
+      expect(delegatedModal.signal.aborted).toBe(true);
+      expect(document.getElementById('ala-delegated-close-modal')).toBeNull();
+    } finally {
+      errSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('composes AbortSignals cleanly with and without AbortSignal.any (IMP-03)', async () => {
+    const { helpers } = await loadFreshKernel();
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    const live = new AbortController();
+
+    const c1 = helpers.composeAbortSignals(preAborted.signal, live.signal);
+    expect(c1.signal.aborted).toBe(true);
+    c1.dispose();
+
+    const origAny = (AbortSignal as any).any;
+    try {
+      (AbortSignal as any).any = undefined;
+
+      const a = new AbortController();
+      const b = new AbortController();
+      const removeA = vi.spyOn(a.signal, 'removeEventListener');
+      const removeB = vi.spyOn(b.signal, 'removeEventListener');
+      const c2 = helpers.composeAbortSignals(a.signal, b.signal);
+      expect(c2.signal.aborted).toBe(false);
+      b.abort('reason-b');
+      expect(c2.signal.aborted).toBe(true);
+      expect(removeA).toHaveBeenCalledWith('abort', expect.any(Function));
+      expect(removeB).toHaveBeenCalledWith('abort', expect.any(Function));
+
+      const x = new AbortController();
+      const y = new AbortController();
+      const c3 = helpers.composeAbortSignals(x.signal, y.signal);
+      c3.dispose();
+      x.abort();
+      expect(c3.signal.aborted).toBe(false);
+    } finally {
+      (AbortSignal as any).any = origAny;
+    }
+  });
+
+  it('provides escaped, stacked non-blocking openConfirmModal and openAlertModal with null-body safety (IMP-10)', async () => {
+    await loadFreshKernel();
+    const { createModal, openConfirmModal, openAlertModal } = await import('../src/core/modal');
+
+    // Confirm click -> true, XSS escaped
+    const pYes = openConfirmModal({
+      id: 'confirm-yes',
+      title: '<b>Title</b>',
+      subtitle: '<img src=x>',
+      message: '<script>alert(1)</script>Line 1\nLine 2',
+      confirmText: '<Yes>',
+      cancelText: '<No>',
+      danger: true
+    });
+    const yesBackdrop = document.getElementById('ala-confirm-yes')!;
+    expect(yesBackdrop).not.toBeNull();
+    expect(yesBackdrop.querySelector('script')).toBeNull();
+    expect(yesBackdrop.querySelector('.ala-core-dialog-msg')?.textContent).toBe('<script>alert(1)</script>Line 1\nLine 2');
+    expect(yesBackdrop.querySelector('.ala-core-confirm-ok')?.classList.contains('ala-btn--danger')).toBe(true);
+    yesBackdrop.querySelector<HTMLButtonElement>('.ala-core-confirm-ok')!.click();
+    await expect(pYes).resolves.toBe(true);
+    expect(document.getElementById('ala-confirm-yes')).toBeNull();
+
+    // Cancel, backdrop, and stacked Escape -> false without closing underlying modal
+    const baseClose = vi.fn();
+    const baseModal = createModal({ id: 'base-under-confirm', title: 'Base', onClose: baseClose });
+    try {
+      const pEsc = openConfirmModal({ id: 'confirm-esc', message: 'Are you sure?' });
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await expect(pEsc).resolves.toBe(false);
+      expect(baseClose).not.toHaveBeenCalled();
+      expect(baseModal.backdrop.isConnected).toBe(true);
+
+      const pCancel = openConfirmModal({ id: 'confirm-cancel', message: 'Cancel me' });
+      document.querySelector<HTMLButtonElement>('#ala-confirm-cancel .ala-core-confirm-cancel')!.click();
+      await expect(pCancel).resolves.toBe(false);
+
+      const pBackdrop = openConfirmModal({ id: 'confirm-bg', message: 'Backdrop me' });
+      const bg = document.getElementById('ala-confirm-bg')!;
+      bg.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await expect(pBackdrop).resolves.toBe(false);
+
+      // Alert modal
+      const pAlert = openAlertModal({ id: 'alert-ok', title: '<i>Notice</i>', message: 'Saved <ok>', okText: 'Got it' });
+      const alertEl = document.getElementById('ala-alert-ok')!;
+      expect(alertEl.querySelector('.ala-core-dialog-msg')?.textContent).toBe('Saved <ok>');
+      alertEl.querySelector<HTMLButtonElement>('.ala-core-alert-ok')!.click();
+      await expect(pAlert).resolves.toBeUndefined();
+      expect(document.getElementById('ala-alert-ok')).toBeNull();
+    } finally {
+      baseModal.close();
+    }
+
+    // Null document.body resolves cleanly
+    const origBody = document.body;
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      await expect(openConfirmModal('No body')).resolves.toBe(false);
+      await expect(openAlertModal('No body')).resolves.toBeUndefined();
+    } finally {
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+  });
+
+  it('resolves Core.waitForSelector immediately on DOMContentLoaded when called with document.body === null and cleans up ready listeners on abort (BUG-02)', async () => {
+    const { observer } = await loadFreshKernel();
+    const origBody = document.body;
+    const removeDocSpy = vi.spyOn(document, 'removeEventListener');
+    const ac = new AbortController();
+
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      let resolvedTarget: HTMLElement | null | undefined;
+      let resolvedLater: HTMLElement | null | undefined;
+      const pTarget = observer.Core.waitForSelector('#initial-dom-ready', Infinity).then((el) => {
+        resolvedTarget = el;
+        return el;
+      });
+      const pAborted = observer.Core.waitForSelector('#aborted-before-ready', Infinity, ac.signal);
+      const pLater = observer.Core.waitForSelector('#post-ready-node', 5000).then((el) => {
+        resolvedLater = el;
+        return el;
+      });
+
+      ac.abort();
+      await expect(pAborted).resolves.toBeNull();
+      expect(removeDocSpy.mock.calls.some((c) => c[0] === 'DOMContentLoaded')).toBe(true);
+
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+      const target = document.createElement('div');
+      target.id = 'initial-dom-ready';
+      document.body.appendChild(target);
+
+      document.dispatchEvent(new Event('DOMContentLoaded'));
+      await Promise.resolve();
+      expect(resolvedTarget).toBe(target);
+      await expect(pTarget).resolves.toBe(target);
+      expect(resolvedLater).toBeUndefined();
+
+      const lateNode = document.createElement('div');
+      lateNode.id = 'post-ready-node';
+      document.body.appendChild(lateNode);
+      await Promise.resolve();
+      vi.advanceTimersByTime(60);
+      await Promise.resolve();
+      await expect(pLater).resolves.toBe(lateNode);
+    } finally {
+      vi.useRealTimers();
+      delete (document as any).body;
+      if (!document.body && origBody) document.documentElement.appendChild(origBody);
+    }
+  });
+
+  it('ref-counts acquireScrollLock() with idempotent release and coordinates registerModalOverlay() stack state (BUG-20 & BUG-21)', async () => {
+    await loadFreshKernel();
+    const { acquireScrollLock, registerModalOverlay, hasActiveModal } = await import('../src/core/modal');
+
+    document.documentElement.style.overflow = 'auto';
+    const releaseA = acquireScrollLock();
+    expect(document.documentElement.style.overflow).toBe('hidden');
+
+    const releaseB = acquireScrollLock();
+    expect(document.documentElement.style.overflow).toBe('hidden');
+
+    // Re-entrant/idempotent release of A must not release B's lock
+    releaseA();
+    releaseA();
+    expect(document.documentElement.style.overflow).toBe('hidden');
+
+    releaseB();
+    releaseB();
+    expect(document.documentElement.style.overflow).toBe('auto');
+    document.documentElement.style.overflow = '';
+
+    const origDocEl = document.documentElement;
+    Object.defineProperty(document, 'documentElement', { value: null, configurable: true });
+    try {
+      const releaseNull = acquireScrollLock();
+      expect(() => releaseNull()).not.toThrow();
+    } finally {
+      Object.defineProperty(document, 'documentElement', { value: origDocEl, configurable: true });
+    }
+
+    // registerModalOverlay tracks hasActiveModal, top-of-stack, and idempotent out-of-order dispose
+    expect(hasActiveModal()).toBe(false);
+    const onEsc1 = vi.fn();
+    const onEsc2 = vi.fn();
+    const overlay1 = registerModalOverlay(onEsc1);
+    expect(hasActiveModal()).toBe(true);
+    expect(overlay1.isTop()).toBe(true);
+
+    const overlay2 = registerModalOverlay(onEsc2);
+    expect(hasActiveModal()).toBe(true);
+    expect(overlay1.isTop()).toBe(false);
+    expect(overlay2.isTop()).toBe(true);
+
+    // Disposing lower overlay leaves upper overlay on top; dispose is idempotent
+    overlay1.dispose();
+    overlay1.dispose();
+    expect(overlay1.isTop()).toBe(false);
+    expect(overlay2.isTop()).toBe(true);
+    expect(hasActiveModal()).toBe(true);
+
+    overlay2.dispose();
+    overlay2.dispose();
+    expect(overlay2.isTop()).toBe(false);
+    expect(hasActiveModal()).toBe(false);
+  });
+
+  it('scopes AniListClient via scopeAniListClient() with composed abort signals, closed mutation rejection, and non-reconciling hasAuth', async () => {
+    await loadFreshKernel();
+    const { scopeAniListClient } = await import('../src/core/contextScope');
+
+    let closed = false;
+    const scopeAc = new AbortController();
+    const callerAc = new AbortController();
+
+    const fakeClient = {
+      query: vi.fn((_q: string, _v?: Record<string, any>, opts?: any): Promise<any> =>
+        Promise.resolve({ aborted: !!opts?.signal?.aborted })
+      ),
+      getMediaList: vi.fn((_t: any, _ty: any, opts?: any) =>
+        Promise.resolve({ aborted: !!opts?.signal?.aborted } as any)
+      ),
+      viewer: vi.fn((_f?: boolean, opts?: any) =>
+        Promise.resolve({ aborted: !!opts?.signal?.aborted } as any)
+      ),
+      clearViewer: vi.fn(),
+      invalidate: vi.fn(),
+      invalidateMediaList: vi.fn(),
+      hasAuth: vi.fn(() => true) as any,
+      resumeAt: vi.fn(() => 12345),
+      media: {
+        get: vi.fn((_id: any, _ty: any, opts?: any) =>
+          Promise.resolve({ aborted: !!opts?.signal?.aborted } as any)
+        ),
+        save: vi.fn((_id: any, _ty: any, _patch: any, opts?: any) =>
+          Promise.resolve({ aborted: !!opts?.signal?.aborted } as any)
+        )
+      },
+      session: {} as any
+    };
+
+    const scoped = scopeAniListClient(() => fakeClient as any, scopeAc.signal, () => closed);
+    expect((scoped as any).session).toBeUndefined();
+    expect(scoped.resumeAt()).toBe(12345);
+    expect(scoped.hasAuth()).toBe(true);
+    expect(fakeClient.hasAuth).toHaveBeenLastCalledWith(undefined);
+
+    // Caller signal abort triggers composed signal while in-flight without aborting scopeAc
+    let seenSignal: AbortSignal | undefined;
+    let resolveInFlight!: (val: string) => void;
+    fakeClient.query.mockImplementationOnce((_q, _v, opts) => {
+      seenSignal = opts?.signal;
+      return new Promise<string>((resolve) => {
+        resolveInFlight = resolve;
+      });
+    });
+    const pendingCaller = scoped.query('query { Viewer { id } }', {}, { signal: callerAc.signal });
+    expect(seenSignal).toBeDefined();
+    expect(seenSignal!.aborted).toBe(false);
+    callerAc.abort();
+    expect(seenSignal!.aborted).toBe(true);
+    expect(scopeAc.signal.aborted).toBe(false);
+    resolveInFlight('ok');
+    await expect(pendingCaller).resolves.toBe('ok');
+
+    // Scope abort propagates to reads even without caller signal
+    scopeAc.abort();
+    closed = true;
+
+    await expect(scoped.query('query { Viewer { id } }')).resolves.toEqual({ aborted: true });
+    await expect(scoped.query('mutation { SaveMediaListEntry(mediaId: 1) { id } }')).rejects.toThrow(
+      'Context disposed'
+    );
+    await expect(scoped.media.save(1, 'ANIME', { score: 8 })).rejects.toThrow('Context disposed');
+
+    scoped.clearViewer();
+    scoped.invalidate('Media:1');
+    scoped.invalidateMediaList('Alice', 'ANIME');
+    expect(fakeClient.clearViewer).not.toHaveBeenCalled();
+    expect(fakeClient.invalidate).not.toHaveBeenCalled();
+    expect(fakeClient.invalidateMediaList).not.toHaveBeenCalled();
+
+    expect(scoped.hasAuth()).toBe(true);
+    expect(fakeClient.hasAuth).toHaveBeenLastCalledWith({ reconcile: false });
+  });
+
+  it('implements lifecycle-scoped observe() on ContextScope and silences non-once listen() during teardown (IMP-04, IMP-07, BUG-03)', async () => {
+    await loadFreshKernel();
+    const { createContextScope } = await import('../src/core/contextScope');
+    const { createModal } = await import('../src/core/modal');
+
+    // 1. observe() ignores callbacks once closed, auto-disconnects on dispose, and guards missing target/MutationObserver
+    const ac = new AbortController();
+    let closed = false;
+    const scope = createContextScope({
+      prefix: 'obsTest',
+      signal: ac.signal,
+      isClosed: () => closed
+    });
+
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const recordsSeen: MutationRecord[][] = [];
+    const disconnectSpy = vi.spyOn(MutationObserver.prototype, 'disconnect');
+
+    const unsubObs = scope.observe(target, { childList: true }, (mutations) => {
+      recordsSeen.push(mutations);
+    });
+    expect(typeof unsubObs).toBe('function');
+
+    target.appendChild(document.createElement('span'));
+    await Promise.resolve();
+    expect(recordsSeen).toHaveLength(1);
+
+    // Closed callback suppression even if a queued microtask delivers after close
+    target.appendChild(document.createElement('b'));
+    closed = true;
+    ac.abort();
+    await Promise.resolve();
+    expect(recordsSeen).toHaveLength(1);
+
+    scope.dispose();
+    expect(disconnectSpy).toHaveBeenCalled();
+
+    // No-op when closed, null/undefined target, or MutationObserver unavailable
+    const lateCalls = vi.fn();
+    scope.observe(target, { childList: true }, lateCalls)();
+    expect(lateCalls).not.toHaveBeenCalled();
+
+    const liveAc = new AbortController();
+    const liveScope = createContextScope({ prefix: 'obsGuards', signal: liveAc.signal });
+    expect(() => liveScope.observe(null, { childList: true }, lateCalls)()).not.toThrow();
+    expect(() => liveScope.observe(undefined, { childList: true }, lateCalls)()).not.toThrow();
+    const origMo = globalThis.MutationObserver;
+    try {
+      (globalThis as any).MutationObserver = undefined;
+      expect(() => liveScope.observe(target, { childList: true }, lateCalls)()).not.toThrow();
+    } finally {
+      globalThis.MutationObserver = origMo;
+    }
+
+    // 2. Non-once listen() in ContextScope & ModalHandle stays silent during teardown after signal.aborted (BUG-03)
+    const sharedTarget = document.createElement('div');
+    const scopeListener = vi.fn();
+    liveScope.listen(sharedTarget, 'teardown-ev', scopeListener);
+    // Registered AFTER listen, so runs BEFORE listen cleanup during reverse teardown
+    liveScope.onCleanup(() => {
+      sharedTarget.dispatchEvent(new Event('teardown-ev'));
+    });
+
+    liveAc.abort();
+    liveScope.dispose();
+    expect(scopeListener).not.toHaveBeenCalled();
+
+    const modalListener = vi.fn();
+    const modal = createModal({ id: 'bug03-modal', title: 'Guard Listen' });
+    modal.listen(sharedTarget, 'modal-teardown-ev', modalListener);
+    modal.onCleanup(() => {
+      sharedTarget.dispatchEvent(new Event('modal-teardown-ev'));
+    });
+    modal.close();
+    expect(modalListener).not.toHaveBeenCalled();
+    target.remove();
+  });
+
+  it('supports AbortSignal-aware sleep, isAbortError, raceWithSignal, and waiter-isolated SharedFlight (IMP-05)', async () => {
+    const { helpers } = await loadFreshKernel();
+    const { createSharedFlight, attachFlightWaiter } = await import('../src/utils/flight');
+
+    // isAbortError covers DOMException AbortError plus HttpClient abort Error messages
+    expect(helpers.isAbortError(helpers.createAbortError())).toBe(true);
+    expect(helpers.isAbortError(new Error('Request aborted'))).toBe(true);
+    expect(helpers.isAbortError(new Error('Download aborted'))).toBe(true);
+    expect(helpers.isAbortError(new Error('Other'))).toBe(false);
+    expect(helpers.isAbortError('Request aborted')).toBe(false);
+
+    vi.useFakeTimers();
+    try {
+      // sleep: pre-aborted rejects immediately without scheduling a timer
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const preAc = new AbortController();
+      preAc.abort();
+      await expect(helpers.sleep(1000, preAc.signal)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+      // sleep: clamps huge finite positive delays to 0x7fffffff and negative/NaN to 0
+      const hugeP = helpers.sleep(1e15);
+      expect(setTimeoutSpy).toHaveBeenLastCalledWith(expect.any(Function), 0x7fffffff);
+      await vi.advanceTimersByTimeAsync(0x7fffffff);
+      await expect(hugeP).resolves.toBeUndefined();
+
+      const negP = helpers.sleep(-50);
+      expect(setTimeoutSpy).toHaveBeenLastCalledWith(expect.any(Function), 0);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(negP).resolves.toBeUndefined();
+
+      // sleep: mid-sleep abort clears timer and rejects immediately; normal settle removes listener
+      const midAc = new AbortController();
+      const midSleep = helpers.sleep(5000, midAc.signal);
+      midAc.abort();
+      await expect(midSleep).rejects.toMatchObject({ name: 'AbortError' });
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+
+      const okAc = new AbortController();
+      const removeSpy = vi.spyOn(okAc.signal, 'removeEventListener');
+      const okSleep = helpers.sleep(200, okAc.signal);
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(okSleep).resolves.toBeUndefined();
+      expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // raceWithSignal: pre-aborted, mid-flight abort with custom factory, and listener cleanup on settle
+    const preRaceAc = new AbortController();
+    preRaceAc.abort();
+    let rejectLate!: (err: Error) => void;
+    const lateRejecting = new Promise<string>((_res, rej) => {
+      rejectLate = rej;
+    });
+    await expect(helpers.raceWithSignal(lateRejecting, preRaceAc.signal)).rejects.toMatchObject({
+      name: 'AbortError'
+    });
+    // Suppresses unhandled rejection if underlying promise rejects afterwards
+    rejectLate(new Error('late boom'));
+    await Promise.resolve();
+
+    const customAc = new AbortController();
+    const customRace = helpers.raceWithSignal(
+      new Promise<string>(() => {}),
+      customAc.signal,
+      () => Object.assign(new Error('Custom abort'), { name: 'AbortError', cancelled: true })
+    );
+    customAc.abort();
+    await expect(customRace).rejects.toMatchObject({ message: 'Custom abort', cancelled: true });
+
+    const settleAc = new AbortController();
+    const settleRemoveSpy = vi.spyOn(settleAc.signal, 'removeEventListener');
+    await expect(helpers.raceWithSignal(Promise.resolve('ok'), settleAc.signal)).resolves.toBe('ok');
+    expect(settleRemoveSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    // createSharedFlight / attachFlightWaiter: waiter isolation & synchronous last-waiter eviction
+    let resolveFlight!: (v: string) => void;
+    let rejectFlight!: (err: Error) => void;
+    const events: string[] = [];
+    const customFactory = () => Object.assign(new Error('Flight waiter aborted'), { name: 'AbortError', tag: 'custom' });
+
+    const flight1 = createSharedFlight<string>({
+      start: (sharedSignal) =>
+        new Promise<string>((res, rej) => {
+          resolveFlight = res;
+          rejectFlight = rej;
+          sharedSignal.addEventListener('abort', () => events.push('shared-aborted'), { once: true });
+        }),
+      onEvict: () => events.push('evicted'),
+      onSettled: () => events.push('settled'),
+      createAbortError: customFactory
+    });
+
+    const w1Ac = new AbortController();
+    const w2Ac = new AbortController();
+    const w1 = flight1.wait({ signal: w1Ac.signal });
+    const w2 = attachFlightWaiter(flight1, { signal: w2Ac.signal });
+    expect(flight1.waiters).toBe(2);
+
+    // Aborting w1 leaves flight1 and w2 alive
+    w1Ac.abort();
+    await expect(w1).rejects.toMatchObject({ message: 'Flight waiter aborted', tag: 'custom' });
+    expect(flight1.waiters).toBe(1);
+    expect(flight1.controller.signal.aborted).toBe(false);
+    expect(events).toEqual([]);
+
+    // Aborting last waiter w2 aborts shared controller and calls onEvict synchronously
+    w2Ac.abort();
+    expect(events).toEqual(['shared-aborted', 'evicted']);
+    expect(flight1.waiters).toBe(0);
+    expect(flight1.controller.signal.aborted).toBe(true);
+    await expect(w2).rejects.toMatchObject({ message: 'Flight waiter aborted', tag: 'custom' });
+
+    // Late rejection after eviction must not cause unhandled rejection
+    rejectFlight(new Error('network aborted'));
+    await Promise.resolve();
+    expect(events).toEqual(['shared-aborted', 'evicted', 'settled']);
+
+    // Per-waiter check() error does not poison sibling waiters
+    const flight2 = createSharedFlight<string>({
+      start: () =>
+        new Promise<string>((res) => {
+          resolveFlight = res;
+        })
+    });
+    let failA = false;
+    const pA = flight2.wait({
+      check: () => {
+        if (failA) throw new Error('waiter A check failed');
+      }
+    });
+    const pB = flight2.wait({ check: () => {} });
+    failA = true;
+    resolveFlight('shared-ok');
+    await expect(pA).rejects.toThrow('waiter A check failed');
+    await expect(pB).resolves.toBe('shared-ok');
+    expect(flight2.settled).toBe(true);
+  });
+
+  it('closes openConfirmModal and openAlertModal on AbortSignal and cleans up abort listeners on manual close (IMP-08)', async () => {
+    await loadFreshKernel();
+    const { openConfirmModal, openAlertModal } = await import('../src/core/modal');
+
+    // Already-aborted signals resolve immediately without invoking modalFactory
+    const preAc = new AbortController();
+    preAc.abort();
+    const unusedFactory = vi.fn();
+    await expect(openConfirmModal({ message: 'Pre-aborted', signal: preAc.signal }, unusedFactory)).resolves.toBe(
+      false
+    );
+    await expect(openAlertModal({ message: 'Pre-aborted', signal: preAc.signal }, unusedFactory)).resolves.toBeUndefined();
+    expect(unusedFactory).not.toHaveBeenCalled();
+
+    // Mid-dialog abort closes Confirm modal and resolves false
+    const confirmAc = new AbortController();
+    const confirmP = openConfirmModal({ id: 'confirm-abort-mid', message: 'Abort me', signal: confirmAc.signal });
+    expect(document.getElementById('ala-confirm-abort-mid')).not.toBeNull();
+    confirmAc.abort();
+    await expect(confirmP).resolves.toBe(false);
+    expect(document.getElementById('ala-confirm-abort-mid')).toBeNull();
+
+    // Mid-dialog abort closes Alert modal and resolves undefined
+    const alertAc = new AbortController();
+    const alertP = openAlertModal({ id: 'alert-abort-mid', message: 'Abort alert', signal: alertAc.signal });
+    expect(document.getElementById('ala-alert-abort-mid')).not.toBeNull();
+    alertAc.abort();
+    await expect(alertP).resolves.toBeUndefined();
+    expect(document.getElementById('ala-alert-abort-mid')).toBeNull();
+
+    // Manual close removes the abort listener on both Confirm and Alert
+    const manualConfirmAc = new AbortController();
+    const removeConfirmSpy = vi.spyOn(manualConfirmAc.signal, 'removeEventListener');
+    const manualConfirmP = openConfirmModal({
+      id: 'confirm-manual-clean',
+      message: 'Confirm manually',
+      signal: manualConfirmAc.signal
+    });
+    document.querySelector<HTMLButtonElement>('#ala-confirm-manual-clean .ala-core-confirm-ok')!.click();
+    await expect(manualConfirmP).resolves.toBe(true);
+    expect(removeConfirmSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    const manualAlertAc = new AbortController();
+    const removeAlertSpy = vi.spyOn(manualAlertAc.signal, 'removeEventListener');
+    const manualAlertP = openAlertModal({
+      id: 'alert-manual-clean',
+      message: 'Alert manually',
+      signal: manualAlertAc.signal
+    });
+    document.querySelector<HTMLButtonElement>('#ala-alert-manual-clean .ala-core-alert-ok')!.click();
+    await expect(manualAlertP).resolves.toBeUndefined();
+    expect(removeAlertSpy).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 });

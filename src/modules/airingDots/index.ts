@@ -1,5 +1,5 @@
 import { defineModule } from '../../core/registry';
-import { clean, debounce } from '../../utils/helpers';
+import { clean, isAbortError } from '../../utils/helpers';
 import type { CleanupFn } from '../../types';
 
 interface AiringCacheEntry {
@@ -52,14 +52,11 @@ defineModule({
     });
     const cache = cacheStore.data;
 
-    const pending = new Set<string>();
-    const active = new Set<string>();
-    const timers = new Map<string, CleanupFn>();
     const optimistic = new Map<string, { target: number; expiresAt: number }>();
-    let running = 0;
-    let routeTimeout: ((fn: () => void, ms: number) => CleanupFn) | null = null;
+    let disposed = false;
 
-    const onListPage = (): boolean => location.pathname.includes('/animelist');
+    const ANIMELIST_RE = /^\/user\/[^/]+\/animelist\/?$/i;
+    const onListPage = (): boolean => ANIMELIST_RE.test(location.pathname);
     const idOf = (entry: Element): string | null =>
       entry.querySelector('a[href*="/anime/"]')?.getAttribute('href')?.match(/\/anime\/(\d+)(?:[/?#]|$)/i)?.[1] ||
       null;
@@ -121,23 +118,6 @@ defineModule({
       return id;
     }
 
-    function scanAll(): void {
-      if (!onListPage()) return;
-      const stale = new Set<string>();
-      for (const entry of watchingEntries()) {
-        const id = updateEntry(entry);
-        if (id && needsFetch(id)) stale.add(id);
-      }
-      queueIDs(stale);
-    }
-
-    function repaint(ids: Set<string>): void {
-      for (const entry of watchingEntries()) {
-        const id = idOf(entry);
-        if (id && ids.has(id)) updateEntry(entry);
-      }
-    }
-
     function makeEntry(media: any): AiringCacheEntry {
       const next = media.nextAiringEpisode;
       const now = Date.now();
@@ -159,98 +139,6 @@ defineModule({
       };
     }
 
-    function scheduleRefresh(id: string, at: number): void {
-      const existing = timers.get(id);
-      if (existing) existing();
-      timers.delete(id);
-      if (!routeTimeout || !Number.isFinite(at)) return;
-      const cancel = routeTimeout(() => {
-        timers.delete(id);
-        queueIDs([id]);
-        repaint(new Set([id]));
-      }, Math.min(Math.max(0, at - Date.now()), 2147483647));
-      timers.set(id, cancel);
-    }
-
-    async function updateBatch(ids: string[]): Promise<void> {
-      const returned = new Set<string>();
-      try {
-        const data = await ctx.api.query(QUERY, { ids: ids.map(Number) });
-        for (const m of data?.Page?.media || []) {
-          const id = String(m.id);
-          returned.add(id);
-          cache[id] = makeEntry(m);
-          scheduleRefresh(id, cache[id].nextCheck);
-        }
-      } catch (_) {}
-
-      const retryAt = Date.now() + ERROR_RETRY;
-      for (const id of ids) {
-        if (returned.has(id)) continue;
-        const ex = cache[id];
-        if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
-        else cache[id] = { aired: null, nextEpisode: null, status: null, nextCheck: retryAt, updated: Date.now() };
-        scheduleRefresh(id, retryAt);
-      }
-      cacheStore.save();
-      if (returned.size) repaint(returned);
-    }
-
-    function queueIDs(ids: Iterable<string>): void {
-      for (const raw of ids) {
-        const id = String(raw);
-        if (!active.has(id)) pending.add(id);
-      }
-      while (running < CONCURRENCY && pending.size) {
-        const batch: string[] = [];
-        for (const id of pending) {
-          pending.delete(id);
-          active.add(id);
-          batch.push(id);
-          if (batch.length >= BATCH) break;
-        }
-        running++;
-        updateBatch(batch)
-          .catch((e) => ctx.log.error('airing batch', e))
-          .finally(() => {
-            batch.forEach((id) => active.delete(id));
-            running--;
-            queueIDs([]);
-          });
-      }
-    }
-
-    const dirty = new Set<Element>();
-    let fullScan = false;
-    let raf = 0;
-
-    function flush(): void {
-      raf = 0;
-      if (!onListPage()) {
-        dirty.clear();
-        fullScan = false;
-        return;
-      }
-      if (fullScan) {
-        fullScan = false;
-        dirty.clear();
-        scanAll();
-        return;
-      }
-      const stale = new Set<string>();
-      for (const entry of dirty) {
-        const id = updateEntry(entry);
-        if (id && needsFetch(id)) stale.add(id);
-      }
-      dirty.clear();
-      queueIDs(stale);
-    }
-
-    const mark = (): void => {
-      if (!raf) raf = requestAnimationFrame(flush);
-    };
-    const refresh = debounce(scanAll, 100);
-
     const isIncrease = (el: Element | null): boolean => {
       for (let n: Element | null = el, i = 0; i < 4 && n; i++, n = n.parentElement) {
         const label = `${n.getAttribute?.('aria-label') || ''} ${n.getAttribute?.('title') || ''}`
@@ -263,33 +151,158 @@ defineModule({
       return false;
     };
 
-    ctx.onRoute(/^\/user\/[^/]+\/animelist(?:\/|$)/i, (rc) => {
-      routeTimeout = rc.timeout;
-      fullScan = false;
+    ctx.onRoute(ANIMELIST_RE, (rc) => {
+      if (disposed) return;
+      let routeActive = true;
+      const isRouteAlive = (): boolean => !disposed && routeActive && !rc.signal.aborted;
+      const pending = new Set<string>();
+      const active = new Set<string>();
+      const timers = new Map<string, CleanupFn>();
+      let running = 0;
+      const dirty = new Set<Element>();
+      let fullScan = false;
+      let raf = 0;
 
-      rc.onCleanup(
-        ctx.onBodyMutation((muts) => {
-          if (rc.signal.aborted) return;
-          for (const m of muts) {
-            const t = (m.target.nodeType === 1 ? m.target : m.target.parentElement) as Element | null;
-            const own = t?.closest?.('.entry');
-            if (own) {
-              dirty.add(own);
-              mark();
-            }
-            for (const n of Array.from(m.addedNodes)) {
-              if (n.nodeType !== 1) continue;
-              const el = n as Element;
-              if (el.matches('.entry')) dirty.add(el);
-              else {
-                el.querySelectorAll('.entry').forEach((e) => dirty.add(e));
-                if (el.matches('.list-wrap, .section-name') || el.querySelector('.section-name')) fullScan = true;
-              }
-              mark();
-            }
+      function scanAll(): void {
+        if (!isRouteAlive() || !onListPage()) return;
+        const stale = new Set<string>();
+        for (const entry of watchingEntries()) {
+          const id = updateEntry(entry);
+          if (id && needsFetch(id)) stale.add(id);
+        }
+        queueIDs(stale);
+      }
+
+      function repaint(ids: Set<string>): void {
+        if (!isRouteAlive() || !onListPage()) return;
+        for (const entry of watchingEntries()) {
+          const id = idOf(entry);
+          if (id && ids.has(id)) updateEntry(entry);
+        }
+      }
+
+      function scheduleRefresh(id: string, at: number): void {
+        const existing = timers.get(id);
+        if (existing) existing();
+        timers.delete(id);
+        if (!isRouteAlive() || !Number.isFinite(at)) return;
+        const cancel = rc.timeout(() => {
+          timers.delete(id);
+          if (!isRouteAlive()) return;
+          queueIDs([id]);
+          repaint(new Set([id]));
+        }, Math.min(Math.max(0, at - Date.now()), 2147483647));
+        timers.set(id, cancel);
+      }
+
+      async function updateBatch(ids: string[]): Promise<void> {
+        if (!isRouteAlive()) return;
+        const returned = new Set<string>();
+        try {
+          const data = await rc.api.query(QUERY, { ids: ids.map(Number) });
+          if (!isRouteAlive()) return;
+          for (const m of data?.Page?.media || []) {
+            const id = String(m.id);
+            returned.add(id);
+            cache[id] = makeEntry(m);
+            scheduleRefresh(id, cache[id].nextCheck);
           }
-        })
-      );
+        } catch (err) {
+          if (!isRouteAlive() || isAbortError(err)) return;
+        }
+
+        if (!isRouteAlive()) return;
+
+        const retryAt = Date.now() + ERROR_RETRY;
+        for (const id of ids) {
+          if (returned.has(id)) continue;
+          const ex = cache[id];
+          if (ex && Number.isFinite(ex.aired)) ex.nextCheck = retryAt;
+          else cache[id] = { aired: null, nextEpisode: null, status: null, nextCheck: retryAt, updated: Date.now() };
+          scheduleRefresh(id, retryAt);
+        }
+        cacheStore.save();
+        if (returned.size) repaint(returned);
+      }
+
+      function queueIDs(ids: Iterable<string>): void {
+        if (!isRouteAlive()) return;
+        for (const raw of ids) {
+          const id = String(raw);
+          if (!active.has(id)) pending.add(id);
+        }
+        while (running < CONCURRENCY && pending.size) {
+          if (!isRouteAlive()) break;
+          const batch: string[] = [];
+          for (const id of pending) {
+            pending.delete(id);
+            active.add(id);
+            batch.push(id);
+            if (batch.length >= BATCH) break;
+          }
+          running++;
+          updateBatch(batch)
+            .catch((e) => {
+              if (isRouteAlive() && !isAbortError(e)) ctx.log.error('airing batch', e);
+            })
+            .finally(() => {
+              batch.forEach((id) => active.delete(id));
+              running--;
+              if (isRouteAlive()) queueIDs([]);
+            });
+        }
+      }
+
+      function flush(): void {
+        raf = 0;
+        if (!isRouteAlive() || !onListPage()) {
+          dirty.clear();
+          fullScan = false;
+          return;
+        }
+        if (fullScan) {
+          fullScan = false;
+          dirty.clear();
+          scanAll();
+          return;
+        }
+        const stale = new Set<string>();
+        for (const entry of dirty) {
+          const id = updateEntry(entry);
+          if (id && needsFetch(id)) stale.add(id);
+        }
+        dirty.clear();
+        queueIDs(stale);
+      }
+
+      const mark = (): void => {
+        if (!isRouteAlive()) return;
+        if (!raf) raf = requestAnimationFrame(flush);
+      };
+
+      const refresh = rc.debounce(scanAll, 100);
+
+      rc.onBodyMutation((muts) => {
+        if (!isRouteAlive()) return;
+        for (const m of muts) {
+          const t = (m.target.nodeType === 1 ? m.target : m.target.parentElement) as Element | null;
+          const own = t?.closest?.('.entry');
+          if (own) {
+            dirty.add(own);
+            mark();
+          }
+          for (const n of Array.from(m.addedNodes)) {
+            if (n.nodeType !== 1) continue;
+            const el = n as Element;
+            if (el.matches('.entry')) dirty.add(el);
+            else {
+              el.querySelectorAll('.entry').forEach((e) => dirty.add(e));
+              if (el.matches('.list-wrap, .section-name') || el.querySelector('.section-name')) fullScan = true;
+            }
+            mark();
+          }
+        }
+      });
 
       rc.listen(
         document,
@@ -333,9 +346,15 @@ defineModule({
 
       rc.interval(scanAll, 60000);
       const startList = () => {
-        if (rc.signal.aborted) return;
+        if (!isRouteAlive()) return;
         scanAll();
-        for (const [id, entry] of Object.entries(cache)) {
+        const visibleIds = new Set<string>();
+        for (const el of watchingEntries()) {
+          const id = idOf(el);
+          if (id) visibleIds.add(id);
+        }
+        for (const id of visibleIds) {
+          const entry = cache[id];
           if (entry && Number.isFinite(entry.nextCheck) && Date.now() < entry.nextCheck) {
             scheduleRefresh(id, entry.nextCheck);
           }
@@ -343,29 +362,24 @@ defineModule({
         rc.timeout(scanAll, 500);
         rc.timeout(scanAll, 1500);
       };
-      rc.onCleanup(ctx.ready(startList));
+      rc.ready(startList);
 
       rc.onCleanup(() => {
-        if (routeTimeout === rc.timeout) routeTimeout = null;
+        routeActive = false;
+        refresh.cancel();
         if (raf) cancelAnimationFrame(raf);
         raf = 0;
         for (const cancel of timers.values()) cancel();
         timers.clear();
+        pending.clear();
         dirty.clear();
         fullScan = false;
       });
     });
 
     ctx.onCleanup(() => {
-      routeTimeout = null;
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
-      for (const cancel of timers.values()) cancel();
-      timers.clear();
-      pending.clear();
-      active.clear();
+      disposed = true;
       optimistic.clear();
-      dirty.clear();
       document.querySelectorAll(`.${CLASS}`).forEach((el) => el.classList.remove(CLASS));
     });
   }

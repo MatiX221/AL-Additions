@@ -1,5 +1,6 @@
 import { defineModule } from '../../core/registry';
-import { memo, sleep } from '../../utils/helpers';
+import { createSharedFlight, type SharedFlight } from '../../utils/flight';
+import { createAbortError, isAbortError, sleep } from '../../utils/helpers';
 import type { CleanupFn } from '../../types';
 import {
   DEFAULT_ANISONGS_CONFIG,
@@ -82,8 +83,9 @@ export function resolveProviderLink(
   groupType: 'OP' | 'ED'
 ): { url: string; isDirect: boolean } {
   const directSite = DIRECT_SITE_MAP[preset.id];
-  const directUrl = directSite && song.resources ? song.resources[directSite] : null;
-  if (directUrl) {
+  const rawDirect = directSite && song.resources ? song.resources[directSite] : null;
+  const directUrl = typeof rawDirect === 'string' ? rawDirect.trim() : '';
+  if (directUrl && /^https?:\/\//i.test(directUrl)) {
     return { url: directUrl, isDirect: true };
   }
   const params = extractSongParams(song, groupType);
@@ -239,8 +241,8 @@ function extractRawTheme(theme: any): RawParsedTheme | null {
   const resources: Record<string, string> = {};
   for (const r of resourcesList) {
     const site = str(r?.site).toUpperCase();
-    const link = str(r?.link);
-    if (site && link) resources[site] = link;
+    const link = typeof r?.link === 'string' ? r.link.trim() : '';
+    if (site && /^https?:\/\//i.test(link)) resources[site] = link;
   }
 
   return {
@@ -617,9 +619,15 @@ function followElementWhileCollapsing(
   startDocHeight: number,
   startAnchorDocTop: number,
   listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void,
-  timeout?: TimeoutFn
+  timeout?: TimeoutFn,
+  onCleanup?: (fn: CleanupFn) => void,
+  raf?: (fn: FrameRequestCallback) => CleanupFn,
+  onFinish?: () => void
 ): () => void {
-  if (typeof window === 'undefined' || typeof window.scrollBy !== 'function') return () => {};
+  if (typeof window === 'undefined' || typeof window.scrollBy !== 'function') {
+    onFinish?.();
+    return () => {};
+  }
 
   const stepScroll = () => {
     const docShrink = Math.max(0, startDocHeight - getDocumentHeight());
@@ -634,22 +642,33 @@ function followElementWhileCollapsing(
 
   if (prefersReducedMotion()) {
     stepScroll();
+    onFinish?.();
     return () => {};
   }
 
-  let rafId = 0;
+  let cancelRaf: CleanupFn = () => {};
   let active = true;
   let unlistenWheel = () => {};
   let unlistenTouch = () => {};
   let cancelTimer: CleanupFn = () => {};
+  const scheduleFrame = (fn: FrameRequestCallback): CleanupFn => {
+    if (raf) return raf(fn);
+    const id = requestAnimationFrame(fn);
+    return () => cancelAnimationFrame(id);
+  };
   const stop = () => {
     if (!active) return;
     active = false;
-    if (rafId) cancelAnimationFrame(rafId);
+    cancelRaf();
+    cancelRaf = () => {};
     cancelTimer();
+    cancelTimer = () => {};
     collapsible.removeEventListener('transitionend', onEnd);
     unlistenWheel();
+    unlistenWheel = () => {};
     unlistenTouch();
+    unlistenTouch = () => {};
+    onFinish?.();
   };
   const onEnd = (e: TransitionEvent) => {
     if (e.target === collapsible && e.propertyName === 'grid-template-rows') {
@@ -658,9 +677,12 @@ function followElementWhileCollapsing(
     }
   };
   const tick = () => {
-    if (!active) return;
+    if (!active || !anchor.isConnected || !collapsible.isConnected) {
+      stop();
+      return;
+    }
     stepScroll();
-    rafId = requestAnimationFrame(tick);
+    cancelRaf = scheduleFrame(tick);
   };
 
   cancelTimer = scheduleFallback(() => {
@@ -673,7 +695,8 @@ function followElementWhileCollapsing(
     unlistenWheel = listen(window, 'wheel', stop, { passive: true, once: true });
     unlistenTouch = listen(window, 'touchstart', stop, { passive: true, once: true });
   }
-  rafId = requestAnimationFrame(tick);
+  onCleanup?.(stop);
+  cancelRaf = scheduleFrame(tick);
   return stop;
 }
 
@@ -683,7 +706,9 @@ export function createSongGroup(
   activePresets: SongProviderPreset[],
   groupType: 'OP' | 'ED',
   listen?: (target: EventTarget, type: string, listener: EventListener, options?: boolean | AddEventListenerOptions) => () => void,
-  timeout?: TimeoutFn
+  timeout?: TimeoutFn,
+  onCleanup?: (fn: CleanupFn) => void,
+  raf?: (fn: FrameRequestCallback) => CleanupFn
 ): HTMLDivElement {
   const g = document.createElement('div');
   g.className = 'daiya-anisongs-group';
@@ -701,7 +726,7 @@ export function createSongGroup(
 
   const initial = songs.slice(0, INITIAL_VISIBLE_SONGS);
   const rest = songs.slice(INITIAL_VISIBLE_SONGS);
-  initial.forEach((s) => g.appendChild(createSongCard(s, activePresets, groupType)));
+  initial.forEach((s) => g.appendChild(createSongCard(s, activePresets, groupType, timeout)));
 
   if (!rest.length) return g;
 
@@ -722,9 +747,13 @@ export function createSongGroup(
 
   let expanded = false;
   let stopFollow: (() => void) | null = null;
-  btn.addEventListener('click', () => {
+  let cleanupRegistered = false;
+  const stopCurrentFollow = () => {
     stopFollow?.();
     stopFollow = null;
+  };
+  btn.addEventListener('click', () => {
+    stopCurrentFollow();
     const startScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
     const startDocHeight = getDocumentHeight();
     const startBtnDocTop = btn.getBoundingClientRect().top + startScrollY;
@@ -736,7 +765,24 @@ export function createSongGroup(
     btn.textContent = expanded ? 'Show less' : showAllLabel;
     btn.setAttribute('aria-expanded', String(expanded));
     if (!expanded) {
-      stopFollow = followElementWhileCollapsing(btn, extraWrap, startScrollY, startDocHeight, startBtnDocTop, listen, timeout);
+      if (!cleanupRegistered && onCleanup) {
+        cleanupRegistered = true;
+        onCleanup(stopCurrentFollow);
+      }
+      stopFollow = followElementWhileCollapsing(
+        btn,
+        extraWrap,
+        startScrollY,
+        startDocHeight,
+        startBtnDocTop,
+        listen,
+        timeout,
+        undefined,
+        raf,
+        () => {
+          stopFollow = null;
+        }
+      );
     }
   });
 
@@ -907,69 +953,118 @@ defineModule({
       }
     }`;
 
-    const loadThemes = memo(async (id: string | number): Promise<ThemesGroup> => {
-      const hit = cache[String(id)];
-      if (hit && hit.expires > Date.now()) return hit.data;
+    let disposed = false;
+    const inFlight = new Map<string, SharedFlight<ThemesGroup>>();
 
-      const alQuery = `query ($id: Int) {
-        Media(id: $id) {
+    const loadThemes = (id: string | number, signal?: AbortSignal): Promise<ThemesGroup> => {
+      const key = String(id);
+      const hit = cache[key];
+      if (hit && hit.expires > Date.now()) {
+        if (signal?.aborted) return Promise.reject(createAbortError(signal));
+        return Promise.resolve(hit.data);
+      }
+
+      const alQuery = `query ($id: Int, $type: MediaType) {
+        Media(id: $id, type: $type) {
           title { userPreferred english romaji native }
           seasonYear
           season
         }
       }`;
 
-      const [themesRes, alRes] = await Promise.allSettled([
-        ctx.http.json(API, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'AL-Additions'
+      let flight = inFlight.get(key);
+      if (!flight) {
+        flight = createSharedFlight<ThemesGroup>({
+          start: async (flightSignal) => {
+            const [themesRes, alRes] = await Promise.allSettled([
+              ctx.http.json(API, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'AL-Additions'
+                },
+                data: JSON.stringify({
+                  query: atQuery,
+                  variables: { id: [Number(id)] }
+                }),
+                signal: flightSignal
+              }),
+              ctx.api.query(alQuery, { id: Number(id), type: 'ANIME' }, { signal: flightSignal })
+            ]);
+
+            if (flightSignal.aborted || disposed) {
+              throw createAbortError(flightSignal);
+            }
+
+            if (themesRes.status === 'rejected') throw themesRes.reason;
+            if (alRes.status === 'rejected' && isAbortError(alRes.reason)) {
+              throw alRes.reason;
+            }
+
+            const result = themesRes.value;
+            if (
+              Array.isArray(result?.errors) &&
+              result.errors.length &&
+              !Array.isArray(result?.data?.filterAnimeByExternalSite)
+            ) {
+              throw new Error(String(result.errors[0]?.message || 'AnimeThemes GraphQL error'));
+            }
+
+            const alOk = alRes.status === 'fulfilled';
+            const alMedia = alOk ? alRes.value?.Media : null;
+            const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite)
+              ? result.data.filterAnimeByExternalSite[0]
+              : null;
+
+            const animeName =
+              str(alMedia?.title?.userPreferred) ||
+              str(rawAnime?.title?.romaji) ||
+              str(rawAnime?.name) ||
+              document.querySelector('.header h1')?.textContent?.trim() ||
+              '';
+
+            const meta: AnimeMetaInfo = {
+              animeName,
+              animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
+              animeEn: str(alMedia?.title?.english) || animeName,
+              animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || '',
+              year: alMedia?.seasonYear || rawAnime?.year || '',
+              season: alMedia?.season || rawAnime?.season || ''
+            };
+
+            const data = groupThemes(rawAnime, meta);
+            if (!disposed && !flightSignal.aborted && alOk) {
+              const empty = !data.OP.length && !data.ED.length;
+              cache[key] = { expires: Date.now() + (empty ? EMPTY_TTL : TTL), data };
+              cacheStore.save();
+            }
+            return data;
           },
-          data: JSON.stringify({
-            query: atQuery,
-            variables: { id: [Number(id)] }
-          })
-        }),
-        ctx.api.query(alQuery, { id: Number(id) })
-      ]);
+          onEvict: (f) => {
+            if (inFlight.get(key) === f) inFlight.delete(key);
+          },
+          onSettled: (f) => {
+            if (inFlight.get(key) === f) inFlight.delete(key);
+          }
+        });
+        inFlight.set(key, flight);
+      }
 
-      const result = themesRes.status === 'fulfilled' ? themesRes.value : null;
-      const alMedia = alRes.status === 'fulfilled' ? alRes.value?.Media : null;
-      const rawAnime = Array.isArray(result?.data?.filterAnimeByExternalSite)
-        ? result.data.filterAnimeByExternalSite[0]
-        : null;
+      return flight.wait({
+        signal,
+        check: () => {
+          if (disposed) throw createAbortError(signal);
+        }
+      });
+    };
 
-      const animeName =
-        str(alMedia?.title?.userPreferred) ||
-        str(rawAnime?.title?.romaji) ||
-        str(rawAnime?.name) ||
-        document.querySelector('.header h1')?.textContent?.trim() ||
-        '';
-
-      const meta: AnimeMetaInfo = {
-        animeName,
-        animeRomaji: str(alMedia?.title?.romaji) || str(rawAnime?.title?.romaji) || str(rawAnime?.name) || animeName,
-        animeEn: str(alMedia?.title?.english) || animeName,
-        animeJp: str(alMedia?.title?.native) || str(rawAnime?.title?.native) || '',
-        year: alMedia?.seasonYear || rawAnime?.year || '',
-        season: alMedia?.season || rawAnime?.season || ''
-      };
-
-      const data = groupThemes(rawAnime, meta);
-      const empty = !data.OP.length && !data.ED.length;
-      cache[String(id)] = { expires: Date.now() + (empty ? EMPTY_TTL : TTL), data };
-      cacheStore.save();
-      return data;
-    });
-
-    function mount(
+    function buildRoot(
       state: { id: string; themes: ThemesGroup },
-      overview: HTMLElement,
-      listen: typeof ctx.listen = ctx.listen,
-      timeout: typeof ctx.timeout = ctx.timeout
-    ): void {
-      document.getElementById(ROOT)?.remove();
+      listen: typeof ctx.listen,
+      timeout: typeof ctx.timeout,
+      onCleanup: typeof ctx.onCleanup,
+      raf: typeof ctx.raf
+    ): HTMLElement {
       const config = getValidAniSongsConfig(ctx.get('aniSongsProviders'));
       const presetMap = new Map<string, SongProviderPreset>();
       config.presets.forEach((p) => presetMap.set(p.id, p));
@@ -981,11 +1076,11 @@ defineModule({
       const cols = document.createElement('div');
       cols.className = 'daiya-anisongs-columns';
       cols.append(
-        createSongGroup('Openings', state.themes.OP, activePresets, 'OP', listen, timeout),
-        createSongGroup('Endings', state.themes.ED, activePresets, 'ED', listen, timeout)
+        createSongGroup('Openings', state.themes.OP, activePresets, 'OP', listen, timeout, onCleanup, raf),
+        createSongGroup('Endings', state.themes.ED, activePresets, 'ED', listen, timeout, onCleanup, raf)
       );
       root.appendChild(cols);
-      overview.appendChild(root);
+      return root;
     }
 
     let backoff = { id: null as string | null, until: 0 };
@@ -996,23 +1091,35 @@ defineModule({
       document.getElementById(ROOT)?.remove();
       const mine: AnisongsState = { id, themes: null, busy: true };
       try {
-        const themes = await loadThemes(id, id);
+        const themes = await loadThemes(id, rc.signal);
         if (rc.signal.aborted) return;
         if (!themes.OP.length && !themes.ED.length) return;
         mine.themes = themes;
         const overview = await rc.waitForSelector('.overview', 10000);
         if (rc.signal.aborted || !overview) return;
-        mount(mine as { id: string; themes: ThemesGroup }, overview, rc.listen, rc.timeout);
-        rc.onCleanup(
-          ctx.onBodyMutation(() => {
-            if (!rc.signal.aborted && !document.getElementById(ROOT)) {
-              const ov = document.querySelector<HTMLElement>('.overview');
-              if (ov) mount(mine as { id: string; themes: ThemesGroup }, ov, rc.listen, rc.timeout);
-            }
-          })
-        );
+        let mountCleanups: CleanupFn[] = [];
+        rc.mount({
+          id: 'root',
+          anchor: '.overview',
+          position: 'beforeend',
+          ownUi: true,
+          create: () => {
+            for (const fn of mountCleanups.splice(0)) fn();
+            document.getElementById(ROOT)?.remove();
+            return buildRoot(
+              mine as { id: string; themes: ThemesGroup },
+              rc.listen,
+              rc.timeout,
+              (fn) => mountCleanups.push(fn),
+              rc.raf
+            );
+          },
+          onMount: () => () => {
+            for (const fn of mountCleanups.splice(0)) fn();
+          }
+        });
       } catch (err) {
-        if (rc.signal.aborted) return;
+        if (rc.signal.aborted || disposed || isAbortError(err)) return;
         ctx.log.error('Anisongs sync error:', err);
         backoff = { id, until: Date.now() + 30000 };
       } finally {
@@ -1020,6 +1127,11 @@ defineModule({
       }
     });
     ctx.onCleanup(() => {
+      disposed = true;
+      for (const flight of inFlight.values()) {
+        flight.controller.abort();
+      }
+      inFlight.clear();
       document.getElementById(ROOT)?.remove();
     });
   }

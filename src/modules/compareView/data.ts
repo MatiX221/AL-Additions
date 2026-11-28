@@ -26,8 +26,7 @@ export interface CompareState {
   isMutatingDOM: boolean;
   disposed: boolean;
   loadAbortState: { abort: boolean } | null;
-  resizeCleanup: (() => void) | null;
-  indicatorTimer: CleanupFn | null;
+  headerCleanup: CleanupFn | null;
   prefetchRelease: (() => void) | null;
 }
 
@@ -44,8 +43,7 @@ export function createCompareState(): CompareState {
     isMutatingDOM: false,
     disposed: false,
     loadAbortState: null,
-    resizeCleanup: null,
-    indicatorTimer: null,
+    headerCleanup: null,
     prefetchRelease: null
   };
 }
